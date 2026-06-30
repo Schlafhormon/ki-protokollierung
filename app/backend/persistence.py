@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +105,64 @@ def init_db(db_path: Path | None = None) -> None:
                 UNIQUE (session_id, speaker_id)
             );
 
+            CREATE TABLE IF NOT EXISTS speaker_profiles (
+                profile_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                scope TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                archived_at REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS speaker_embeddings (
+                embedding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL,
+                embedding_json TEXT,
+                embedding_blob BLOB,
+                model_name TEXT NOT NULL,
+                quality REAL,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (profile_id) REFERENCES speaker_profiles(profile_id)
+                    ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS speaker_observations (
+                observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                local_speaker_id TEXT NOT NULL,
+                profile_id TEXT,
+                confidence REAL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('suggested', 'confirmed', 'rejected', 'manual')
+                ),
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY (job_id) REFERENCES transcription_jobs(job_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (profile_id) REFERENCES speaker_profiles(profile_id)
+                    ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pipeline_jobs (
+                pipeline_job_id TEXT PRIMARY KEY,
+                session_id TEXT,
+                transcription_job_id TEXT,
+                status TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                progress INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                result_refs_json TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE SET NULL,
+                FOREIGN KEY (transcription_job_id) REFERENCES transcription_jobs(job_id)
+                    ON DELETE SET NULL
+            );
+
             CREATE TABLE IF NOT EXISTS summaries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -143,6 +202,16 @@ def init_db(db_path: Path | None = None) -> None:
                 ON transcript_lines(job_id);
             CREATE INDEX IF NOT EXISTS idx_session_transcript_lines_session_id
                 ON session_transcript_lines(session_id);
+            CREATE INDEX IF NOT EXISTS idx_speaker_profiles_scope
+                ON speaker_profiles(scope);
+            CREATE INDEX IF NOT EXISTS idx_speaker_embeddings_profile_id
+                ON speaker_embeddings(profile_id);
+            CREATE INDEX IF NOT EXISTS idx_speaker_observations_job_session
+                ON speaker_observations(job_id, session_id);
+            CREATE INDEX IF NOT EXISTS idx_speaker_observations_profile_id
+                ON speaker_observations(profile_id);
+            CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_session_id
+                ON pipeline_jobs(session_id);
             """
         )
         existing_columns = {
@@ -178,6 +247,443 @@ def _from_json(value: str | None) -> Any:
     if not value:
         return None
     return json.loads(value)
+
+
+def _speaker_profile_from_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(row) if row is not None else None
+
+
+def create_speaker_profile(
+    display_name: str,
+    *,
+    scope: str | None = None,
+    profile_id: str | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Create a global speaker profile after explicit user opt-in."""
+    now = time.time()
+    profile_id = profile_id or str(uuid.uuid4())
+    with connect(db_path) as db:
+        db.execute(
+            """
+            INSERT INTO speaker_profiles (
+                profile_id, display_name, scope, created_at, updated_at, archived_at
+            )
+            VALUES (?, ?, ?, ?, ?, NULL)
+            """,
+            (profile_id, display_name, scope, now, now),
+        )
+    profile = load_speaker_profile(profile_id, db_path=db_path)
+    if profile is None:
+        raise RuntimeError("Speaker profile could not be loaded after creation")
+    return profile
+
+
+def rename_speaker_profile(
+    profile_id: str,
+    display_name: str,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    now = time.time()
+    with connect(db_path) as db:
+        db.execute(
+            """
+            UPDATE speaker_profiles
+            SET display_name = ?, updated_at = ?
+            WHERE profile_id = ?
+            """,
+            (display_name, now, profile_id),
+        )
+    return load_speaker_profile(profile_id, include_archived=True, db_path=db_path)
+
+
+def archive_speaker_profile(
+    profile_id: str,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    now = time.time()
+    with connect(db_path) as db:
+        db.execute(
+            """
+            UPDATE speaker_profiles
+            SET archived_at = COALESCE(archived_at, ?), updated_at = ?
+            WHERE profile_id = ?
+            """,
+            (now, now, profile_id),
+        )
+    return load_speaker_profile(profile_id, include_archived=True, db_path=db_path)
+
+
+def load_speaker_profile(
+    profile_id: str,
+    *,
+    include_archived: bool = False,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    with connect(db_path) as db:
+        row = db.execute(
+            """
+            SELECT *
+            FROM speaker_profiles
+            WHERE profile_id = ?
+              AND (? OR archived_at IS NULL)
+            """,
+            (profile_id, 1 if include_archived else 0),
+        ).fetchone()
+    return _speaker_profile_from_row(row)
+
+
+def load_speaker_profiles(
+    *,
+    scope: str | None = None,
+    include_archived: bool = False,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    conditions = []
+    params: list[Any] = []
+    if scope is not None:
+        conditions.append("scope = ?")
+        params.append(scope)
+    if not include_archived:
+        conditions.append("archived_at IS NULL")
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    with connect(db_path) as db:
+        rows = db.execute(
+            f"""
+            SELECT *
+            FROM speaker_profiles
+            {where}
+            ORDER BY display_name, created_at
+            """,
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def save_speaker_embedding(
+    profile_id: str,
+    embedding: Any,
+    *,
+    model_name: str,
+    quality: float | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Store one speaker embedding without deriving or logging personal data."""
+    embedding_json = None
+    embedding_blob = None
+    if isinstance(embedding, bytes):
+        embedding_blob = sqlite3.Binary(embedding)
+    else:
+        embedding_json = _to_json(embedding)
+
+    now = time.time()
+    with connect(db_path) as db:
+        cursor = db.execute(
+            """
+            INSERT INTO speaker_embeddings (
+                profile_id, embedding_json, embedding_blob, model_name, quality,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (profile_id, embedding_json, embedding_blob, model_name, quality, now),
+        )
+        embedding_id = int(cursor.lastrowid)
+
+    embeddings = load_speaker_embeddings(profile_id, db_path=db_path)
+    for item in embeddings:
+        if item["embedding_id"] == embedding_id:
+            return item
+    raise RuntimeError("Speaker embedding could not be loaded after creation")
+
+
+def load_speaker_embeddings(
+    profile_id: str,
+    *,
+    model_name: str | None = None,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    conditions = ["profile_id = ?"]
+    params: list[Any] = [profile_id]
+    if model_name is not None:
+        conditions.append("model_name = ?")
+        params.append(model_name)
+
+    with connect(db_path) as db:
+        rows = db.execute(
+            f"""
+            SELECT *
+            FROM speaker_embeddings
+            WHERE {' AND '.join(conditions)}
+            ORDER BY created_at, embedding_id
+            """,
+            params,
+        ).fetchall()
+
+    embeddings = []
+    for row in rows:
+        item = dict(row)
+        blob = item.pop("embedding_blob")
+        embedding_json = item.pop("embedding_json")
+        item["embedding"] = (
+            bytes(blob) if blob is not None else _from_json(embedding_json)
+        )
+        embeddings.append(item)
+    return embeddings
+
+
+def save_speaker_observation(
+    *,
+    job_id: str,
+    session_id: str,
+    local_speaker_id: str,
+    profile_id: str | None = None,
+    confidence: float | None = None,
+    status: str = "suggested",
+    observation_id: int | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    now = time.time()
+    with connect(db_path) as db:
+        if observation_id is None:
+            cursor = db.execute(
+                """
+                INSERT INTO speaker_observations (
+                    job_id, session_id, local_speaker_id, profile_id, confidence,
+                    status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    session_id,
+                    local_speaker_id,
+                    profile_id,
+                    confidence,
+                    status,
+                    now,
+                    now,
+                ),
+            )
+            observation_id = int(cursor.lastrowid)
+        else:
+            db.execute(
+                """
+                UPDATE speaker_observations
+                SET job_id = ?,
+                    session_id = ?,
+                    local_speaker_id = ?,
+                    profile_id = ?,
+                    confidence = ?,
+                    status = ?,
+                    updated_at = ?
+                WHERE observation_id = ?
+                """,
+                (
+                    job_id,
+                    session_id,
+                    local_speaker_id,
+                    profile_id,
+                    confidence,
+                    status,
+                    now,
+                    observation_id,
+                ),
+            )
+
+    observation = load_speaker_observation(observation_id, db_path=db_path)
+    if observation is None:
+        raise RuntimeError("Speaker observation could not be loaded after save")
+    return observation
+
+
+def load_speaker_observation(
+    observation_id: int,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    with connect(db_path) as db:
+        row = db.execute(
+            "SELECT * FROM speaker_observations WHERE observation_id = ?",
+            (observation_id,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def load_speaker_observations(
+    *,
+    job_id: str | None = None,
+    session_id: str | None = None,
+    profile_id: str | None = None,
+    status: str | None = None,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    conditions = []
+    params: list[Any] = []
+    if job_id is not None:
+        conditions.append("job_id = ?")
+        params.append(job_id)
+    if session_id is not None:
+        conditions.append("session_id = ?")
+        params.append(session_id)
+    if profile_id is not None:
+        conditions.append("profile_id = ?")
+        params.append(profile_id)
+    if status is not None:
+        conditions.append("status = ?")
+        params.append(status)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    with connect(db_path) as db:
+        rows = db.execute(
+            f"""
+            SELECT *
+            FROM speaker_observations
+            {where}
+            ORDER BY created_at, observation_id
+            """,
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def confirm_speaker_observation(
+    observation_id: int,
+    *,
+    profile_id: str | None = None,
+    confidence: float | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    now = time.time()
+    with connect(db_path) as db:
+        db.execute(
+            """
+            UPDATE speaker_observations
+            SET status = 'confirmed',
+                profile_id = COALESCE(?, profile_id),
+                confidence = COALESCE(?, confidence),
+                updated_at = ?
+            WHERE observation_id = ?
+            """,
+            (profile_id, confidence, now, observation_id),
+        )
+    return load_speaker_observation(observation_id, db_path=db_path)
+
+
+def reject_speaker_observation(
+    observation_id: int,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    now = time.time()
+    with connect(db_path) as db:
+        db.execute(
+            """
+            UPDATE speaker_observations
+            SET status = 'rejected',
+                updated_at = ?
+            WHERE observation_id = ?
+            """,
+            (now, observation_id),
+        )
+    return load_speaker_observation(observation_id, db_path=db_path)
+
+
+def save_pipeline_job(
+    pipeline_job_id: str,
+    job_data: dict[str, Any],
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    now = time.time()
+    created_at = float(job_data.get("created_at") or now)
+    updated_at = float(job_data.get("updated_at") or now)
+
+    with connect(db_path) as db:
+        db.execute(
+            """
+            INSERT INTO pipeline_jobs (
+                pipeline_job_id, session_id, transcription_job_id, status, stage,
+                progress, error, result_refs_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(pipeline_job_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                transcription_job_id = excluded.transcription_job_id,
+                status = excluded.status,
+                stage = excluded.stage,
+                progress = excluded.progress,
+                error = excluded.error,
+                result_refs_json = excluded.result_refs_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                pipeline_job_id,
+                job_data.get("session_id"),
+                job_data.get("transcription_job_id"),
+                job_data.get("status", "pending"),
+                job_data.get("stage", "pending"),
+                int(job_data.get("progress", 0)),
+                job_data.get("error"),
+                _to_json(job_data.get("result_refs") or {}),
+                created_at,
+                updated_at,
+            ),
+        )
+
+    job = load_pipeline_job(pipeline_job_id, db_path=db_path)
+    if job is None:
+        raise RuntimeError("Pipeline job could not be loaded after save")
+    return job
+
+
+def load_pipeline_job(
+    pipeline_job_id: str,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    with connect(db_path) as db:
+        row = db.execute(
+            "SELECT * FROM pipeline_jobs WHERE pipeline_job_id = ?",
+            (pipeline_job_id,),
+        ).fetchone()
+    if row is None:
+        return None
+
+    job = dict(row)
+    job["result_refs"] = _from_json(job.pop("result_refs_json", None)) or {}
+    return job
+
+
+def load_pipeline_jobs(
+    *,
+    session_id: str | None = None,
+    status: str | None = None,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    conditions = []
+    params: list[Any] = []
+    if session_id is not None:
+        conditions.append("session_id = ?")
+        params.append(session_id)
+    if status is not None:
+        conditions.append("status = ?")
+        params.append(status)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    with connect(db_path) as db:
+        rows = db.execute(
+            f"""
+            SELECT pipeline_job_id
+            FROM pipeline_jobs
+            {where}
+            ORDER BY created_at
+            """,
+            params,
+        ).fetchall()
+    return [
+        job
+        for row in rows
+        if (job := load_pipeline_job(row["pipeline_job_id"], db_path=db_path))
+        is not None
+    ]
 
 
 def save_job(job_id: str, job_data: dict[str, Any], db_path: Path | None = None) -> None:

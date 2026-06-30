@@ -27,10 +27,162 @@ def test_persistence_initializes_expected_tables(tmp_path, monkeypatch):
         "tops",
         "assignments",
         "speaker_names",
+        "speaker_profiles",
+        "speaker_embeddings",
+        "speaker_observations",
+        "pipeline_jobs",
         "summaries",
         "summary_reviews",
         "session_transcript_lines",
     }.issubset(tables)
+
+
+def test_persistence_migration_is_idempotent_and_keeps_session_state(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "sessions.sqlite3"
+    monkeypatch.setenv("PERSISTENCE_DB_PATH", str(db_path))
+
+    persistence.init_db()
+    persistence.save_session(
+        "session-idempotent",
+        {
+            "current_step": 2,
+            "speaker_names": {"SPEAKER_00": "Alice"},
+            "tops": ["Begrüßung"],
+            "assignments": [0],
+        },
+    )
+
+    persistence.init_db()
+    persistence.init_db()
+
+    session = persistence.load_session("session-idempotent")
+
+    assert session["current_step"] == 2
+    assert session["speaker_names"] == {"SPEAKER_00": "Alice"}
+    assert session["tops"] == ["Begrüßung"]
+    assert session["assignments"] == [0]
+
+
+def test_speaker_profiles_embeddings_observations_and_pipeline_jobs_roundtrip(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "sessions.sqlite3"
+    monkeypatch.setenv("PERSISTENCE_DB_PATH", str(db_path))
+    persistence.init_db()
+
+    persistence.save_job(
+        "job-speakers",
+        {
+            "created_at": 1.0,
+            "updated_at": 1.0,
+            "session_id": "session-speakers",
+            "status": "completed",
+            "progress": 100,
+            "message": "Transkription abgeschlossen",
+            "transcript": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Hallo",
+                    "start": 0.0,
+                    "end": 1.0,
+                }
+            ],
+        },
+    )
+    persistence.save_session(
+        "session-speakers",
+        {
+            "job_id": "job-speakers",
+            "speaker_names": {"SPEAKER_00": "Alice lokal"},
+            "tops": ["TOP 1"],
+            "assignments": [0],
+        },
+    )
+
+    profile = persistence.create_speaker_profile(
+        "Alice Global",
+        scope="committee-1",
+        profile_id="profile-alice",
+    )
+    renamed = persistence.rename_speaker_profile("profile-alice", "Alice Beispiel")
+    embedding = persistence.save_speaker_embedding(
+        "profile-alice",
+        [0.1, 0.2, 0.3],
+        model_name="test-speaker-model",
+        quality=0.87,
+    )
+    blob_embedding = persistence.save_speaker_embedding(
+        "profile-alice",
+        b"binary-embedding",
+        model_name="test-speaker-model-bin",
+    )
+
+    observation = persistence.save_speaker_observation(
+        job_id="job-speakers",
+        session_id="session-speakers",
+        local_speaker_id="SPEAKER_00",
+        profile_id="profile-alice",
+        confidence=0.76,
+        status="suggested",
+    )
+    confirmed = persistence.confirm_speaker_observation(
+        observation["observation_id"],
+        confidence=0.91,
+    )
+    rejected = persistence.reject_speaker_observation(observation["observation_id"])
+
+    pipeline_job = persistence.save_pipeline_job(
+        "pipeline-1",
+        {
+            "session_id": "session-speakers",
+            "transcription_job_id": "job-speakers",
+            "status": "processing",
+            "stage": "assignment",
+            "progress": 40,
+            "result_refs": {
+                "transcription_job_id": "job-speakers",
+                "session_id": "session-speakers",
+            },
+        },
+    )
+    loaded_pipeline_job = persistence.load_pipeline_job("pipeline-1")
+
+    assert profile["display_name"] == "Alice Global"
+    assert renamed["display_name"] == "Alice Beispiel"
+    assert persistence.load_speaker_profile("profile-alice")["scope"] == "committee-1"
+    assert persistence.load_speaker_profiles(scope="committee-1")[0]["profile_id"] == (
+        "profile-alice"
+    )
+    assert embedding["embedding"] == [0.1, 0.2, 0.3]
+    assert embedding["model_name"] == "test-speaker-model"
+    assert blob_embedding["embedding"] == b"binary-embedding"
+    assert persistence.load_speaker_embeddings(
+        "profile-alice",
+        model_name="test-speaker-model",
+    )[0]["quality"] == 0.87
+    assert confirmed["status"] == "confirmed"
+    assert confirmed["confidence"] == 0.91
+    assert rejected["status"] == "rejected"
+    assert persistence.load_speaker_observations(
+        job_id="job-speakers",
+        session_id="session-speakers",
+    )[0]["local_speaker_id"] == "SPEAKER_00"
+    assert pipeline_job["progress"] == 40
+    assert loaded_pipeline_job["result_refs"]["session_id"] == "session-speakers"
+
+    archived = persistence.archive_speaker_profile("profile-alice")
+
+    assert archived["archived_at"] is not None
+    assert persistence.load_speaker_profile("profile-alice") is None
+    assert persistence.load_speaker_profile(
+        "profile-alice",
+        include_archived=True,
+    )["display_name"] == "Alice Beispiel"
+    assert persistence.load_session("session-speakers")["speaker_names"] == {
+        "SPEAKER_00": "Alice lokal"
+    }
 
 
 def test_transcription_job_is_restored_from_sqlite_after_memory_cache_is_cleared(
