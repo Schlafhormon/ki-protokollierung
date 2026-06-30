@@ -11,7 +11,7 @@ import mimetypes
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import (
     FastAPI,
@@ -24,7 +24,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from transcribe import (
     transcribe_audio,
@@ -38,6 +38,15 @@ from transcribe import (
 from summarize import summarize_segment
 from extract_tops import extract_tops_from_pdf
 from telemetry import TelemetryCollector
+from persistence import (
+    init_db,
+    load_job,
+    load_jobs,
+    load_session,
+    mark_interrupted_jobs,
+    save_job,
+    save_session,
+)
 
 # Configure logging with timestamps
 logging.basicConfig(
@@ -54,7 +63,18 @@ async def lifespan(app: FastAPI):
     FastAPI lifespan event handler.
     Loads all ML models at startup and cleans up on shutdown.
     """
-    logger.info("Server starting up - loading transcription models...")
+    logger.info("Server starting up - initializing persistence...")
+
+    try:
+        init_db()
+        mark_interrupted_jobs()
+        jobs.clear()
+        jobs.update(load_jobs())
+        logger.info(f"Loaded {len(jobs)} persisted jobs")
+    except Exception as e:
+        logger.error(f"Failed to initialize persistence: {e}", exc_info=True)
+
+    logger.info("Loading transcription models...")
 
     try:
         # Load models at startup (this takes several minutes)
@@ -102,6 +122,9 @@ app.add_middleware(
 # Job cleanup configuration
 JOB_MAX_AGE_SECONDS = int(os.environ.get("JOB_MAX_AGE_SECONDS", "7200"))  # 2 hours
 JOB_MAX_COUNT = int(os.environ.get("JOB_MAX_COUNT", "100"))
+DELETE_UPLOADS_ON_JOB_CLEANUP = (
+    os.environ.get("DELETE_UPLOADS_ON_JOB_CLEANUP", "false").lower() == "true"
+)
 
 # In-memory storage for jobs (in production, use Redis or database)
 jobs: OrderedDict = OrderedDict()
@@ -133,10 +156,50 @@ def is_allowed_pdf_file(filename: str | None, content_type: str | None) -> bool:
     return content_type == "application/pdf" or (filename or "").lower().endswith(".pdf")
 
 
+def persist_job_state(job_id: str) -> None:
+    """Persist a cached job without interrupting the request flow on DB errors."""
+    job = jobs.get(job_id)
+    if not job:
+        return
+    try:
+        job["updated_at"] = time.time()
+        save_job(job_id, job)
+    except Exception as e:
+        logger.warning(f"Failed to persist job {job_id}: {e}")
+
+
+def get_job_from_cache_or_db(job_id: str) -> dict[str, Any] | None:
+    job = jobs.get(job_id)
+    if job is not None:
+        return job
+
+    try:
+        job = load_job(job_id)
+    except Exception as e:
+        logger.warning(f"Failed to load job {job_id} from persistence: {e}")
+        return None
+
+    if job is not None:
+        jobs[job_id] = job
+    return job
+
+
+def get_audio_path_for_job(job: dict[str, Any]) -> str | None:
+    """Return the persisted upload path used for playback, if available."""
+    return job.get("audio_path") or job.get("file_path")
+
+
+def audio_url_for_job(job_id: str, job: dict[str, Any]) -> str | None:
+    audio_path = get_audio_path_for_job(job)
+    if audio_path and os.path.exists(audio_path):
+        return f"/api/audio/{job_id}"
+    return None
+
+
 def cleanup_old_jobs() -> int:
     """
     Remove old or excess jobs from memory.
-    Also cleans up associated audio files.
+    Upload files are retained by default so persisted sessions can be restored.
     Returns number of jobs removed.
     """
     now = time.time()
@@ -144,6 +207,8 @@ def cleanup_old_jobs() -> int:
 
     def cleanup_job_audio(job_id: str, job_data: dict) -> None:
         """Clean up audio file associated with a job."""
+        if not DELETE_UPLOADS_ON_JOB_CLEANUP:
+            return
         file_paths = {
             path
             for path in (job_data.get("audio_path"), job_data.get("file_path"))
@@ -192,6 +257,12 @@ class TranscriptLine(BaseModel):
     end: float  # End time in seconds
 
 
+class AudioMetadata(BaseModel):
+    filename: Optional[str] = None
+    content_type: Optional[str] = None
+    size_bytes: Optional[int] = None
+
+
 class TranscriptionJob(BaseModel):
     job_id: str
     status: str  # "pending", "processing", "completed", "failed"
@@ -199,7 +270,34 @@ class TranscriptionJob(BaseModel):
     message: str
     transcript: Optional[List[TranscriptLine]] = None
     audio_url: Optional[str] = None  # URL to stream audio for playback
+    audio_metadata: Optional[AudioMetadata] = None
     error: Optional[str] = None
+
+
+class SessionSaveRequest(BaseModel):
+    session_id: Optional[str] = None
+    job_id: Optional[str] = None
+    current_step: Optional[int] = None
+    tops: List[str] = Field(default_factory=list)
+    assignments: List[Optional[int]] = Field(default_factory=list)
+    speaker_names: Dict[str, str] = Field(default_factory=dict)
+    summaries: Dict[int, str] = Field(default_factory=dict)
+    skipped_assignment: bool = False
+
+
+class SessionResponse(BaseModel):
+    session_id: str
+    job_id: Optional[str] = None
+    current_step: Optional[int] = None
+    tops: List[str] = Field(default_factory=list)
+    assignments: List[Optional[int]] = Field(default_factory=list)
+    speaker_names: Dict[str, str] = Field(default_factory=dict)
+    summaries: Dict[int, str] = Field(default_factory=dict)
+    skipped_assignment: bool = False
+    transcript: Optional[List[TranscriptLine]] = None
+    audio_url: Optional[str] = None
+    audio_metadata: Optional[AudioMetadata] = None
+    job: Optional[TranscriptionJob] = None
 
 
 class SummarizeRequest(BaseModel):
@@ -234,6 +332,63 @@ class SessionCompleteResponse(BaseModel):
     message: str
 
 
+def build_transcription_job_response(
+    job_id: str, job: dict[str, Any]
+) -> TranscriptionJob:
+    audio_metadata = None
+    if any(
+        job.get(key)
+        for key in ("audio_filename", "audio_content_type", "audio_size_bytes")
+    ):
+        audio_metadata = AudioMetadata(
+            filename=job.get("audio_filename"),
+            content_type=job.get("audio_content_type"),
+            size_bytes=job.get("audio_size_bytes"),
+        )
+
+    return TranscriptionJob(
+        job_id=job_id,
+        status=job["status"],
+        progress=job["progress"],
+        message=job["message"],
+        transcript=(
+            [TranscriptLine(**line) for line in job["transcript"]]
+            if job.get("transcript")
+            else None
+        ),
+        audio_url=audio_url_for_job(job_id, job),
+        audio_metadata=audio_metadata,
+        error=job.get("error"),
+    )
+
+
+def build_session_response(session: dict[str, Any]) -> SessionResponse:
+    job_id = session.get("job_id")
+    job = get_job_from_cache_or_db(job_id) if job_id else None
+    job_response = build_transcription_job_response(job_id, job) if job else None
+
+    return SessionResponse(
+        session_id=session["session_id"],
+        job_id=job_id,
+        current_step=session.get("current_step"),
+        tops=session.get("tops") or [],
+        assignments=session.get("assignments") or [],
+        speaker_names=session.get("speaker_names") or {},
+        summaries=session.get("summaries") or {},
+        skipped_assignment=bool(session.get("skipped_assignment")),
+        transcript=job_response.transcript if job_response else None,
+        audio_url=job_response.audio_url if job_response else None,
+        audio_metadata=job_response.audio_metadata if job_response else None,
+        job=job_response,
+    )
+
+
+def model_to_dict(model: BaseModel) -> dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
+
 # ----- Endpoints -----
 
 
@@ -255,10 +410,42 @@ async def health_check():
     return {"status": "healthy", "models_loaded": True, "version": "0.1.0"}
 
 
+@app.post("/api/sessions", response_model=SessionResponse)
+async def create_or_save_session(request: SessionSaveRequest):
+    """
+    Create or save a persisted editing session.
+
+    This stores user-editable state only: TOPs, line assignments, speaker display
+    names, summaries and the linked transcription job. Audio bytes are not copied.
+    """
+    session_id = request.session_id or str(uuid.uuid4())
+    session = save_session(session_id, model_to_dict(request))
+    return build_session_response(session)
+
+
+@app.put("/api/sessions/{session_id}", response_model=SessionResponse)
+async def save_existing_session(session_id: str, request: SessionSaveRequest):
+    """Save a persisted editing session under a known session ID."""
+    state = model_to_dict(request)
+    state["session_id"] = session_id
+    session = save_session(session_id, state)
+    return build_session_response(session)
+
+
+@app.get("/api/sessions/{session_id}", response_model=SessionResponse)
+async def get_session(session_id: str):
+    """Load a persisted editing session and its linked transcription job."""
+    session = load_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session nicht gefunden")
+    return build_session_response(session)
+
+
 @app.post("/api/transcribe", response_model=TranscriptionJob)
 async def start_transcription(
     background_tasks: BackgroundTasks,
     audio: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
 ):
     """
     Upload audio file and start transcription job.
@@ -298,13 +485,20 @@ async def start_transcription(
     # Initialize job with timestamp
     jobs[job_id] = {
         "created_at": time.time(),
+        "updated_at": time.time(),
+        "session_id": session_id,
         "status": "pending",
         "progress": 0,
         "message": "Audio hochgeladen",
         "file_path": str(file_path),
+        "audio_path": str(file_path),
+        "audio_filename": audio.filename,
+        "audio_content_type": audio.content_type,
+        "audio_size_bytes": len(content),
         "transcript": None,
         "error": None,
     }
+    persist_job_state(job_id)
 
     # Cleanup old jobs to prevent memory buildup
     cleanup_old_jobs()
@@ -328,30 +522,11 @@ async def get_transcription_status(job_id: str):
     """
     Get status of transcription job.
     """
-    if job_id not in jobs:
+    job = get_job_from_cache_or_db(job_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Job nicht gefunden")
 
-    job = jobs[job_id]
-
-    # Generate audio URL if audio file is available
-    audio_url = None
-    audio_path = job.get("audio_path")
-    if audio_path and os.path.exists(audio_path):
-        audio_url = f"/api/audio/{job_id}"
-
-    return TranscriptionJob(
-        job_id=job_id,
-        status=job["status"],
-        progress=job["progress"],
-        message=job["message"],
-        transcript=(
-            [TranscriptLine(**line) for line in job["transcript"]]
-            if job["transcript"]
-            else None
-        ),
-        audio_url=audio_url,
-        error=job["error"],
-    )
+    return build_transcription_job_response(job_id, job)
 
 
 @app.get("/api/audio/{job_id}")
@@ -363,11 +538,11 @@ async def stream_audio(
     Stream audio file for a transcription job.
     Supports HTTP Range requests for efficient seeking.
     """
-    if job_id not in jobs:
+    job = get_job_from_cache_or_db(job_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Job nicht gefunden")
 
-    job = jobs[job_id]
-    audio_path = job.get("audio_path")
+    audio_path = get_audio_path_for_job(job)
 
     if not audio_path or not os.path.exists(audio_path):
         raise HTTPException(status_code=404, detail="Audio nicht mehr verfügbar")
@@ -515,7 +690,7 @@ async def report_session_complete(request: SessionCompleteRequest):
     logger.info(f"Received session complete report for job: {request.job_id}")
 
     # Get job data
-    job = jobs.get(request.job_id)
+    job = get_job_from_cache_or_db(request.job_id)
     if not job:
         logger.warning(f"Job {request.job_id} not found for telemetry")
         # Still send telemetry with available data
@@ -582,16 +757,25 @@ def run_transcription(job_id: str, file_path: str, models: TranscriptionModels):
     """
     logger.info(f"[Job {job_id}] Background task started")
     try:
+        if job_id not in jobs:
+            persisted_job = load_job(job_id)
+            if persisted_job:
+                jobs[job_id] = persisted_job
+        if job_id not in jobs:
+            raise RuntimeError("Job nicht gefunden")
+
         # Update progress
         jobs[job_id]["status"] = "processing"
         jobs[job_id]["progress"] = 10
         jobs[job_id]["message"] = "Transkription wird vorbereitet..."
+        persist_job_state(job_id)
         logger.info(f"[Job {job_id}] Status: processing, preparing transcription...")
 
         # Run transcription with pre-loaded models
         def progress_callback(progress: int, message: str):
             jobs[job_id]["progress"] = progress
             jobs[job_id]["message"] = message
+            persist_job_state(job_id)
             logger.info(f"[Job {job_id}] Progress: {progress}% - {message}")
 
         # Time the transcription
@@ -610,7 +794,7 @@ def run_transcription(job_id: str, file_path: str, models: TranscriptionModels):
         jobs[job_id]["progress"] = 100
         jobs[job_id]["message"] = "Transkription abgeschlossen"
         jobs[job_id]["transcript"] = transcript
-        # Keep audio_path for streaming playback (will be cleaned up when job expires)
+        # Keep the existing upload path for streaming playback.
         jobs[job_id]["audio_path"] = file_path
 
         # Store telemetry data for later reporting
@@ -622,6 +806,7 @@ def run_transcription(job_id: str, file_path: str, models: TranscriptionModels):
             "whisper_model": WHISPER_MODEL,
             "whisper_batch_size": WHISPER_BATCH_SIZE,
         }
+        persist_job_state(job_id)
 
         logger.info(
             f"[Job {job_id}] Transcription completed successfully with {transcript_line_count} lines"
@@ -629,9 +814,11 @@ def run_transcription(job_id: str, file_path: str, models: TranscriptionModels):
 
     except Exception as e:
         logger.error(f"[Job {job_id}] Transcription failed: {str(e)}", exc_info=True)
-        jobs[job_id]["status"] = "failed"
-        jobs[job_id]["error"] = str(e)
-        jobs[job_id]["message"] = f"Fehler: {str(e)}"
+        if job_id in jobs:
+            jobs[job_id]["status"] = "failed"
+            jobs[job_id]["error"] = str(e)
+            jobs[job_id]["message"] = f"Fehler: {str(e)}"
+            persist_job_state(job_id)
 
         # Clean up GPU memory even on failure
         try:

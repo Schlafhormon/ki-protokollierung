@@ -31,6 +31,7 @@ def test_cleanup_old_jobs_removes_expired_jobs_and_upload_files(tmp_path, monkey
     main.jobs.clear()
     monkeypatch.setattr(main, "JOB_MAX_AGE_SECONDS", 60)
     monkeypatch.setattr(main, "JOB_MAX_COUNT", 10)
+    monkeypatch.setattr(main, "DELETE_UPLOADS_ON_JOB_CLEANUP", True)
 
     now = time.time()
     main.jobs["old"] = {
@@ -57,6 +58,7 @@ def test_cleanup_old_jobs_enforces_max_count(tmp_path, monkeypatch):
     main.jobs.clear()
     monkeypatch.setattr(main, "JOB_MAX_AGE_SECONDS", 3600)
     monkeypatch.setattr(main, "JOB_MAX_COUNT", 2)
+    monkeypatch.setattr(main, "DELETE_UPLOADS_ON_JOB_CLEANUP", True)
 
     files = []
     for index in range(3):
