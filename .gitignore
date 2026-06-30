@@ -1,17 +1,78 @@
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Environment files
+.env
+.env.*
+!.env.example
+!app/**/.env.example
+
+# Logs and local diagnostics
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
 # Python-generated files
 __pycache__/
 *.py[oc]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
 
-# Virtual environments
-.venv
-.DS_Store
-.env
-examples/
+# Virtual environments and package caches
+.venv/
+venv/
+env/
+.uv-cache/
+
+# Frontend build/cache artifacts
+node_modules/
+app/frontend/node_modules/
+app/frontend/dist/
+app/frontend/dist-ssr/
+app/frontend/.vite/
+*.tsbuildinfo
+
+# Runtime uploads, caches, and generated telemetry backups
 uploads/
+app/backend/uploads/
+telemetry_backup/
+app/backend/telemetry_backup/
+app/**/.cache/
+
+# Local backups and temporary files
+*.bak
+*.backup
+*.orig
+*.tmp
+*.temp
+*.swp
+*~
+
+# Local sample data and research outputs
+examples/
+data/
+scripts/research/data/
+scripts/research/**/*_moderator.txt
+scripts/research/**/*_moderator_indexed.json
+scripts/research/**/*_boundaries*.json
+scripts/research/**/generated_protocol*.txt
+scripts/research/**/segmented_transcript*.txt
+scripts/research/**/llm_summarised_transcript*.txt
 
 # Kubernetes secrets (keep example templates)
 k8s/secrets/*.yaml

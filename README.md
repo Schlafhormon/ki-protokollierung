@@ -290,10 +290,13 @@ protokollierungsassistenz/
 ├── app/
 │   ├── frontend/          # React + TypeScript web application
 │   └── backend/           # FastAPI Python backend
-├── scripts/               # Setup and utility scripts
+├── scripts/               # Runtime helper scripts used by Compose
+│   └── research/          # Non-production research prototypes and archives
 ├── .github/workflows/     # CI/CD for building Docker images
 └── docker-compose.yml     # Production deployment
 ```
+
+Research scripts under `scripts/research/` are not part of the production application path. They may contain local sample paths and require manual input/data setup before use.
 
 ### Pre-built Images
 
