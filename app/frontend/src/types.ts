@@ -161,6 +161,21 @@ export interface AssignmentSuggestionsResponse {
   uncertain_count: number;
 }
 
+export interface AgendaDetectionRequest {
+  tops?: string[];
+  transcript: TranscriptLine[];
+  model?: string;
+  systemPrompt?: string;
+}
+
+export interface AgendaDetectionResponse {
+  tops: string[];
+  assignments: (number | null)[];
+  segments: AssignmentSuggestionSegment[];
+  strategy: string;
+  uncertain_count: number;
+}
+
 export interface ExportMetadata {
   committee: string;
   date: string;
@@ -209,10 +224,13 @@ export interface AssignmentStepProps {
   onNext: () => void;
   onBack: () => void;
   tops: string[];
+  setTops: (tops: string[]) => void;
   transcript: TranscriptLine[];
   setTranscript: (transcript: TranscriptLine[]) => void;
   assignments: (number | null)[];
   setAssignments: (assignments: (number | null)[]) => void;
+  agendaDetection?: AgendaDetectionResponse | null;
+  agendaDetectionError?: string | null;
   audioUrl?: string;  // URL to stream audio for playback
   speakerNames: Record<string, string>;
   setSpeakerNames: (names: Record<string, string>) => void;

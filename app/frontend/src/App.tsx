@@ -13,12 +13,14 @@ import {
   startTranscription as apiStartTranscription,
   pollTranscription,
   generateSummary,
+  detectAgenda,
   checkBackendHealth,
   reportSessionComplete,
   saveSession,
   loadSession,
 } from "./api";
 import type {
+  AgendaDetectionResponse,
   ExportMetadata,
   SessionResponse,
   SessionSavePayload,
@@ -143,6 +145,8 @@ export default function App() {
   const [tops, setTops] = useState<string[]>(EMPTY_TOPS);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [assignments, setAssignments] = useState<(number | null)[]>([]);
+  const [agendaDetection, setAgendaDetection] = useState<AgendaDetectionResponse | null>(null);
+  const [agendaDetectionError, setAgendaDetectionError] = useState<string | null>(null);
   const [summaries, setSummaries] = useState<Record<number, string>>({});
   const [summaryReviews, setSummaryReviews] = useState<Record<number, SummaryReview>>({});
   const [exportMetadata, setExportMetadata] = useState<ExportMetadata>(DEFAULT_EXPORT_METADATA);
@@ -229,6 +233,8 @@ export default function App() {
     setTops(session.tops?.length ? session.tops : EMPTY_TOPS);
     setTranscript(session.transcript ?? []);
     setAssignments(session.assignments ?? []);
+    setAgendaDetection(null);
+    setAgendaDetectionError(null);
     setSpeakerNames(session.speaker_names ?? {});
     setSummaries(normalizeSummaries(session.summaries));
     setSummaryReviews(normalizeSummaryReviews(session.summary_reviews));
@@ -257,6 +263,8 @@ export default function App() {
     setTops(EMPTY_TOPS);
     setTranscript([]);
     setAssignments([]);
+    setAgendaDetection(null);
+    setAgendaDetectionError(null);
     setSummaries({});
     setSummaryReviews({});
     setExportMetadata(DEFAULT_EXPORT_METADATA);
@@ -384,6 +392,7 @@ export default function App() {
           current_step: 1,
           transcript: [],
           assignments: [],
+          tops: tops,
           summaries: {},
           summary_reviews: {},
         })
@@ -415,29 +424,71 @@ export default function App() {
       const transcriptResult = completedJob.transcript ?? [];
       setTranscript(transcriptResult);
       setSummaryReviews({});
+      setSummaries({});
+      setAgendaDetection(null);
+      setAgendaDetectionError(null);
 
       // Set audio URL for playback (use relative URL to go through nginx proxy)
       if (completedJob.audio_url) {
         setAudioUrl(withApiBase(completedJob.audio_url));
       }
 
-      setIsProcessing(false);
+      const knownTops = tops.map((top) => top.trim()).filter(Boolean);
+      setProcessingStatus("TOPs und Segmentgrenzen werden erkannt...");
 
-      // Check if TOPs were defined
-      const hasTops = tops.some((t) => t.trim() !== "");
-      if (hasTops) {
-        // Normal flow: go to assignment step
-        setSkippedAssignment(false);
-        setAssignments(new Array(transcriptResult.length).fill(null));
-        setCurrentStep(2);
-      } else {
-        // No TOPs: create a single implicit TOP and auto-assign all lines
-        setSkippedAssignment(true);
-        setTops([DEFAULT_TOP_TITLE]);
-        setAssignments(new Array(transcriptResult.length).fill(0));
-        setCurrentStep(3);
-        // Auto-generate summary for the entire conversation
-        generateSummaryForAll(transcriptResult, job.job_id);
+      try {
+        const detected = await detectAgenda({
+          tops: knownTops,
+          transcript: transcriptResult,
+          model: llmSettings.model,
+        });
+        const detectedTops = detected.tops.map((top) => top.trim()).filter(Boolean);
+        const detectedAssignments =
+          detected.assignments.length === transcriptResult.length
+            ? detected.assignments
+            : new Array(transcriptResult.length).fill(null);
+
+        if (detectedTops.length > 0) {
+          setTops(detectedTops);
+          setAssignments(detectedAssignments);
+          setAgendaDetection({
+            ...detected,
+            tops: detectedTops,
+            assignments: detectedAssignments,
+          });
+          setSkippedAssignment(false);
+          setIsProcessing(false);
+          setCurrentStep(2);
+        } else {
+          setSkippedAssignment(true);
+          setTops([DEFAULT_TOP_TITLE]);
+          setAssignments(new Array(transcriptResult.length).fill(0));
+          setIsProcessing(false);
+          setCurrentStep(3);
+          generateSummaryForAll(transcriptResult, job.job_id);
+        }
+      } catch (error) {
+        const detectionError =
+          error instanceof Error
+            ? error.message
+            : "Automatische TOP-Erkennung fehlgeschlagen";
+        console.warn("Agenda detection failed:", error);
+        setAgendaDetectionError(detectionError);
+        setAgendaDetection(null);
+        setIsProcessing(false);
+
+        if (knownTops.length > 0) {
+          setSkippedAssignment(false);
+          setTops(knownTops);
+          setAssignments(new Array(transcriptResult.length).fill(null));
+          setCurrentStep(2);
+        } else {
+          setSkippedAssignment(true);
+          setTops([DEFAULT_TOP_TITLE]);
+          setAssignments(new Array(transcriptResult.length).fill(0));
+          setCurrentStep(3);
+          generateSummaryForAll(transcriptResult, job.job_id);
+        }
       }
     } catch (error) {
       const errorMessage =
@@ -551,12 +602,12 @@ export default function App() {
 
   // Handle step navigation
   const handleStep1Next = () => {
-    if (backendAvailable) {
-      startTranscription();
-    } else {
+    if (backendAvailable === false) {
       // Show error - backend not available
       alert("Backend nicht erreichbar.");
+      return;
     }
+    startTranscription();
   };
 
   const handleStep2Next = async () => {
@@ -654,6 +705,8 @@ export default function App() {
     setCurrentStep(1);
     setTranscript([]);
     setAssignments([]);
+    setAgendaDetection(null);
+    setAgendaDetectionError(null);
     setProcessingError(null);
     setAudioUrl(null);
   };
@@ -665,6 +718,8 @@ export default function App() {
       setTops(EMPTY_TOPS);
       setTranscript([]);
       setAssignments([]);
+      setAgendaDetection(null);
+      setAgendaDetectionError(null);
       setSummaries({});
       setSummaryReviews({});
       setAudioUrl(null);
@@ -814,10 +869,13 @@ export default function App() {
           onNext={handleStep2Next}
           onBack={handleStep2Back}
           tops={validTops}
+          setTops={setTops}
           transcript={transcript}
           setTranscript={setTranscript}
           assignments={assignments}
           setAssignments={setAssignments}
+          agendaDetection={agendaDetection}
+          agendaDetectionError={agendaDetectionError}
           audioUrl={audioUrl ?? undefined}
           speakerNames={speakerNames}
           setSpeakerNames={setSpeakerNames}

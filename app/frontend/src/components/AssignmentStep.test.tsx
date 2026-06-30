@@ -13,10 +13,43 @@ const defaultProps: AssignmentStepProps = {
   onNext: vi.fn(),
   onBack: vi.fn(),
   tops: ['Begruessung', 'Haushalt'],
+  setTops: vi.fn(),
   transcript,
   setTranscript: vi.fn(),
   assignments: [null, null],
   setAssignments: vi.fn(),
+  agendaDetection: {
+    tops: ['Begruessung', 'Haushalt'],
+    assignments: [0, 1],
+    strategy: 'known_agenda_heuristic',
+    uncertain_count: 1,
+    segments: [
+      {
+        top_index: 0,
+        top_title: 'Begruessung',
+        start_index: 0,
+        end_index: 0,
+        confidence: 0.6,
+        uncertain: true,
+        transition_type: 'inferred',
+        reason: 'Erster TOP beginnt am Anfang des Transkripts.',
+        evidence_index: 0,
+        evidence_text: 'Hallo zusammen',
+      },
+      {
+        top_index: 1,
+        top_title: 'Haushalt',
+        start_index: 1,
+        end_index: 1,
+        confidence: 0.82,
+        uncertain: false,
+        transition_type: 'keyword',
+        reason: 'Starker Begriffsabgleich mit dem TOP-Titel.',
+        evidence_index: 1,
+        evidence_text: 'Wir beraten den Haushalt',
+      },
+    ],
+  },
   speakerNames: {},
   setSpeakerNames: vi.fn(),
 };
@@ -28,43 +61,6 @@ function renderAssignmentStep(overrides: Partial<AssignmentStepProps> = {}) {
 describe('AssignmentStep', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          suggested_assignments: [0, 1],
-          strategy: 'heuristic_moderator_keyword',
-          uncertain_count: 0,
-          segments: [
-            {
-              top_index: 0,
-              top_title: 'Begruessung',
-              start_index: 0,
-              end_index: 0,
-              confidence: 0.6,
-              uncertain: false,
-              transition_type: 'inferred',
-              reason: 'Erster TOP beginnt am Anfang des Transkripts.',
-              evidence_index: 0,
-              evidence_text: 'Hallo zusammen',
-            },
-            {
-              top_index: 1,
-              top_title: 'Haushalt',
-              start_index: 1,
-              end_index: 1,
-              confidence: 0.82,
-              uncertain: false,
-              transition_type: 'keyword',
-              reason: 'Starker Begriffsabgleich mit dem TOP-Titel.',
-              evidence_index: 1,
-              evidence_text: 'Wir beraten den Haushalt',
-            },
-          ],
-        }),
-      }),
-    );
   });
 
   afterEach(() => {
@@ -200,9 +196,20 @@ describe('AssignmentStep', () => {
     renderAssignmentStep({ setAssignments });
 
     await screen.findByText(/starker begriffsabgleich/i);
-    await user.click(screen.getByRole('button', { name: /alle vorschläge übernehmen/i }));
+    await user.click(screen.getByRole('button', { name: /^alle übernehmen$/i }));
 
     expect(setAssignments).toHaveBeenCalledWith([0, 1]);
+  });
+
+  it('applies only safe agenda detections and keeps uncertain lines unchanged', async () => {
+    const user = userEvent.setup();
+    const setAssignments = vi.fn();
+    renderAssignmentStep({ setAssignments, assignments: [null, null] });
+
+    await user.click(screen.getByRole('button', { name: /alle sicheren übernehmen/i }));
+
+    expect(setAssignments).toHaveBeenCalledWith([null, 1]);
+    expect(screen.getAllByText(/unsicher/i).length).toBeGreaterThan(0);
   });
 
   it('can split the selected segment from a transcript line', async () => {
@@ -212,8 +219,39 @@ describe('AssignmentStep', () => {
 
     await user.click(screen.getByRole('button', { name: /2\. Haushalt/i }));
     await user.click(screen.getByText('Wir beraten den Haushalt'));
-    await user.click(screen.getByRole('button', { name: /ab hier splitten/i }));
+    await user.click(screen.getByRole('button', { name: /grenze ab hier setzen/i }));
 
     expect(setAssignments).toHaveBeenCalledWith([0, 1]);
+  });
+
+  it('renames, adds, deletes and merges TOPs while preserving manual correction', async () => {
+    const user = userEvent.setup();
+    const setTops = vi.fn();
+    const setAssignments = vi.fn();
+    renderAssignmentStep({
+      setTops,
+      setAssignments,
+      tops: ['Begruessung', 'Haushalt', 'Schulbau'],
+      assignments: [0, 1],
+    });
+
+    await user.clear(screen.getByLabelText(/ausgewählter top/i));
+    await user.type(screen.getByLabelText(/ausgewählter top/i), 'Eroeffnung');
+    await user.click(screen.getByRole('button', { name: /top umbenennen/i }));
+    expect(setTops).toHaveBeenCalledWith(['Eroeffnung', 'Haushalt', 'Schulbau']);
+
+    await user.click(screen.getByRole('button', { name: /top hinzufügen/i }));
+    expect(setTops).toHaveBeenLastCalledWith(['Begruessung', 'TOP 2', 'Haushalt', 'Schulbau']);
+    expect(setAssignments).toHaveBeenLastCalledWith([0, 2]);
+
+    await user.click(screen.getByRole('button', { name: /2\. Haushalt/i }));
+    await user.click(screen.getByRole('button', { name: /top löschen/i }));
+    expect(setTops).toHaveBeenLastCalledWith(['Begruessung', 'Schulbau']);
+    expect(setAssignments).toHaveBeenLastCalledWith([0, null]);
+
+    await user.click(screen.getByRole('button', { name: /2\. Haushalt/i }));
+    await user.click(screen.getByRole('button', { name: /top zusammenlegen/i }));
+    expect(setTops).toHaveBeenLastCalledWith(['Begruessung / Haushalt', 'Schulbau']);
+    expect(setAssignments).toHaveBeenLastCalledWith([0, 0]);
   });
 });

@@ -3,6 +3,8 @@
  */
 
 import type {
+  AgendaDetectionRequest,
+  AgendaDetectionResponse,
   AssignmentSuggestionsResponse,
   ExportFormat,
   ExportMetadata,
@@ -240,6 +242,33 @@ export async function generateAssignmentSuggestions(
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.detail || "Fehler beim Erzeugen der Zuordnungsvorschläge");
+  }
+
+  return response.json();
+}
+
+/**
+ * Detect agenda titles and reviewable TOP assignments for a transcript.
+ */
+export async function detectAgenda(
+  request: AgendaDetectionRequest
+): Promise<AgendaDetectionResponse> {
+  const response = await fetch(`${API_BASE}/api/agenda-detection`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      tops: request.tops ?? [],
+      transcript: request.transcript,
+      model: request.model,
+      system_prompt: request.systemPrompt,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || "Fehler bei der automatischen TOP-Erkennung");
   }
 
   return response.json();

@@ -1,11 +1,9 @@
 import { useState, useRef, useEffect, type MouseEvent } from 'react';
 import type {
   AssignmentSuggestionSegment,
-  AssignmentSuggestionsResponse,
   AssignmentStepProps,
   TopColor,
 } from '../types';
-import { generateAssignmentSuggestions } from '../api';
 import AudioPlayer from './AudioPlayer';
 import { useAudioSync } from '../hooks/useAudioSync';
 import SpeakerNameEditor from './SpeakerNameEditor';
@@ -32,10 +30,13 @@ export default function AssignmentStep({
   onNext,
   onBack,
   tops,
+  setTops,
   transcript,
   setTranscript,
   assignments,
   setAssignments,
+  agendaDetection,
+  agendaDetectionError,
   audioUrl,
   speakerNames,
   setSpeakerNames,
@@ -46,9 +47,7 @@ export default function AssignmentStep({
   const [selectedLineIndex, setSelectedLineIndex] = useState<number | null>(null);
   const [editingLine, setEditingLine] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
-  const [suggestions, setSuggestions] = useState<AssignmentSuggestionsResponse | null>(null);
-  const [suggestionStatus, setSuggestionStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
-  const [suggestionError, setSuggestionError] = useState<string | null>(null);
+  const [topTitleDraft, setTopTitleDraft] = useState(tops[0] ?? '');
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
 
   // Audio sync hook
@@ -71,42 +70,14 @@ export default function AssignmentStep({
   }, [currentLineIndex, isAutoScroll]);
 
   useEffect(() => {
-    let isCurrent = true;
+    if (selectedTop >= tops.length) {
+      setSelectedTop(Math.max(0, tops.length - 1));
+    }
+  }, [selectedTop, tops.length]);
 
-    const loadSuggestions = async () => {
-      if (!transcript.length || !tops.some((top) => top.trim())) {
-        setSuggestions(null);
-        setSuggestionStatus('idle');
-        return;
-      }
-
-      setSuggestionStatus('loading');
-      setSuggestionError(null);
-
-      try {
-        const result = await generateAssignmentSuggestions(tops, transcript);
-        if (!isCurrent) {
-          return;
-        }
-        setSuggestions(result);
-        setSuggestionStatus('ready');
-      } catch (error) {
-        if (!isCurrent) {
-          return;
-        }
-        setSuggestionStatus('error');
-        setSuggestionError(
-          error instanceof Error ? error.message : 'Zuordnungsvorschläge konnten nicht erzeugt werden'
-        );
-      }
-    };
-
-    loadSuggestions();
-
-    return () => {
-      isCurrent = false;
-    };
-  }, [tops, transcript]);
+  useEffect(() => {
+    setTopTitleDraft(tops[selectedTop] ?? '');
+  }, [selectedTop, tops]);
 
   // Helper to get display name for a speaker
   const getDisplayName = (speakerId: string) => speakerNames[speakerId] || speakerId;
@@ -171,11 +142,86 @@ export default function AssignmentStep({
     setSelectedLineIndex(segment.start_index);
   };
 
-  const applyAllSuggestions = () => {
-    if (!suggestions) {
+  const applyAllSafeSuggestions = () => {
+    if (!agendaDetection) {
       return;
     }
-    setAssignments(suggestions.suggested_assignments);
+
+    const newAssignments = [...assignments];
+    agendaDetection.segments
+      .filter((segment) => !segment.uncertain && segment.confidence >= 0.7)
+      .forEach((segment) => {
+        for (let i = segment.start_index; i <= segment.end_index; i++) {
+          if (i >= 0 && i < newAssignments.length) {
+            newAssignments[i] = segment.top_index;
+          }
+        }
+      });
+    setAssignments(newAssignments);
+  };
+
+  const applyAllSuggestions = () => {
+    if (!agendaDetection) {
+      return;
+    }
+    setAssignments(agendaDetection.assignments);
+  };
+
+  const renameSelectedTop = () => {
+    const title = topTitleDraft.trim();
+    if (!title || !tops[selectedTop]) {
+      return;
+    }
+    const newTops = [...tops];
+    newTops[selectedTop] = title;
+    setTops(newTops);
+  };
+
+  const addTop = () => {
+    const insertionIndex = Math.min(selectedTop + 1, tops.length);
+    const newTops = [...tops];
+    newTops.splice(insertionIndex, 0, `TOP ${insertionIndex + 1}`);
+    const newAssignments = assignments.map((assignment) => {
+      if (assignment === null) return null;
+      return assignment >= insertionIndex ? assignment + 1 : assignment;
+    });
+    setTops(newTops);
+    setAssignments(newAssignments);
+    setSelectedTop(insertionIndex);
+    setTopTitleDraft(newTops[insertionIndex] ?? '');
+  };
+
+  const deleteSelectedTop = () => {
+    if (tops.length <= 1) {
+      return;
+    }
+    const newTops = tops.filter((_, index) => index !== selectedTop);
+    const newAssignments = assignments.map((assignment) => {
+      if (assignment === null) return null;
+      if (assignment === selectedTop) return null;
+      return assignment > selectedTop ? assignment - 1 : assignment;
+    });
+    setTops(newTops);
+    setAssignments(newAssignments);
+    setSelectedTop(Math.min(selectedTop, newTops.length - 1));
+  };
+
+  const mergeSelectedTopWithPrevious = () => {
+    if (selectedTop <= 0) {
+      return;
+    }
+
+    const newTops = [...tops];
+    newTops[selectedTop - 1] = `${newTops[selectedTop - 1]} / ${newTops[selectedTop]}`;
+    newTops.splice(selectedTop, 1);
+    const newAssignments = assignments.map((assignment) => {
+      if (assignment === null) return null;
+      if (assignment === selectedTop) return selectedTop - 1;
+      return assignment > selectedTop ? assignment - 1 : assignment;
+    });
+    setTops(newTops);
+    setAssignments(newAssignments);
+    setSelectedTop(selectedTop - 1);
   };
 
   const getCurrentSegmentBounds = (lineIndex: number): { start: number; end: number } => {
@@ -371,6 +417,14 @@ export default function AssignmentStep({
   const canProceed = assignedCount > 0;
   const selectedSegmentBounds =
     selectedLineIndex !== null ? getCurrentSegmentBounds(selectedLineIndex) : null;
+  const safeSuggestionCount =
+    agendaDetection?.segments.filter((segment) => !segment.uncertain && segment.confidence >= 0.7)
+      .length ?? 0;
+
+  const getDetectionSegmentForLine = (lineIndex: number) =>
+    agendaDetection?.segments.find(
+      (segment) => lineIndex >= segment.start_index && lineIndex <= segment.end_index
+    ) ?? null;
 
   return (
     <div className="space-y-6">
@@ -392,43 +446,56 @@ export default function AssignmentStep({
         sessionId={sessionId}
       />
 
-      {/* Suggestions */}
+      {/* Agenda Detection */}
       <div className="bg-white border border-gray-200 rounded-lg p-4">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
           <div>
-            <h3 className="font-medium text-gray-900">Zuordnungsvorschläge</h3>
+            <h3 className="font-medium text-gray-900">Automatisch erkannte Segmente</h3>
             <p className="text-sm text-gray-600">
-              Vorschläge werden aus Moderationshinweisen und TOP-Begriffen abgeleitet.
+              Prüfen Sie die TOP-Grenzen und korrigieren Sie unsichere Bereiche bei Bedarf.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={applyAllSuggestions}
-            disabled={!suggestions?.segments.length}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400"
-          >
-            Alle Vorschläge übernehmen
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={applyAllSafeSuggestions}
+              disabled={!safeSuggestionCount}
+              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-200 disabled:text-gray-400"
+            >
+              Alle sicheren übernehmen
+            </button>
+            <button
+              type="button"
+              onClick={applyAllSuggestions}
+              disabled={!agendaDetection?.segments.length}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400"
+            >
+              Alle übernehmen
+            </button>
+          </div>
         </div>
 
-        {suggestionStatus === 'loading' && (
-          <div className="text-sm text-gray-600">Vorschläge werden erzeugt...</div>
+        {agendaDetectionError && (
+          <div className="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+            Automatische TOP-Erkennung fehlgeschlagen: {agendaDetectionError}. Die manuelle Zuordnung bleibt verfügbar.
+          </div>
         )}
-        {suggestionStatus === 'error' && (
-          <div className="text-sm text-red-600">{suggestionError}</div>
-        )}
-        {suggestionStatus === 'ready' && suggestions && (
+        {agendaDetection ? (
           <div className="space-y-2">
             <div className="text-xs text-gray-500">
-              {suggestions.segments.length} Segmente, {suggestions.uncertain_count} unsicher
+              {agendaDetection.segments.length} Segmente, {agendaDetection.uncertain_count} unsicher · Strategie: {agendaDetection.strategy}
             </div>
             <div className="grid gap-2 md:grid-cols-2">
-              {suggestions.segments.map((segment) => {
+              {agendaDetection.segments.map((segment) => {
                 const color = getColor(segment.top_index);
                 return (
                   <div
                     key={`${segment.top_index}-${segment.start_index}`}
-                    className={`border rounded-lg p-3 ${segment.uncertain ? 'border-yellow-300 bg-yellow-50' : 'border-gray-200'}`}
+                    className={`border rounded-lg p-3 ${
+                      segment.uncertain
+                        ? 'border-yellow-400 bg-yellow-50 ring-1 ring-yellow-300'
+                        : 'border-gray-200'
+                    }`}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -441,8 +508,12 @@ export default function AssignmentStep({
                         <div className="text-xs text-gray-500 mt-1">
                           Zeilen {segment.start_index + 1}-{segment.end_index + 1} · Confidence{' '}
                           {Math.round(segment.confidence * 100)}%
-                          {segment.uncertain ? ' · unsicher' : ''}
                         </div>
+                        {segment.uncertain && (
+                          <div className="mt-1 inline-flex items-center px-2 py-0.5 rounded bg-yellow-200 text-yellow-900 text-xs font-medium">
+                            Unsicher prüfen
+                          </div>
+                        )}
                       </div>
                       <button
                         type="button"
@@ -462,6 +533,10 @@ export default function AssignmentStep({
                 );
               })}
             </div>
+          </div>
+        ) : (
+          <div className="text-sm text-gray-600">
+            Keine automatischen Segmente verfügbar. Nutzen Sie die manuelle Zeilenzuordnung.
           </div>
         )}
       </div>
@@ -495,7 +570,7 @@ export default function AssignmentStep({
           disabled={selectedLineIndex === null}
           className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
         >
-          Segment korrigieren
+          Segment bearbeiten
         </button>
         <button
           type="button"
@@ -503,7 +578,7 @@ export default function AssignmentStep({
           disabled={selectedLineIndex === null}
           className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
         >
-          Ab hier splitten
+          Grenze ab hier setzen
         </button>
         <button
           type="button"
@@ -549,6 +624,51 @@ export default function AssignmentStep({
         {/* TOPs Sidebar */}
         <div className="w-72 bg-white rounded-lg border border-gray-200 p-4 overflow-y-auto">
           <h3 className="font-medium text-gray-900 mb-4">Tagesordnung</h3>
+          <div className="mb-4 space-y-2 border border-gray-200 rounded-lg p-3 bg-gray-50">
+            <label className="block text-xs font-medium text-gray-600" htmlFor="selected-top-title">
+              Ausgewählter TOP
+            </label>
+            <input
+              id="selected-top-title"
+              type="text"
+              value={topTitleDraft}
+              onChange={(event) => setTopTitleDraft(event.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={renameSelectedTop}
+                disabled={!topTitleDraft.trim()}
+                className="px-2 py-1.5 text-xs bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+              >
+                TOP umbenennen
+              </button>
+              <button
+                type="button"
+                onClick={addTop}
+                className="px-2 py-1.5 text-xs bg-white border border-gray-300 rounded hover:bg-gray-100"
+              >
+                TOP hinzufügen
+              </button>
+              <button
+                type="button"
+                onClick={deleteSelectedTop}
+                disabled={tops.length <= 1}
+                className="px-2 py-1.5 text-xs bg-white border border-gray-300 rounded hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
+              >
+                TOP löschen
+              </button>
+              <button
+                type="button"
+                onClick={mergeSelectedTopWithPrevious}
+                disabled={selectedTop <= 0}
+                className="px-2 py-1.5 text-xs bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+              >
+                TOP zusammenlegen
+              </button>
+            </div>
+          </div>
           <div className="space-y-2">
             {tops.map((top, index) => {
               const color = getColor(index);
@@ -605,6 +725,7 @@ export default function AssignmentStep({
               const color = assignedTo !== null ? getColor(assignedTo) : null;
               const isCurrentLine = index === currentLineIndex;
               const isSelectedLine = index === selectedLineIndex;
+              const detectionSegment = getDetectionSegmentForLine(index);
               return (
                 <div
                   key={index}
@@ -615,6 +736,8 @@ export default function AssignmentStep({
                       : 'border-transparent hover:bg-gray-100'
                   } ${isCurrentLine ? 'ring-2 ring-blue-500 ring-offset-1' : ''} ${
                     isSelectedLine ? 'outline outline-2 outline-gray-800' : ''
+                  } ${
+                    detectionSegment?.uncertain ? 'ring-2 ring-yellow-400 ring-offset-1' : ''
                   }`}
                 >
                   <span className="font-medium text-gray-600">
@@ -654,6 +777,11 @@ export default function AssignmentStep({
                   ) : (
                     <>
                       <span className="text-gray-800">{line.text}</span>
+                      {detectionSegment?.uncertain && (
+                        <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded bg-yellow-200 text-yellow-900 text-xs font-medium">
+                          Unsicher
+                        </span>
+                      )}
                       <button
                         type="button"
                         onClick={(event) => {

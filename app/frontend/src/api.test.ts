@@ -4,6 +4,7 @@ import {
   confirmSpeakerObservation,
   createManualSpeakerObservation,
   createSpeakerProfile,
+  detectAgenda,
   exportProtocol,
   listSpeakerObservations,
   listSpeakerProfiles,
@@ -159,6 +160,41 @@ describe('api session client', () => {
         include_generation_note: true,
       },
       speaker_names: { SPEAKER_00: 'Alice' },
+    });
+  });
+
+  it('posts agenda detection data with optional known TOPs and model settings', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          tops: ['Begruessung', 'Haushalt'],
+          assignments: [0, 1],
+          segments: [],
+          strategy: 'known_agenda_heuristic',
+          uncertain_count: 0,
+        }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await detectAgenda({
+      tops: ['Begruessung', 'Haushalt'],
+      transcript: [
+        { speaker: 'SPEAKER_00', text: 'Hallo', start: 0, end: 1 },
+        { speaker: 'SPEAKER_01', text: 'Haushalt', start: 2, end: 3 },
+      ],
+      model: 'qwen3:8b',
+      systemPrompt: 'Prompt',
+    });
+
+    expect(result.assignments).toEqual([0, 1]);
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/agenda-detection');
+    expect(fetchMock.mock.calls[0]![1]!.method).toBe('POST');
+    expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)).toMatchObject({
+      tops: ['Begruessung', 'Haushalt'],
+      transcript: [{ text: 'Hallo' }, { text: 'Haushalt' }],
+      model: 'qwen3:8b',
+      system_prompt: 'Prompt',
     });
   });
 
