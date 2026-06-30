@@ -45,6 +45,24 @@ export async function getTranscriptionStatus(
 }
 
 /**
+ * Cancel a pending or running transcription job.
+ */
+export async function cancelTranscription(
+  jobId: string
+): Promise<TranscriptionJob> {
+  const response = await fetch(`${API_BASE}/api/transcribe/${jobId}/cancel`, {
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || "Fehler beim Abbrechen der Transkription");
+  }
+
+  return response.json();
+}
+
+/**
  * Poll for transcription completion.
  * Returns the full TranscriptionJob including audio_url for playback.
  */
@@ -65,6 +83,10 @@ export async function pollTranscription(
 
     if (status.status === "failed") {
       throw new Error(status.error || "Transkription fehlgeschlagen");
+    }
+
+    if (status.status === "cancelled") {
+      throw new Error(status.message || "Transkription abgebrochen");
     }
 
     // Wait before polling again

@@ -8,10 +8,14 @@ import uuid
 import time
 import logging
 import mimetypes
+import asyncio
+import threading
+import unicodedata
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import (
     FastAPI,
@@ -19,7 +23,6 @@ from fastapi import (
     File,
     Form,
     HTTPException,
-    BackgroundTasks,
     Header,
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,7 +33,6 @@ from transcribe import (
     transcribe_audio,
     load_models,
     TranscriptionModels,
-    TranscriptionResult,
     _cleanup_memory,
     WHISPER_MODEL,
     WHISPER_BATCH_SIZE,
@@ -55,6 +57,10 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+class CancellationRequested(Exception):
+    """Raised inside a transcription worker when a job has been cancelled."""
 
 
 @asynccontextmanager
@@ -86,10 +92,19 @@ async def lifespan(app: FastAPI):
         app.state.models = None
         app.state.models_loaded = False
 
+    app.state.job_manager = TranscriptionJobManager(
+        models_provider=lambda: getattr(app.state, "models", None),
+        concurrency_limit=TRANSCRIPTION_CONCURRENCY,
+    )
+    await app.state.job_manager.start()
+
     yield  # Server is running
 
     # Cleanup on shutdown - properly release GPU resources
     logger.info("Server shutting down - cleaning up...")
+    if hasattr(app.state, "job_manager"):
+        await app.state.job_manager.stop()
+    mark_active_jobs_failed("Transkription wurde durch Backend-Shutdown unterbrochen")
     if hasattr(app.state, "models") and app.state.models is not None:
         device = app.state.models.device
         del app.state.models
@@ -125,9 +140,28 @@ JOB_MAX_COUNT = int(os.environ.get("JOB_MAX_COUNT", "100"))
 DELETE_UPLOADS_ON_JOB_CLEANUP = (
     os.environ.get("DELETE_UPLOADS_ON_JOB_CLEANUP", "false").lower() == "true"
 )
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))
+UPLOAD_CHUNK_SIZE = int(os.environ.get("UPLOAD_CHUNK_SIZE", str(1024 * 1024)))
+TRANSCRIPTION_CONCURRENCY = int(os.environ.get("TRANSCRIPTION_CONCURRENCY", "1"))
+DELETE_UPLOADS_ON_CANCEL_OR_FAILURE = (
+    os.environ.get("DELETE_UPLOADS_ON_CANCEL_OR_FAILURE", "true").lower() == "true"
+)
 
-# In-memory storage for jobs (in production, use Redis or database)
+JOB_STATUS_PENDING = "pending"
+JOB_STATUS_PROCESSING = "processing"
+JOB_STATUS_COMPLETED = "completed"
+JOB_STATUS_FAILED = "failed"
+JOB_STATUS_CANCELLED = "cancelled"
+TERMINAL_JOB_STATUSES = {
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_CANCELLED,
+}
+
+# In-memory cache for jobs. SQLite remains the durable source for polling after
+# restarts; the lock keeps the cache coherent across API and worker threads.
 jobs: OrderedDict = OrderedDict()
+JOB_LOCK = threading.RLock()
 
 # Temporary upload directory
 UPLOAD_DIR = Path("uploads")
@@ -141,6 +175,15 @@ ALLOWED_AUDIO_CONTENT_TYPES = {
     "audio/mp3",
 }
 ALLOWED_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a")
+
+CONTENT_TYPE_EXTENSIONS = {
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/wav": ".wav",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "application/pdf": ".pdf",
+}
 
 
 def is_allowed_audio_file(filename: str | None, content_type: str | None) -> bool:
@@ -156,22 +199,112 @@ def is_allowed_pdf_file(filename: str | None, content_type: str | None) -> bool:
     return content_type == "application/pdf" or (filename or "").lower().endswith(".pdf")
 
 
-def persist_job_state(job_id: str) -> None:
-    """Persist a cached job without interrupting the request flow on DB errors."""
-    job = jobs.get(job_id)
-    if not job:
+def normalize_upload_filename(
+    filename: str | None,
+    *,
+    default_stem: str,
+    allowed_extensions: tuple[str, ...],
+    content_type: str | None = None,
+) -> str:
+    """Return a safe display filename derived from an uploaded filename."""
+    raw_filename = (filename or "").replace("\\", "/").split("/")[-1]
+    normalized = unicodedata.normalize("NFKD", raw_filename)
+    ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
+    ascii_name = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_name).strip("._-")
+
+    extension = Path(ascii_name).suffix.lower()
+    if extension not in allowed_extensions:
+        extension = CONTENT_TYPE_EXTENSIONS.get(content_type or "", "")
+        if extension not in allowed_extensions:
+            extension = ""
+
+    stem = Path(ascii_name).stem if ascii_name else ""
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_-") or default_stem
+    stem = stem[:80]
+    return f"{stem}{extension}"
+
+
+def upload_path_for(job_id: str, safe_filename: str) -> Path:
+    """Build an upload path from trusted components only."""
+    suffix = Path(safe_filename).suffix.lower()
+    return UPLOAD_DIR / f"{job_id}{suffix}"
+
+
+async def save_upload_with_size_limit(
+    upload: UploadFile,
+    destination: Path,
+    *,
+    max_bytes: int | None = None,
+) -> int:
+    """Stream an upload to disk while enforcing the backend upload limit."""
+    max_allowed = max_bytes if max_bytes is not None else MAX_UPLOAD_BYTES
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    bytes_written = 0
+
+    try:
+        with open(destination, "wb") as output:
+            while True:
+                chunk = await upload.read(UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > max_allowed:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            "Datei ist zu groß. Maximal erlaubt sind "
+                            f"{max_allowed // 1024 // 1024} MB."
+                        ),
+                    )
+                output.write(chunk)
+    except Exception:
+        remove_upload_file(str(destination))
+        raise
+
+    return bytes_written
+
+
+def remove_upload_file(file_path: str | None) -> None:
+    if not file_path:
         return
     try:
+        path = Path(file_path)
+        if path.exists() and path.is_file():
+            path.unlink()
+    except Exception as e:
+        logger.warning(f"Failed to remove upload file {file_path}: {e}")
+
+
+def persist_job_state(job_id: str) -> None:
+    """Persist a cached job without interrupting the request flow on DB errors."""
+    with JOB_LOCK:
+        job = jobs.get(job_id)
+        if not job:
+            return
         job["updated_at"] = time.time()
-        save_job(job_id, job)
+        job_snapshot = dict(job)
+    try:
+        save_job(job_id, job_snapshot)
     except Exception as e:
         logger.warning(f"Failed to persist job {job_id}: {e}")
 
 
+def update_job_state(job_id: str, **changes: Any) -> dict[str, Any] | None:
+    with JOB_LOCK:
+        job = jobs.get(job_id)
+        if job is None:
+            return None
+        job.update(changes)
+        job["updated_at"] = time.time()
+    persist_job_state(job_id)
+    return get_job_from_cache_or_db(job_id)
+
+
 def get_job_from_cache_or_db(job_id: str) -> dict[str, Any] | None:
-    job = jobs.get(job_id)
-    if job is not None:
-        return job
+    with JOB_LOCK:
+        job = jobs.get(job_id)
+        if job is not None:
+            return job
 
     try:
         job = load_job(job_id)
@@ -180,8 +313,201 @@ def get_job_from_cache_or_db(job_id: str) -> dict[str, Any] | None:
         return None
 
     if job is not None:
-        jobs[job_id] = job
+        with JOB_LOCK:
+            jobs[job_id] = job
     return job
+
+
+def is_job_cancelled(job_id: str) -> bool:
+    job = get_job_from_cache_or_db(job_id)
+    if not job:
+        return True
+    return bool(job.get("cancellation_requested")) or job.get("status") == JOB_STATUS_CANCELLED
+
+
+def cleanup_job_uploads(job_id: str, job_data: dict[str, Any]) -> None:
+    file_paths = {
+        path for path in (job_data.get("audio_path"), job_data.get("file_path")) if path
+    }
+    for file_path in file_paths:
+        remove_upload_file(file_path)
+    if file_paths:
+        with JOB_LOCK:
+            job = jobs.get(job_id)
+            if job:
+                job["file_path"] = None
+                job["audio_path"] = None
+        persist_job_state(job_id)
+
+
+def mark_active_jobs_failed(message: str) -> None:
+    with JOB_LOCK:
+        active_job_ids = [
+            job_id
+            for job_id, job in jobs.items()
+            if job.get("status") in {JOB_STATUS_PENDING, JOB_STATUS_PROCESSING}
+        ]
+
+    for job_id in active_job_ids:
+        update_job_state(
+            job_id,
+            status=JOB_STATUS_FAILED,
+            progress=0,
+            message=message,
+            error=message,
+        )
+
+
+class TranscriptionJobManager:
+    """Owns transcription queueing and worker concurrency for this process."""
+
+    def __init__(
+        self,
+        *,
+        models_provider: Callable[[], TranscriptionModels | None],
+        concurrency_limit: int,
+    ) -> None:
+        self.models_provider = models_provider
+        self.concurrency_limit = max(1, concurrency_limit)
+        self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self.executor = ThreadPoolExecutor(
+            max_workers=self.concurrency_limit,
+            thread_name_prefix="transcription-worker",
+        )
+        self.workers: list[asyncio.Task] = []
+        self.started = False
+
+    async def start(self) -> None:
+        if self.started:
+            return
+        self.started = True
+        self.workers = [
+            asyncio.create_task(self._worker(index))
+            for index in range(self.concurrency_limit)
+        ]
+        logger.info(
+            "Transcription job manager started with concurrency=%s",
+            self.concurrency_limit,
+        )
+
+    async def stop(self) -> None:
+        if not self.started:
+            return
+        self.started = False
+        for worker in self.workers:
+            worker.cancel()
+        await asyncio.gather(*self.workers, return_exceptions=True)
+        self.workers = []
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
+    async def enqueue(self, job_id: str) -> None:
+        if not self.started:
+            await self.start()
+        await self.queue.put(job_id)
+
+    async def _worker(self, worker_index: int) -> None:
+        while True:
+            job_id = await self.queue.get()
+            try:
+                job = get_job_from_cache_or_db(job_id)
+                if not job:
+                    continue
+                if job.get("status") in TERMINAL_JOB_STATUSES:
+                    continue
+                if is_job_cancelled(job_id):
+                    update_job_state(
+                        job_id,
+                        status=JOB_STATUS_CANCELLED,
+                        message="Transkription abgebrochen",
+                        error=None,
+                    )
+                    cleanup_job_uploads(job_id, job)
+                    continue
+
+                models = self.models_provider()
+                if models is None:
+                    update_job_state(
+                        job_id,
+                        status=JOB_STATUS_FAILED,
+                        progress=0,
+                        message="Modelle sind nicht geladen",
+                        error="Modelle sind nicht geladen",
+                    )
+                    continue
+
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    self.executor,
+                    run_transcription,
+                    job_id,
+                    job.get("file_path"),
+                    models,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(
+                    "[Worker %s] Unhandled transcription worker error for job %s: %s",
+                    worker_index,
+                    job_id,
+                    e,
+                    exc_info=True,
+                )
+                update_job_state(
+                    job_id,
+                    status=JOB_STATUS_FAILED,
+                    message=f"Fehler: {str(e)}",
+                    error=str(e),
+                )
+            finally:
+                self.queue.task_done()
+
+
+async def get_or_create_job_manager() -> TranscriptionJobManager:
+    manager = getattr(app.state, "job_manager", None)
+    if manager is None:
+        manager = TranscriptionJobManager(
+            models_provider=lambda: getattr(app.state, "models", None),
+            concurrency_limit=TRANSCRIPTION_CONCURRENCY,
+        )
+        app.state.job_manager = manager
+    if not manager.started:
+        await manager.start()
+    return manager
+
+
+def request_job_cancellation(job_id: str) -> dict[str, Any] | None:
+    job = get_job_from_cache_or_db(job_id)
+    if job is None:
+        return None
+
+    status = job.get("status")
+    if status == JOB_STATUS_CANCELLED:
+        return job
+    if status in {JOB_STATUS_COMPLETED, JOB_STATUS_FAILED}:
+        raise HTTPException(
+            status_code=409,
+            detail="Job kann in diesem Status nicht abgebrochen werden",
+        )
+
+    message = (
+        "Transkription wird abgebrochen..."
+        if status == JOB_STATUS_PROCESSING
+        else "Transkription abgebrochen"
+    )
+    updated = update_job_state(
+        job_id,
+        status=JOB_STATUS_CANCELLED,
+        cancellation_requested=True,
+        message=message,
+        error=None,
+    )
+
+    if status == JOB_STATUS_PENDING and updated:
+        cleanup_job_uploads(job_id, updated)
+        updated = get_job_from_cache_or_db(job_id)
+
+    return updated
 
 
 def get_audio_path_for_job(job: dict[str, Any]) -> str | None:
@@ -223,23 +549,24 @@ def cleanup_old_jobs() -> int:
             except Exception as e:
                 logger.warning(f"Failed to clean up audio file for job {job_id}: {e}")
 
-    # Remove jobs older than MAX_AGE
-    jobs_to_remove = []
-    for job_id, job_data in jobs.items():
-        if now - job_data.get("created_at", now) > JOB_MAX_AGE_SECONDS:
-            jobs_to_remove.append(job_id)
+    with JOB_LOCK:
+        # Remove jobs older than MAX_AGE
+        jobs_to_remove = []
+        for job_id, job_data in jobs.items():
+            if now - job_data.get("created_at", now) > JOB_MAX_AGE_SECONDS:
+                jobs_to_remove.append(job_id)
 
-    for job_id in jobs_to_remove:
-        cleanup_job_audio(job_id, jobs[job_id])
-        del jobs[job_id]
-        removed += 1
+        for job_id in jobs_to_remove:
+            cleanup_job_audio(job_id, jobs[job_id])
+            del jobs[job_id]
+            removed += 1
 
-    # Remove oldest jobs if count exceeds MAX_COUNT
-    while len(jobs) > JOB_MAX_COUNT:
-        oldest_job_id = next(iter(jobs))
-        cleanup_job_audio(oldest_job_id, jobs[oldest_job_id])
-        del jobs[oldest_job_id]
-        removed += 1
+        # Remove oldest jobs if count exceeds MAX_COUNT
+        while len(jobs) > JOB_MAX_COUNT:
+            oldest_job_id = next(iter(jobs))
+            cleanup_job_audio(oldest_job_id, jobs[oldest_job_id])
+            del jobs[oldest_job_id]
+            removed += 1
 
     if removed > 0:
         logger.info(f"Cleaned up {removed} old jobs, {len(jobs)} remaining")
@@ -443,7 +770,6 @@ async def get_session(session_id: str):
 
 @app.post("/api/transcribe", response_model=TranscriptionJob)
 async def start_transcription(
-    background_tasks: BackgroundTasks,
     audio: UploadFile = File(...),
     session_id: Optional[str] = Form(None),
 ):
@@ -456,7 +782,10 @@ async def start_transcription(
     )
 
     # Check if models are loaded
-    if not getattr(app.state, "models_loaded", False) or app.state.models is None:
+    if (
+        not getattr(app.state, "models_loaded", False)
+        or getattr(app.state, "models", None) is None
+    ):
         logger.error("Transcription request rejected - models not loaded")
         raise HTTPException(
             status_code=503,
@@ -470,48 +799,48 @@ async def start_transcription(
             status_code=400, detail=f"Ungültiger Dateityp. Erlaubt: MP3, WAV, M4A"
         )
 
-    # Generate job ID
     job_id = str(uuid.uuid4())
     logger.info(f"Created job: {job_id}")
 
-    # Save uploaded file
-    file_path = UPLOAD_DIR / f"{job_id}_{audio.filename}"
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    with open(file_path, "wb") as f:
-        content = await audio.read()
-        f.write(content)
-    logger.info(f"Saved file: {file_path} ({len(content)} bytes)")
+    safe_filename = normalize_upload_filename(
+        audio.filename,
+        default_stem="audio",
+        allowed_extensions=ALLOWED_AUDIO_EXTENSIONS,
+        content_type=audio.content_type,
+    )
+    file_path = upload_path_for(job_id, safe_filename)
+    size_bytes = await save_upload_with_size_limit(audio, file_path)
+    logger.info(f"Saved file: {file_path} ({size_bytes} bytes)")
 
-    # Initialize job with timestamp
-    jobs[job_id] = {
-        "created_at": time.time(),
-        "updated_at": time.time(),
-        "session_id": session_id,
-        "status": "pending",
-        "progress": 0,
-        "message": "Audio hochgeladen",
-        "file_path": str(file_path),
-        "audio_path": str(file_path),
-        "audio_filename": audio.filename,
-        "audio_content_type": audio.content_type,
-        "audio_size_bytes": len(content),
-        "transcript": None,
-        "error": None,
-    }
+    with JOB_LOCK:
+        jobs[job_id] = {
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "session_id": session_id,
+            "status": JOB_STATUS_PENDING,
+            "progress": 0,
+            "message": "Audio hochgeladen, Job wartet auf Verarbeitung",
+            "file_path": str(file_path),
+            "audio_path": str(file_path),
+            "audio_filename": safe_filename,
+            "audio_content_type": audio.content_type,
+            "audio_size_bytes": size_bytes,
+            "transcript": None,
+            "error": None,
+            "cancellation_requested": False,
+        }
     persist_job_state(job_id)
 
     # Cleanup old jobs to prevent memory buildup
     cleanup_old_jobs()
 
-    # Start background transcription with pre-loaded models
-    logger.info(f"Starting background transcription task for job: {job_id}")
-    background_tasks.add_task(
-        run_transcription, job_id, str(file_path), app.state.models
-    )
+    manager = await get_or_create_job_manager()
+    await manager.enqueue(job_id)
+    logger.info(f"Queued transcription job: {job_id}")
 
     return TranscriptionJob(
         job_id=job_id,
-        status="pending",
+        status=JOB_STATUS_PENDING,
         progress=0,
         message="Transkription gestartet",
     )
@@ -526,6 +855,15 @@ async def get_transcription_status(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="Job nicht gefunden")
 
+    return build_transcription_job_response(job_id, job)
+
+
+@app.post("/api/transcribe/{job_id}/cancel", response_model=TranscriptionJob)
+async def cancel_transcription(job_id: str):
+    """Cancel a pending job or request cooperative cancellation for an active job."""
+    job = request_job_cancellation(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job nicht gefunden")
     return build_transcription_job_response(job_id, job)
 
 
@@ -644,14 +982,17 @@ async def extract_tops_endpoint(
 
     # Save uploaded file temporarily
     file_id = str(uuid.uuid4())
-    file_path = UPLOAD_DIR / f"{file_id}_{pdf.filename}"
+    safe_filename = normalize_upload_filename(
+        pdf.filename,
+        default_stem="document",
+        allowed_extensions=(".pdf",),
+        content_type=pdf.content_type,
+    )
+    file_path = upload_path_for(file_id, safe_filename)
 
     try:
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        with open(file_path, "wb") as f:
-            content = await pdf.read()
-            f.write(content)
-        logger.info(f"Saved PDF: {file_path} ({len(content)} bytes)")
+        size_bytes = await save_upload_with_size_limit(pdf, file_path)
+        logger.info(f"Saved PDF: {file_path} ({size_bytes} bytes)")
 
         # Extract TOPs using LLM
         tops = extract_tops_from_pdf(
@@ -663,6 +1004,8 @@ async def extract_tops_endpoint(
         logger.info(f"Successfully extracted {len(tops)} TOPs from {pdf.filename}")
         return ExtractTOPsResponse(tops=tops)
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"TOP extraction failed: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -748,34 +1091,56 @@ async def report_session_complete(request: SessionCompleteRequest):
     )
 
 
-# ----- Background Tasks -----
+# ----- Transcription Worker -----
 
 
-def run_transcription(job_id: str, file_path: str, models: TranscriptionModels):
+def run_transcription(
+    job_id: str,
+    file_path: str | None,
+    models: TranscriptionModels,
+) -> None:
     """
-    Run transcription in background using pre-loaded models.
+    Run transcription in a managed worker using pre-loaded models.
+
+    Transcription itself is not retried automatically: long GPU jobs can be
+    expensive and failure modes are often input/model related. Cancellation is
+    cooperative via the progress callback and checked again before persisting
+    a completed result.
     """
-    logger.info(f"[Job {job_id}] Background task started")
+    logger.info(f"[Job {job_id}] Worker task started")
     try:
-        if job_id not in jobs:
+        if get_job_from_cache_or_db(job_id) is None:
             persisted_job = load_job(job_id)
             if persisted_job:
-                jobs[job_id] = persisted_job
-        if job_id not in jobs:
+                with JOB_LOCK:
+                    jobs[job_id] = persisted_job
+        job = get_job_from_cache_or_db(job_id)
+        if job is None:
             raise RuntimeError("Job nicht gefunden")
+        if is_job_cancelled(job_id):
+            raise CancellationRequested()
+        if not file_path:
+            raise RuntimeError("Upload-Datei nicht gefunden")
+        if not os.path.exists(file_path):
+            raise RuntimeError("Upload-Datei ist nicht mehr verfügbar")
 
-        # Update progress
-        jobs[job_id]["status"] = "processing"
-        jobs[job_id]["progress"] = 10
-        jobs[job_id]["message"] = "Transkription wird vorbereitet..."
-        persist_job_state(job_id)
+        update_job_state(
+            job_id,
+            status=JOB_STATUS_PROCESSING,
+            progress=10,
+            message="Transkription wird vorbereitet...",
+        )
         logger.info(f"[Job {job_id}] Status: processing, preparing transcription...")
 
         # Run transcription with pre-loaded models
         def progress_callback(progress: int, message: str):
-            jobs[job_id]["progress"] = progress
-            jobs[job_id]["message"] = message
-            persist_job_state(job_id)
+            if is_job_cancelled(job_id):
+                raise CancellationRequested()
+            update_job_state(
+                job_id,
+                progress=progress,
+                message=message,
+            )
             logger.info(f"[Job {job_id}] Progress: {progress}% - {message}")
 
         # Time the transcription
@@ -783,44 +1148,60 @@ def run_transcription(job_id: str, file_path: str, models: TranscriptionModels):
         result = transcribe_audio(file_path, models, progress_callback)
         transcription_duration = time.time() - transcription_start
 
+        if is_job_cancelled(job_id):
+            raise CancellationRequested()
+
         transcript = result.transcript
 
         # Calculate transcript metrics
         transcript_line_count = len(transcript)
         transcript_char_count = sum(len(line.get("text", "")) for line in transcript)
 
-        # Update job with result and telemetry data
-        jobs[job_id]["status"] = "completed"
-        jobs[job_id]["progress"] = 100
-        jobs[job_id]["message"] = "Transkription abgeschlossen"
-        jobs[job_id]["transcript"] = transcript
-        # Keep the existing upload path for streaming playback.
-        jobs[job_id]["audio_path"] = file_path
-
-        # Store telemetry data for later reporting
-        jobs[job_id]["telemetry"] = {
-            "audio_duration_seconds": result.audio_duration_seconds,
-            "transcription_duration_seconds": transcription_duration,
-            "transcript_line_count": transcript_line_count,
-            "transcript_char_count": transcript_char_count,
-            "whisper_model": WHISPER_MODEL,
-            "whisper_batch_size": WHISPER_BATCH_SIZE,
-        }
-        persist_job_state(job_id)
+        update_job_state(
+            job_id,
+            status=JOB_STATUS_COMPLETED,
+            progress=100,
+            message="Transkription abgeschlossen",
+            transcript=transcript,
+            audio_path=file_path,
+            error=None,
+            telemetry={
+                "audio_duration_seconds": result.audio_duration_seconds,
+                "transcription_duration_seconds": transcription_duration,
+                "transcript_line_count": transcript_line_count,
+                "transcript_char_count": transcript_char_count,
+                "whisper_model": WHISPER_MODEL,
+                "whisper_batch_size": WHISPER_BATCH_SIZE,
+            },
+        )
 
         logger.info(
             f"[Job {job_id}] Transcription completed successfully with {transcript_line_count} lines"
         )
 
+    except CancellationRequested:
+        logger.info(f"[Job {job_id}] Transcription cancelled")
+        job = update_job_state(
+            job_id,
+            status=JOB_STATUS_CANCELLED,
+            message="Transkription abgebrochen",
+            error=None,
+            cancellation_requested=True,
+        )
+        if DELETE_UPLOADS_ON_CANCEL_OR_FAILURE and job:
+            cleanup_job_uploads(job_id, job)
     except Exception as e:
         logger.error(f"[Job {job_id}] Transcription failed: {str(e)}", exc_info=True)
-        if job_id in jobs:
-            jobs[job_id]["status"] = "failed"
-            jobs[job_id]["error"] = str(e)
-            jobs[job_id]["message"] = f"Fehler: {str(e)}"
-            persist_job_state(job_id)
-
-        # Clean up GPU memory even on failure
+        job = update_job_state(
+            job_id,
+            status=JOB_STATUS_FAILED,
+            error=str(e),
+            message=f"Fehler: {str(e)}",
+        )
+        if DELETE_UPLOADS_ON_CANCEL_OR_FAILURE and job:
+            cleanup_job_uploads(job_id, job)
+    finally:
+        # Clean up GPU memory after every terminal worker run.
         try:
             import gc
             import torch
@@ -828,7 +1209,7 @@ def run_transcription(job_id: str, file_path: str, models: TranscriptionModels):
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-                logger.info(f"[Job {job_id}] GPU memory cleared after error")
+                logger.info(f"[Job {job_id}] GPU memory cleared")
         except Exception:
             pass
 

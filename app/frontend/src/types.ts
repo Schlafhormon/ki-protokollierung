@@ -12,7 +12,7 @@ export interface TranscriptLine {
 
 export interface TranscriptionJob {
   job_id: string;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
   progress: number;
   message: string;
   transcript?: TranscriptLine[];
