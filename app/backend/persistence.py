@@ -113,10 +113,25 @@ def init_db(db_path: Path | None = None) -> None:
                 UNIQUE (session_id, top_index)
             );
 
+            CREATE TABLE IF NOT EXISTS session_transcript_lines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                line_index INTEGER NOT NULL,
+                speaker TEXT NOT NULL,
+                text TEXT NOT NULL,
+                start REAL NOT NULL,
+                end REAL NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE CASCADE,
+                UNIQUE (session_id, line_index)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_transcription_jobs_session_id
                 ON transcription_jobs(session_id);
             CREATE INDEX IF NOT EXISTS idx_transcript_lines_job_id
                 ON transcript_lines(job_id);
+            CREATE INDEX IF NOT EXISTS idx_session_transcript_lines_session_id
+                ON session_transcript_lines(session_id);
             """
         )
         existing_columns = {
@@ -388,6 +403,31 @@ def save_session(
             ],
         )
 
+        if state.get("transcript") is not None:
+            db.execute(
+                "DELETE FROM session_transcript_lines WHERE session_id = ?",
+                (session_id,),
+            )
+            db.executemany(
+                """
+                INSERT INTO session_transcript_lines (
+                    session_id, line_index, speaker, text, start, end
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        session_id,
+                        index,
+                        str(line.get("speaker", "")),
+                        str(line.get("text", "")),
+                        float(line.get("start", 0)),
+                        float(line.get("end", 0)),
+                    )
+                    for index, line in enumerate(state.get("transcript") or [])
+                ],
+            )
+
     return load_session(session_id, db_path=db_path) or {}
 
 
@@ -434,6 +474,15 @@ def load_session(
             """,
             (session_id,),
         ).fetchall()
+        transcript = db.execute(
+            """
+            SELECT speaker, text, start, end
+            FROM session_transcript_lines
+            WHERE session_id = ?
+            ORDER BY line_index
+            """,
+            (session_id,),
+        ).fetchall()
 
     session = dict(row)
     session["skipped_assignment"] = bool(session["skipped_assignment"])
@@ -445,4 +494,5 @@ def load_session(
     session["summaries"] = {
         int(item["top_index"]): item["summary"] for item in summaries
     }
+    session["transcript"] = [dict(line) for line in transcript] if transcript else None
     return session

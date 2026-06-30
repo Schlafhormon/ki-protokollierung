@@ -2,7 +2,12 @@
  * API client for the Protokollierungsassistenz backend
  */
 
-import type { TranscriptLine, TranscriptionJob } from "./types";
+import type {
+  SessionResponse,
+  SessionSavePayload,
+  TranscriptLine,
+  TranscriptionJob,
+} from "./types";
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
@@ -10,10 +15,14 @@ const API_BASE = import.meta.env.VITE_API_URL || "";
  * Start a transcription job by uploading an audio file.
  */
 export async function startTranscription(
-  audioFile: File
+  audioFile: File,
+  sessionId?: string | null
 ): Promise<TranscriptionJob> {
   const formData = new FormData();
   formData.append("audio", audioFile);
+  if (sessionId) {
+    formData.append("session_id", sessionId);
+  }
 
   const response = await fetch(`${API_BASE}/api/transcribe`, {
     method: "POST",
@@ -39,6 +48,46 @@ export async function getTranscriptionStatus(
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.detail || "Fehler beim Abrufen des Status");
+  }
+
+  return response.json();
+}
+
+/**
+ * Create or update an editing session.
+ */
+export async function saveSession(
+  payload: SessionSavePayload
+): Promise<SessionResponse> {
+  const sessionId = payload.session_id?.trim();
+  const response = await fetch(
+    sessionId ? `${API_BASE}/api/sessions/${sessionId}` : `${API_BASE}/api/sessions`,
+    {
+      method: sessionId ? "PUT" : "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || "Fehler beim Speichern der Sitzung");
+  }
+
+  return response.json();
+}
+
+/**
+ * Load a persisted editing session.
+ */
+export async function loadSession(sessionId: string): Promise<SessionResponse> {
+  const response = await fetch(`${API_BASE}/api/sessions/${sessionId}`);
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || "Fehler beim Laden der Sitzung");
   }
 
   return response.json();

@@ -14,6 +14,7 @@ const defaultProps: AssignmentStepProps = {
   onBack: vi.fn(),
   tops: ['Begruessung', 'Haushalt'],
   transcript,
+  setTranscript: vi.fn(),
   assignments: [null, null],
   setAssignments: vi.fn(),
   speakerNames: {},
@@ -58,5 +59,22 @@ describe('AssignmentStep', () => {
 
     await user.click(screen.getByRole('button', { name: /zusammenfassungen erstellen/i }));
     expect(onNext).toHaveBeenCalledTimes(1);
+  });
+
+  it('updates corrected transcript line text', async () => {
+    const user = userEvent.setup();
+    const setTranscript = vi.fn();
+    renderAssignmentStep({ setTranscript });
+
+    await user.click(screen.getAllByRole('button', { name: /bearbeiten/i })[0]!);
+    const textarea = screen.getByLabelText(/transkriptzeile 1 korrigieren/i);
+    await user.clear(textarea);
+    await user.type(textarea, 'Hallo korrigiert');
+    await user.click(screen.getByRole('button', { name: /^speichern$/i }));
+
+    expect(setTranscript).toHaveBeenCalledWith([
+      { ...transcript[0]!, text: 'Hallo korrigiert' },
+      transcript[1],
+    ]);
   });
 });

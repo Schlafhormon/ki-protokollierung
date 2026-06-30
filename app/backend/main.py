@@ -606,6 +606,7 @@ class SessionSaveRequest(BaseModel):
     job_id: Optional[str] = None
     current_step: Optional[int] = None
     tops: List[str] = Field(default_factory=list)
+    transcript: Optional[List[TranscriptLine]] = None
     assignments: List[Optional[int]] = Field(default_factory=list)
     speaker_names: Dict[str, str] = Field(default_factory=dict)
     summaries: Dict[int, str] = Field(default_factory=dict)
@@ -693,6 +694,9 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
     job_id = session.get("job_id")
     job = get_job_from_cache_or_db(job_id) if job_id else None
     job_response = build_transcription_job_response(job_id, job) if job else None
+    transcript = session.get("transcript")
+    if transcript is None and job_response:
+        transcript = job_response.transcript
 
     return SessionResponse(
         session_id=session["session_id"],
@@ -703,7 +707,7 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
         speaker_names=session.get("speaker_names") or {},
         summaries=session.get("summaries") or {},
         skipped_assignment=bool(session.get("skipped_assignment")),
-        transcript=job_response.transcript if job_response else None,
+        transcript=transcript,
         audio_url=job_response.audio_url if job_response else None,
         audio_metadata=job_response.audio_metadata if job_response else None,
         job=job_response,
@@ -742,8 +746,9 @@ async def create_or_save_session(request: SessionSaveRequest):
     """
     Create or save a persisted editing session.
 
-    This stores user-editable state only: TOPs, line assignments, speaker display
-    names, summaries and the linked transcription job. Audio bytes are not copied.
+    This stores user-editable state only: TOPs, corrected transcript lines,
+    line assignments, speaker display names, summaries and the linked
+    transcription job. Audio bytes are not copied.
     """
     session_id = request.session_id or str(uuid.uuid4())
     session = save_session(session_id, model_to_dict(request))

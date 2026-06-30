@@ -28,6 +28,7 @@ def test_persistence_initializes_expected_tables(tmp_path, monkeypatch):
         "assignments",
         "speaker_names",
         "summaries",
+        "session_transcript_lines",
     }.issubset(tables)
 
 
@@ -138,6 +139,20 @@ def test_session_state_is_saved_and_loaded_with_linked_job(tmp_path, monkeypatch
             "job_id": "job-2",
             "current_step": 3,
             "tops": ["Begrüßung", "Haushalt"],
+            "transcript": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Korrigierter Bericht zu TOP 1",
+                    "start": 0.0,
+                    "end": 2.0,
+                },
+                {
+                    "speaker": "SPEAKER_01",
+                    "text": "Korrigierter Beschluss zu TOP 2",
+                    "start": 2.0,
+                    "end": 4.0,
+                },
+            ],
             "assignments": [0, 1],
             "speaker_names": {
                 "SPEAKER_00": "Alice",
@@ -171,7 +186,8 @@ def test_session_state_is_saved_and_loaded_with_linked_job(tmp_path, monkeypatch
         "0": "Begrüßung wurde abgeschlossen.",
         "1": "Haushalt wurde beschlossen.",
     }
-    assert body["transcript"][1]["text"] == "Beschluss zu TOP 2"
+    assert body["transcript"][0]["text"] == "Korrigierter Bericht zu TOP 1"
+    assert body["transcript"][1]["text"] == "Korrigierter Beschluss zu TOP 2"
     assert body["audio_url"] == "/api/audio/job-2"
     assert body["job"]["status"] == "completed"
 

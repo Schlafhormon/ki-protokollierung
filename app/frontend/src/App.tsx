@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Layout from "./components/Layout";
 import StepIndicator from "./components/StepIndicator";
 import UploadStep from "./components/UploadStep";
@@ -15,14 +15,19 @@ import {
   generateSummary,
   checkBackendHealth,
   reportSessionComplete,
+  saveSession,
+  loadSession,
 } from "./api";
-import type { TranscriptLine } from "./types";
+import type { SessionResponse, SessionSavePayload, TranscriptLine } from "./types";
 
 // LocalStorage key for LLM settings
 const LLM_SETTINGS_KEY = "llm-settings";
+const ACTIVE_SESSION_KEY = "active-session-id";
+const SESSION_DRAFT_KEY = "active-session-draft";
 
 // Implicit TOP title when no TOPs are defined
 const DEFAULT_TOP_TITLE = "Gesamtes Gespräch";
+const EMPTY_TOPS = ["", "", ""];
 
 // Generic system prompt for conversations without TOPs
 const GENERIC_SUMMARY_PROMPT = `Du bist ein Experte für die Zusammenfassung von Gesprächen und Audioaufnahmen.
@@ -48,6 +53,30 @@ FORMAT:
 - NUR Fließtext, KEINE Markdown-Formatierung (keine **, keine #)
 `;
 
+interface SessionDraft extends SessionSavePayload {
+  audio_url?: string | null;
+}
+
+function withApiBase(url?: string | null): string | null {
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) return url;
+  const baseUrl = import.meta.env.VITE_API_URL || "";
+  return `${baseUrl}${url}`;
+}
+
+function normalizeSummaries(
+  summaries: Record<number, string> | Record<string, string> | undefined
+): Record<number, string> {
+  const normalized: Record<number, string> = {};
+  Object.entries(summaries ?? {}).forEach(([key, value]) => {
+    const index = Number(key);
+    if (Number.isFinite(index)) {
+      normalized[index] = value;
+    }
+  });
+  return normalized;
+}
+
 export default function App() {
   // Current step in wizard
   const [currentStep, setCurrentStep] = useState(1);
@@ -63,7 +92,7 @@ export default function App() {
 
   // Data state
   const [audioFile, setAudioFile] = useState<File | null>(null);
-  const [tops, setTops] = useState<string[]>(["", "", ""]);
+  const [tops, setTops] = useState<string[]>(EMPTY_TOPS);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [assignments, setAssignments] = useState<(number | null)[]>([]);
   const [summaries, setSummaries] = useState<Record<number, string>>({});
@@ -71,6 +100,15 @@ export default function App() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [skippedAssignment, setSkippedAssignment] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [restoreCandidate, setRestoreCandidate] = useState<{
+    sessionId: string | null;
+    draft: SessionDraft | null;
+  } | null>(null);
+  const [isRestoringSession, setIsRestoringSession] = useState(false);
+  const [sessionMessage, setSessionMessage] = useState<string | null>(null);
+  const lastSavedPayloadRef = useRef<string | null>(null);
+  const saveTimerRef = useRef<number | null>(null);
 
   // Helper to apply speaker name mappings to transcript lines for summarization
   const applySpeakerNames = (lines: TranscriptLine[]): TranscriptLine[] => {
@@ -98,9 +136,102 @@ export default function App() {
     return DEFAULT_LLM_SETTINGS;
   });
 
+  const buildSessionPayload = useCallback(
+    (overrides: Partial<SessionSavePayload> = {}): SessionSavePayload => ({
+      session_id: overrides.session_id ?? sessionId,
+      job_id: overrides.job_id ?? jobId,
+      current_step: overrides.current_step ?? currentStep,
+      tops: overrides.tops ?? tops,
+      transcript: overrides.transcript ?? transcript,
+      assignments: overrides.assignments ?? assignments,
+      speaker_names: overrides.speaker_names ?? speakerNames,
+      summaries: overrides.summaries ?? summaries,
+      skipped_assignment: overrides.skipped_assignment ?? skippedAssignment,
+    }),
+    [
+      assignments,
+      currentStep,
+      jobId,
+      sessionId,
+      skippedAssignment,
+      speakerNames,
+      summaries,
+      tops,
+      transcript,
+    ]
+  );
+
+  const applySession = useCallback((session: SessionResponse | SessionDraft) => {
+    setSessionId(session.session_id ?? null);
+    setJobId(session.job_id ?? null);
+    setCurrentStep(session.current_step ?? 1);
+    setTops(session.tops?.length ? session.tops : EMPTY_TOPS);
+    setTranscript(session.transcript ?? []);
+    setAssignments(session.assignments ?? []);
+    setSpeakerNames(session.speaker_names ?? {});
+    setSummaries(normalizeSummaries(session.summaries));
+    setSkippedAssignment(Boolean(session.skipped_assignment));
+    setAudioUrl(withApiBase(session.audio_url));
+    setAudioFile(null);
+    setIsProcessing(false);
+    setProcessingError(null);
+    setProcessingStatus("");
+    setProcessingProgress(0);
+  }, []);
+
+  const resetSession = useCallback(() => {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    setSessionId(null);
+    setJobId(null);
+    setCurrentStep(1);
+    setAudioFile(null);
+    setTops(EMPTY_TOPS);
+    setTranscript([]);
+    setAssignments([]);
+    setSummaries({});
+    setAudioUrl(null);
+    setSpeakerNames({});
+    setSkippedAssignment(false);
+    setIsGeneratingSummary(false);
+    setIsProcessing(false);
+    setProcessingError(null);
+    setProcessingStatus("");
+    setProcessingProgress(0);
+    setSessionMessage(null);
+    setRestoreCandidate(null);
+    lastSavedPayloadRef.current = null;
+    try {
+      localStorage.removeItem(ACTIVE_SESSION_KEY);
+      localStorage.removeItem(SESSION_DRAFT_KEY);
+    } catch (e) {
+      console.error("Failed to clear session draft:", e);
+    }
+  }, []);
+
   // Check backend availability on mount
   useEffect(() => {
     checkBackendHealth().then(setBackendAvailable);
+  }, []);
+
+  // Detect restorable session on mount. Backend remains the source of truth.
+  useEffect(() => {
+    try {
+      const storedSessionId = localStorage.getItem(ACTIVE_SESSION_KEY);
+      const storedDraft = localStorage.getItem(SESSION_DRAFT_KEY);
+      const draft = storedDraft ? (JSON.parse(storedDraft) as SessionDraft) : null;
+
+      if (storedSessionId || draft?.session_id) {
+        setRestoreCandidate({
+          sessionId: storedSessionId || draft?.session_id || null,
+          draft,
+        });
+      }
+    } catch (e) {
+      console.error("Failed to read session draft:", e);
+    }
   }, []);
 
   // Save LLM settings to localStorage when they change
@@ -112,6 +243,56 @@ export default function App() {
     }
   }, [llmSettings]);
 
+  useEffect(() => {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+
+    if (!sessionId) {
+      return;
+    }
+
+    const payload = buildSessionPayload();
+    const draft: SessionDraft = {
+      ...payload,
+      session_id: sessionId,
+      audio_url: audioUrl,
+    };
+
+    try {
+      localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
+      localStorage.setItem(SESSION_DRAFT_KEY, JSON.stringify(draft));
+    } catch (e) {
+      console.error("Failed to save local session draft:", e);
+    }
+
+    const serializedPayload = JSON.stringify({ ...payload, session_id: sessionId });
+    if (serializedPayload === lastSavedPayloadRef.current) {
+      return;
+    }
+
+    saveTimerRef.current = window.setTimeout(() => {
+      saveSession({ ...payload, session_id: sessionId })
+        .then((savedSession) => {
+          lastSavedPayloadRef.current = serializedPayload;
+          setSessionId(savedSession.session_id);
+          setSessionMessage(null);
+        })
+        .catch((error) => {
+          const message =
+            error instanceof Error ? error.message : "Sitzung konnte nicht gespeichert werden";
+          setSessionMessage(message);
+          console.error("Failed to save session:", error);
+        });
+    }, 500);
+
+    return () => {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, [audioUrl, buildSessionPayload, sessionId]);
+
   // Start transcription via backend API
   const startTranscription = async () => {
     if (!audioFile) return;
@@ -122,8 +303,24 @@ export default function App() {
     setProcessingError(null);
 
     try {
+      const preparedSession = await saveSession(
+        buildSessionPayload({
+          current_step: 1,
+          transcript: [],
+          assignments: [],
+          summaries: {},
+        })
+      );
+      const activeSessionId = preparedSession.session_id;
+      setSessionId(activeSessionId);
+      try {
+        localStorage.setItem(ACTIVE_SESSION_KEY, activeSessionId);
+      } catch (e) {
+        console.error("Failed to save active session id:", e);
+      }
+
       // Start transcription job
-      const job = await apiStartTranscription(audioFile);
+      const job = await apiStartTranscription(audioFile, activeSessionId);
 
       // Store job ID for telemetry
       setJobId(job.job_id);
@@ -143,8 +340,7 @@ export default function App() {
 
       // Set audio URL for playback (use relative URL to go through nginx proxy)
       if (completedJob.audio_url) {
-        const baseUrl = import.meta.env.VITE_API_URL || "";
-        setAudioUrl(`${baseUrl}${completedJob.audio_url}`);
+        setAudioUrl(withApiBase(completedJob.audio_url));
       }
 
       setIsProcessing(false);
@@ -172,6 +368,52 @@ export default function App() {
       setProcessingStatus(`Fehler: ${errorMessage}`);
       // Keep processing screen to show error
     }
+  };
+
+  const handleRestoreSession = async () => {
+    if (!restoreCandidate) return;
+
+    setIsRestoringSession(true);
+    setSessionMessage(null);
+
+    try {
+      if (restoreCandidate.sessionId) {
+        const restored = await loadSession(restoreCandidate.sessionId);
+        applySession(restored);
+        lastSavedPayloadRef.current = JSON.stringify(
+          buildSessionPayload({
+            session_id: restored.session_id,
+            job_id: restored.job_id,
+            current_step: restored.current_step,
+            tops: restored.tops,
+            transcript: restored.transcript ?? [],
+            assignments: restored.assignments,
+            speaker_names: restored.speaker_names,
+            summaries: normalizeSummaries(restored.summaries),
+            skipped_assignment: restored.skipped_assignment,
+          })
+        );
+      } else if (restoreCandidate.draft) {
+        applySession(restoreCandidate.draft);
+      }
+      setRestoreCandidate(null);
+    } catch (error) {
+      if (restoreCandidate.draft) {
+        applySession(restoreCandidate.draft);
+        setRestoreCandidate(null);
+        setSessionMessage("Backend-Sitzung nicht verfügbar. Lokaler Draft wurde geladen.");
+      } else {
+        const message =
+          error instanceof Error ? error.message : "Sitzung konnte nicht geladen werden";
+        setSessionMessage(message);
+      }
+    } finally {
+      setIsRestoringSession(false);
+    }
+  };
+
+  const handleStartNewSession = () => {
+    resetSession();
   };
 
   // Generate summary for entire conversation (when no TOPs are defined)
@@ -310,7 +552,7 @@ export default function App() {
     if (skippedAssignment) {
       // Go back to upload step, reset auto-created TOP
       setCurrentStep(1);
-      setTops(["", "", ""]);
+      setTops(EMPTY_TOPS);
       setTranscript([]);
       setAssignments([]);
       setSummaries({});
@@ -378,6 +620,38 @@ export default function App() {
         </div>
       )}
 
+      {(restoreCandidate || sessionId || sessionMessage) && (
+        <div className="mb-4 bg-white border border-gray-200 rounded-lg p-3 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-medium text-gray-800">
+              {sessionId ? "Sitzung aktiv" : "Letzte Sitzung verfügbar"}
+            </div>
+            {sessionMessage && (
+              <div className="text-sm text-yellow-700 mt-1">{sessionMessage}</div>
+            )}
+          </div>
+          <div className="flex gap-2">
+            {restoreCandidate && (
+              <button
+                type="button"
+                onClick={handleRestoreSession}
+                disabled={isRestoringSession}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+              >
+                {isRestoringSession ? "Wird geladen..." : "Letzte Sitzung fortsetzen"}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleStartNewSession}
+              className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+            >
+              Neue Sitzung starten
+            </button>
+          </div>
+        </div>
+      )}
+
       {!isProcessing && <StepIndicator currentStep={currentStep} />}
 
       {isProcessing ? (
@@ -413,6 +687,7 @@ export default function App() {
           onBack={handleStep2Back}
           tops={validTops}
           transcript={transcript}
+          setTranscript={setTranscript}
           assignments={assignments}
           setAssignments={setAssignments}
           audioUrl={audioUrl ?? undefined}

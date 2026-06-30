@@ -27,6 +27,7 @@ export default function AssignmentStep({
   onBack,
   tops,
   transcript,
+  setTranscript,
   assignments,
   setAssignments,
   audioUrl,
@@ -35,6 +36,8 @@ export default function AssignmentStep({
 }: AssignmentStepProps) {
   const [selectedTop, setSelectedTop] = useState(0);
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
+  const [editingLine, setEditingLine] = useState<number | null>(null);
+  const [editText, setEditText] = useState('');
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
 
   // Audio sync hook
@@ -72,6 +75,10 @@ export default function AssignmentStep({
   const counts = getAssignmentCounts();
 
   const handleLineClick = (lineIndex: number, event: MouseEvent<HTMLDivElement>) => {
+    if (editingLine === lineIndex) {
+      return;
+    }
+
     // Double-click to seek audio
     const line = transcript[lineIndex];
     if (event.detail === 2 && audioUrl && line) {
@@ -100,6 +107,28 @@ export default function AssignmentStep({
       setAssignments(newAssignments);
       setSelectionStart(lineIndex);
     }
+  };
+
+  const startLineEdit = (lineIndex: number, text: string) => {
+    setEditingLine(lineIndex);
+    setEditText(text);
+  };
+
+  const saveLineEdit = () => {
+    if (editingLine === null) {
+      return;
+    }
+    const updatedTranscript = transcript.map((line, index) =>
+      index === editingLine ? { ...line, text: editText } : line
+    );
+    setTranscript(updatedTranscript);
+    setEditingLine(null);
+    setEditText('');
+  };
+
+  const cancelLineEdit = () => {
+    setEditingLine(null);
+    setEditText('');
   };
 
   const assignedCount = assignments.filter((a) => a !== null).length;
@@ -210,7 +239,49 @@ export default function AssignmentStep({
                   <span className="font-medium text-gray-600">
                     {getDisplayName(line.speaker)}:
                   </span>{' '}
-                  <span className="text-gray-800">{line.text}</span>
+                  {editingLine === index ? (
+                    <div
+                      className="mt-2 space-y-2"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <textarea
+                        value={editText}
+                        onChange={(event) => setEditText(event.target.value)}
+                        className="w-full min-h-20 p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        aria-label={`Transkriptzeile ${index + 1} korrigieren`}
+                      />
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={saveLineEdit}
+                          className="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
+                        >
+                          Speichern
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelLineEdit}
+                          className="px-3 py-1 text-xs bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
+                        >
+                          Abbrechen
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <span className="text-gray-800">{line.text}</span>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          startLineEdit(index, line.text);
+                        }}
+                        className="ml-2 text-xs text-gray-500 hover:text-blue-600"
+                      >
+                        Bearbeiten
+                      </button>
+                    </>
+                  )}
                   <span className="ml-2 text-xs text-gray-400">
                     [{formatTime(line.start)}]
                   </span>

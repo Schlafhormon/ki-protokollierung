@@ -20,6 +20,24 @@ export interface TranscriptionJob {
   error?: string;
 }
 
+export interface SessionSavePayload {
+  session_id?: string | null;
+  job_id?: string | null;
+  current_step?: number | null;
+  tops: string[];
+  transcript?: TranscriptLine[];
+  assignments: (number | null)[];
+  speaker_names: Record<string, string>;
+  summaries: Record<number, string>;
+  skipped_assignment: boolean;
+}
+
+export interface SessionResponse extends SessionSavePayload {
+  session_id: string;
+  audio_url?: string | null;
+  job?: TranscriptionJob | null;
+}
+
 export interface SummarizeRequest {
   top_title: string;
   lines: TranscriptLine[];
@@ -63,6 +81,7 @@ export interface AssignmentStepProps {
   onBack: () => void;
   tops: string[];
   transcript: TranscriptLine[];
+  setTranscript: (transcript: TranscriptLine[]) => void;
   assignments: (number | null)[];
   setAssignments: (assignments: (number | null)[]) => void;
   audioUrl?: string;  // URL to stream audio for playback
