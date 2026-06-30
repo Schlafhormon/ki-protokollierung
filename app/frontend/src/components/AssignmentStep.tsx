@@ -257,10 +257,46 @@ export default function AssignmentStep({
     if (editingLine === null) {
       return;
     }
-    const updatedTranscript = transcript.map((line, index) =>
-      index === editingLine ? { ...line, text: editText } : line
-    );
+
+    const currentLine = transcript[editingLine];
+    if (!currentLine) {
+      return;
+    }
+
+    const parts = editText
+      .split(/\r?\n/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+    const texts = parts.length > 0 ? parts : [''];
+    const duration = Math.max(0, currentLine.end - currentLine.start);
+    const splitDuration = texts.length > 0 ? duration / texts.length : 0;
+    const replacementLines = texts.map((text, index) => ({
+      ...currentLine,
+      text,
+      start: currentLine.start + splitDuration * index,
+      end:
+        index === texts.length - 1
+          ? currentLine.end
+          : currentLine.start + splitDuration * (index + 1),
+    }));
+
+    const updatedTranscript = [
+      ...transcript.slice(0, editingLine),
+      ...replacementLines,
+      ...transcript.slice(editingLine + 1),
+    ];
     setTranscript(updatedTranscript);
+
+    if (replacementLines.length !== 1) {
+      const currentAssignment = assignments[editingLine] ?? null;
+      setAssignments([
+        ...assignments.slice(0, editingLine),
+        ...replacementLines.map(() => currentAssignment),
+        ...assignments.slice(editingLine + 1),
+      ]);
+    }
+
+    setSelectedLineIndex(editingLine);
     setEditingLine(null);
     setEditText('');
   };
@@ -268,6 +304,65 @@ export default function AssignmentStep({
   const cancelLineEdit = () => {
     setEditingLine(null);
     setEditText('');
+  };
+
+  const mergeLineWithPrevious = () => {
+    if (selectedLineIndex === null || selectedLineIndex <= 0) {
+      return;
+    }
+
+    const previousLine = transcript[selectedLineIndex - 1];
+    const currentLine = transcript[selectedLineIndex];
+    if (!previousLine || !currentLine) {
+      return;
+    }
+
+    const mergedLine = {
+      ...previousLine,
+      text: [previousLine.text, currentLine.text].filter(Boolean).join(' '),
+      start: Math.min(previousLine.start, currentLine.start),
+      end: Math.max(previousLine.end, currentLine.end),
+    };
+
+    setTranscript([
+      ...transcript.slice(0, selectedLineIndex - 1),
+      mergedLine,
+      ...transcript.slice(selectedLineIndex + 1),
+    ]);
+    setAssignments([
+      ...assignments.slice(0, selectedLineIndex),
+      ...assignments.slice(selectedLineIndex + 1),
+    ]);
+    setSelectedLineIndex(selectedLineIndex - 1);
+  };
+
+  const mergeLineWithNext = () => {
+    if (selectedLineIndex === null || selectedLineIndex >= transcript.length - 1) {
+      return;
+    }
+
+    const currentLine = transcript[selectedLineIndex];
+    const nextLine = transcript[selectedLineIndex + 1];
+    if (!currentLine || !nextLine) {
+      return;
+    }
+
+    const mergedLine = {
+      ...currentLine,
+      text: [currentLine.text, nextLine.text].filter(Boolean).join(' '),
+      start: Math.min(currentLine.start, nextLine.start),
+      end: Math.max(currentLine.end, nextLine.end),
+    };
+
+    setTranscript([
+      ...transcript.slice(0, selectedLineIndex),
+      mergedLine,
+      ...transcript.slice(selectedLineIndex + 2),
+    ]);
+    setAssignments([
+      ...assignments.slice(0, selectedLineIndex + 1),
+      ...assignments.slice(selectedLineIndex + 2),
+    ]);
   };
 
   const assignedCount = assignments.filter((a) => a !== null).length;
@@ -290,6 +385,7 @@ export default function AssignmentStep({
       {/* Speaker Name Editor */}
       <SpeakerNameEditor
         transcript={transcript}
+        setTranscript={setTranscript}
         speakerNames={speakerNames}
         setSpeakerNames={setSpeakerNames}
       />
@@ -427,6 +523,23 @@ export default function AssignmentStep({
         >
           Mit nächstem Segment mergen
         </button>
+        <span className="w-px h-6 bg-gray-300 mx-1" />
+        <button
+          type="button"
+          onClick={mergeLineWithPrevious}
+          disabled={selectedLineIndex === null || selectedLineIndex <= 0}
+          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+        >
+          Zeile mit vorheriger verbinden
+        </button>
+        <button
+          type="button"
+          onClick={mergeLineWithNext}
+          disabled={selectedLineIndex === null || selectedLineIndex >= transcript.length - 1}
+          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+        >
+          Zeile mit nächster verbinden
+        </button>
       </div>
 
       {/* Main Layout */}
@@ -516,6 +629,9 @@ export default function AssignmentStep({
                         className="w-full min-h-20 p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                         aria-label={`Transkriptzeile ${index + 1} korrigieren`}
                       />
+                      <p className="text-xs text-gray-500">
+                        Mehrere Zeilen im Feld werden beim Speichern als getrennte Transkriptzeilen übernommen.
+                      </p>
                       <div className="flex gap-2">
                         <button
                           type="button"

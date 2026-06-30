@@ -119,6 +119,81 @@ describe('AssignmentStep', () => {
     ]);
   });
 
+  it('splits a corrected transcript line by line breaks and keeps assignments aligned', async () => {
+    const user = userEvent.setup();
+    const setTranscript = vi.fn();
+    const setAssignments = vi.fn();
+    renderAssignmentStep({
+      assignments: [0, 1],
+      setTranscript,
+      setAssignments,
+    });
+
+    await user.click(screen.getAllByRole('button', { name: /bearbeiten/i })[0]!);
+    const textarea = screen.getByLabelText(/transkriptzeile 1 korrigieren/i);
+    fireEvent.change(textarea, { target: { value: 'Hallo\nzusammen' } });
+    await user.click(screen.getByRole('button', { name: /^speichern$/i }));
+
+    expect(setTranscript).toHaveBeenCalledWith([
+      { ...transcript[0]!, text: 'Hallo', start: 0, end: 2 },
+      { ...transcript[0]!, text: 'zusammen', start: 2, end: 4 },
+      transcript[1],
+    ]);
+    expect(setAssignments).toHaveBeenCalledWith([0, 0, 1]);
+  });
+
+  it('merges an accidentally separated speaker into an existing speaker', async () => {
+    const user = userEvent.setup();
+    const setTranscript = vi.fn();
+    const setSpeakerNames = vi.fn();
+    renderAssignmentStep({
+      setTranscript,
+      setSpeakerNames,
+      speakerNames: {
+        SPEAKER_00: 'Alice',
+        SPEAKER_01: 'Alicia',
+      },
+    });
+
+    await user.selectOptions(
+      screen.getByLabelText('SPEAKER_01 mit Sprecher zusammenführen'),
+      'SPEAKER_00'
+    );
+    await user.click(screen.getAllByRole('button', { name: /mergen/i })[1]!);
+
+    expect(setTranscript).toHaveBeenCalledWith([
+      transcript[0],
+      { ...transcript[1]!, speaker: 'SPEAKER_00' },
+    ]);
+    expect(setSpeakerNames).toHaveBeenCalledWith({
+      SPEAKER_00: 'Alice',
+    });
+  });
+
+  it('merges a selected transcript line with the previous line', async () => {
+    const user = userEvent.setup();
+    const setTranscript = vi.fn();
+    const setAssignments = vi.fn();
+    renderAssignmentStep({
+      assignments: [0, 1],
+      setTranscript,
+      setAssignments,
+    });
+
+    await user.click(screen.getByText('Wir beraten den Haushalt'));
+    await user.click(screen.getByRole('button', { name: /zeile mit vorheriger verbinden/i }));
+
+    expect(setTranscript).toHaveBeenCalledWith([
+      {
+        ...transcript[0]!,
+        text: 'Hallo zusammen Wir beraten den Haushalt',
+        start: 0,
+        end: 9,
+      },
+    ]);
+    expect(setAssignments).toHaveBeenLastCalledWith([0]);
+  });
+
   it('applies generated assignment suggestions after review', async () => {
     const user = userEvent.setup();
     const setAssignments = vi.fn();

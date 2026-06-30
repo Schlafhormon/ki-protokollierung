@@ -3,12 +3,14 @@ import type { TranscriptLine } from '../types';
 
 interface SpeakerNameEditorProps {
   transcript: TranscriptLine[];
+  setTranscript: (transcript: TranscriptLine[]) => void;
   speakerNames: Record<string, string>;
   setSpeakerNames: (names: Record<string, string>) => void;
 }
 
 export default function SpeakerNameEditor({
   transcript,
+  setTranscript,
   speakerNames,
   setSpeakerNames,
 }: SpeakerNameEditorProps) {
@@ -29,12 +31,37 @@ export default function SpeakerNameEditor({
 
   // Auto-expand if 3 or fewer speakers
   const [isExpanded, setIsExpanded] = useState(speakerInfo.length <= 3);
+  const [mergeTargets, setMergeTargets] = useState<Record<string, string>>({});
 
   const handleNameChange = (speakerId: string, name: string) => {
     setSpeakerNames({
       ...speakerNames,
       [speakerId]: name,
     });
+  };
+
+  const handleMergeSpeaker = (sourceSpeaker: string) => {
+    const targetSpeaker = mergeTargets[sourceSpeaker];
+    if (!targetSpeaker || targetSpeaker === sourceSpeaker) {
+      return;
+    }
+
+    setTranscript(
+      transcript.map((line) =>
+        line.speaker === sourceSpeaker ? { ...line, speaker: targetSpeaker } : line
+      )
+    );
+
+    const nextNames = { ...speakerNames };
+    if (!nextNames[targetSpeaker] && nextNames[sourceSpeaker]) {
+      nextNames[targetSpeaker] = nextNames[sourceSpeaker];
+    }
+    delete nextNames[sourceSpeaker];
+    setSpeakerNames(nextNames);
+
+    const nextTargets = { ...mergeTargets };
+    delete nextTargets[sourceSpeaker];
+    setMergeTargets(nextTargets);
   };
 
   if (speakerInfo.length === 0) return null;
@@ -59,7 +86,7 @@ export default function SpeakerNameEditor({
       {isExpanded && (
         <div className="p-4 space-y-3 border-t border-gray-200">
           {speakerInfo.map(({ id, sample }) => (
-            <div key={id} className="flex items-start gap-3">
+            <div key={id} className="flex flex-wrap items-start gap-3">
               <div className="w-28 flex-shrink-0">
                 <span className="text-sm font-mono text-gray-500">{id}</span>
               </div>
@@ -76,6 +103,38 @@ export default function SpeakerNameEditor({
                   "{sample}"
                 </p>
               </div>
+              {speakerInfo.length > 1 && (
+                <div className="w-full sm:w-64 flex gap-2">
+                  <select
+                    value={mergeTargets[id] || ''}
+                    onChange={(event) =>
+                      setMergeTargets({
+                        ...mergeTargets,
+                        [id]: event.target.value,
+                      })
+                    }
+                    className="min-w-0 flex-1 px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                    aria-label={`${id} mit Sprecher zusammenführen`}
+                  >
+                    <option value="">Zusammenführen mit...</option>
+                    {speakerInfo
+                      .filter((speaker) => speaker.id !== id)
+                      .map((speaker) => (
+                        <option key={speaker.id} value={speaker.id}>
+                          {speakerNames[speaker.id] || speaker.id}
+                        </option>
+                      ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => handleMergeSpeaker(id)}
+                    disabled={!mergeTargets[id]}
+                    className="px-3 py-1.5 text-sm bg-gray-900 text-white rounded hover:bg-gray-700 disabled:bg-gray-200 disabled:text-gray-400"
+                  >
+                    Mergen
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>
