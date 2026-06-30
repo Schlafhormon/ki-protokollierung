@@ -110,6 +110,27 @@ If you see a security warning, click "Run anyway" or "More info" → "Run anyway
 
 ---
 
+### Optional: Pin a Stable Release
+
+By default the setup uses the existing moving image tags (`latest`,
+`cpu-latest`, `gpu-latest`). To install a specific published release instead,
+set `PROTOKOLL_IMAGE_TAG` before starting:
+
+```bash
+PROTOKOLL_IMAGE_TAG=v1.2.3 ./setup.sh
+```
+
+```powershell
+$env:PROTOKOLL_IMAGE_TAG = "v1.2.3"
+.\setup.ps1
+```
+
+The setup scripts pull missing images by default. Set
+`PROTOKOLL_PULL_POLICY=always` for the old "always check for updates" behavior,
+or `PROTOKOLL_PULL_POLICY=never` for fully offline starts with local images.
+
+---
+
 ### Step 4: Wait for Download
 
 The setup will download the application images (~6 GB) and AI models (~5 GB). This may take **5-15 minutes** depending on your internet speed.
@@ -325,12 +346,20 @@ Research scripts under `scripts/research/` are not part of the production applic
 
 ### Pre-built Images
 
-Docker images are automatically built and published to GitHub Container Registry:
+Docker images are automatically built and published to GitHub Container Registry.
+Moving tags remain available for convenience:
 
 - `ghcr.io/aihpi/pilotproject-protokollierungsassistenz/frontend:latest`
 - `ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:cpu-latest`
 - `ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:gpu-latest`
 
+Versioned release tags are preferred for reproducible deployments:
+
+- `ghcr.io/aihpi/pilotproject-protokollierungsassistenz/frontend:vX.Y.Z`
+- `ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:vX.Y.Z`
+- `ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:vX.Y.Z-gpu`
+
+Commit-specific `sha-...` tags are used by the Kubernetes deployment manifests.
 These images include all ML models pre-bundled, so no HuggingFace token is required for end users.
 
 ### Development Setup
@@ -384,18 +413,41 @@ The frontend runs on `http://localhost:5173`.
 To build images locally (requires HuggingFace token):
 
 ```bash
+export HF_TOKEN=your_huggingface_token
+
 # CPU image
-docker build --build-arg HF_TOKEN=$HF_TOKEN -t backend:cpu ./app/backend
+DOCKER_BUILDKIT=1 docker build \
+  --secret id=hf_token,env=HF_TOKEN \
+  -t backend:cpu ./app/backend
 
 # GPU image
-docker build -f Dockerfile.gpu --build-arg HF_TOKEN=$HF_TOKEN -t backend:gpu ./app/backend
+DOCKER_BUILDKIT=1 docker build \
+  -f app/backend/Dockerfile.gpu \
+  --secret id=hf_token,env=HF_TOKEN \
+  -t backend:gpu ./app/backend
+```
+
+For development images without pre-cached models, build with
+`--build-arg PRECACHE_MODELS=0` and provide `HF_TOKEN` at runtime if diarization
+requires it.
+
+Runtime images can be pinned through `.env` or shell environment variables:
+
+```bash
+FRONTEND_IMAGE=ghcr.io/aihpi/pilotproject-protokollierungsassistenz/frontend:v1.2.3
+BACKEND_IMAGE=ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:v1.2.3
+BACKEND_GPU_IMAGE=ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:v1.2.3-gpu
 ```
 
 ### Environment Variables
 
 | Variable             | Description                                         | Default                     |
 | -------------------- | --------------------------------------------------- | --------------------------- |
-| `HF_TOKEN`           | HuggingFace token (only for local builds)           | -                           |
+| `HF_TOKEN`           | HuggingFace token for local dev/runtime, or BuildKit secret for local model pre-cache builds | - |
+| `FRONTEND_IMAGE`     | Frontend image reference for Docker Compose         | `frontend:latest` GHCR image |
+| `BACKEND_IMAGE`      | CPU backend image reference for Docker Compose      | `backend:cpu-latest` GHCR image |
+| `BACKEND_GPU_IMAGE`  | GPU backend image reference for Docker Compose override | `backend:gpu-latest` GHCR image |
+| `OLLAMA_IMAGE`       | Ollama image reference for Docker Compose           | `ollama/ollama:latest`      |
 | `WHISPER_MODEL`      | Whisper model size                                  | `large-v2`                  |
 | `WHISPER_DEVICE`     | Device for inference (`cuda`, `cpu`, `auto`)        | `auto`                      |
 | `WHISPER_BATCH_SIZE` | Batch size for transcription                        | `16`                        |

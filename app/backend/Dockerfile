@@ -1,51 +1,53 @@
-# Backend Dockerfile for CPU-only deployment with pre-bundled ML models
-# For GPU support, use Dockerfile.gpu
+# syntax=docker/dockerfile:1.7
+# Backend Dockerfile for CPU-only deployment with optional pre-bundled ML models.
+# For GPU support, use Dockerfile.gpu.
 #
-# Build with: docker build --build-arg HF_TOKEN=your_token -t backend:cpu .
+# Build with pre-cached models:
+#   DOCKER_BUILDKIT=1 docker build --secret id=hf_token,env=HF_TOKEN -t backend:cpu .
+# Build without pre-cached models (HF_TOKEN required at runtime for diarization):
+#   DOCKER_BUILDKIT=1 docker build --build-arg PRECACHE_MODELS=0 -t backend:cpu .
 
 FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install system dependencies (ffmpeg required by whisperx, curl for health checks)
+# Install system dependencies (ffmpeg required by whisperx, curl for health checks).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for package management
-RUN pip install uv
+RUN pip install --no-cache-dir uv
 
 # Copy project files
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 COPY *.py ./
 
 # Create uploads directory
 RUN mkdir -p uploads
 
 # Install dependencies
+ENV UV_NO_CACHE=1
 RUN uv pip install --system -e .
-
-# Build argument for HuggingFace token (used only during build to download models)
-ARG HF_TOKEN
-# Make ARG available as environment variable for Python to read
-ENV HF_TOKEN=${HF_TOKEN}
 
 # Set cache directories inside the container
 ENV HF_HOME=/app/.cache/huggingface
 ENV TORCH_HOME=/app/.cache/torch
 
-# Download all ML models at build time
-# This eliminates the need for HF_TOKEN at runtime
-# Reuses the load_models() function from transcribe.py
-RUN python -c "from transcribe import load_models; load_models()"
-
-# Clear the HF_TOKEN from environment (security: don't leak token in final image)
-ENV HF_TOKEN=
+# Download all ML models at build time when enabled. The HuggingFace token is
+# provided via a BuildKit secret and is never persisted as an ARG, ENV or layer.
+ARG PRECACHE_MODELS=1
+RUN --mount=type=secret,id=hf_token,required=false \
+    if [ "${PRECACHE_MODELS}" = "1" ]; then \
+      if [ -f /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi; \
+      python -c "from transcribe import load_models; load_models()"; \
+    else \
+      echo "Skipping model pre-cache; provide HF_TOKEN at runtime if diarization requires it."; \
+    fi
 
 # Set flag indicating models are pre-cached (runtime won't require HF_TOKEN)
-ENV MODELS_PRECACHED=1
+ENV MODELS_PRECACHED=${PRECACHE_MODELS}
 
 # Expose port
 EXPOSE 8010

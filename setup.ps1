@@ -19,12 +19,30 @@ param(
 
 $ErrorActionPreference = "Continue"
 
-# Docker images
-$FRONTEND_IMAGE = "ghcr.io/aihpi/pilotproject-protokollierungsassistenz/frontend:latest"
-$BACKEND_CPU_IMAGE = "ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:cpu-latest"
-$BACKEND_GPU_IMAGE = "ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:gpu-latest"
-$OLLAMA_IMAGE = "ollama/ollama:latest"
+# Docker images. Defaults keep the established deployment path; set
+# PROTOKOLL_IMAGE_TAG=v1.2.3 to pin application images to a release tag.
+$IMAGE_BASE = "ghcr.io/aihpi/pilotproject-protokollierungsassistenz"
+$PROTOKOLL_IMAGE_TAG = $env:PROTOKOLL_IMAGE_TAG
+$script:PROTOKOLL_PULL_POLICY = if ($env:PROTOKOLL_PULL_POLICY) { $env:PROTOKOLL_PULL_POLICY } else { "missing" }
+
+if ($PROTOKOLL_IMAGE_TAG) {
+    $FRONTEND_IMAGE = if ($env:FRONTEND_IMAGE) { $env:FRONTEND_IMAGE } else { "${IMAGE_BASE}/frontend:${PROTOKOLL_IMAGE_TAG}" }
+    $BACKEND_CPU_IMAGE = if ($env:BACKEND_IMAGE) { $env:BACKEND_IMAGE } else { "${IMAGE_BASE}/backend:${PROTOKOLL_IMAGE_TAG}" }
+    $BACKEND_GPU_IMAGE = if ($env:BACKEND_GPU_IMAGE) { $env:BACKEND_GPU_IMAGE } else { "${IMAGE_BASE}/backend:${PROTOKOLL_IMAGE_TAG}-gpu" }
+} else {
+    $FRONTEND_IMAGE = if ($env:FRONTEND_IMAGE) { $env:FRONTEND_IMAGE } else { "${IMAGE_BASE}/frontend:latest" }
+    $BACKEND_CPU_IMAGE = if ($env:BACKEND_IMAGE) { $env:BACKEND_IMAGE } else { "${IMAGE_BASE}/backend:cpu-latest" }
+    $BACKEND_GPU_IMAGE = if ($env:BACKEND_GPU_IMAGE) { $env:BACKEND_GPU_IMAGE } else { "${IMAGE_BASE}/backend:gpu-latest" }
+}
+
+$OLLAMA_IMAGE_TAG = if ($env:OLLAMA_IMAGE_TAG) { $env:OLLAMA_IMAGE_TAG } else { "latest" }
+$OLLAMA_IMAGE = if ($env:OLLAMA_IMAGE) { $env:OLLAMA_IMAGE } else { "ollama/ollama:${OLLAMA_IMAGE_TAG}" }
 $OLLAMA_MODEL = if ($env:LLM_MODEL) { $env:LLM_MODEL } else { "qwen3:8b" }
+
+$env:FRONTEND_IMAGE = $FRONTEND_IMAGE
+$env:BACKEND_IMAGE = $BACKEND_CPU_IMAGE
+$env:BACKEND_GPU_IMAGE = $BACKEND_GPU_IMAGE
+$env:OLLAMA_IMAGE = $OLLAMA_IMAGE
 
 # Ports used by the application
 $PORT_FRONTEND = 3000
@@ -65,11 +83,54 @@ function Show-Help {
     Write-Host "  cleanup    Alle Daten loeschen und neu starten"
     Write-Host "  help       Diese Hilfe anzeigen"
     Write-Host ""
+    Write-Host "Optionale Umgebungsvariablen:"
+    Write-Host "  PROTOKOLL_IMAGE_TAG=v1.2.3       Stabile App-Images verwenden"
+    Write-Host "  PROTOKOLL_PULL_POLICY=missing    Pull-Verhalten: missing, always, never"
+    Write-Host "  FRONTEND_IMAGE/BACKEND_IMAGE/... Vollstaendige Image-Referenzen setzen"
+    Write-Host ""
     Write-Host "Beispiele:"
     Write-Host "  .\setup.ps1           # Normale Installation/Start"
+    Write-Host "  `$env:PROTOKOLL_IMAGE_TAG='v1.2.3'; .\setup.ps1"
     Write-Host "  .\setup.ps1 status    # Pruefen ob alles laeuft"
     Write-Host "  .\setup.ps1 logs      # Fehlersuche mit Logs"
     Write-Host ""
+}
+
+#######################################
+# Pull images according to policy
+#######################################
+function Invoke-PullImages {
+    switch ($script:PROTOKOLL_PULL_POLICY.ToLower()) {
+        "always" {
+            Write-Info "Pruefe auf Aktualisierungen (Pull-Policy: always)..."
+        }
+        "missing" {
+            if ($script:MissingItems.Count -eq 0) {
+                Write-Info "Lokale Images vorhanden; ueberspringe Pull (PROTOKOLL_PULL_POLICY=missing)."
+                return
+            }
+            Write-Info "Lade fehlende Images (Pull-Policy: missing)..."
+        }
+        "never" {
+            Write-Info "Ueberspringe Image-Pull (PROTOKOLL_PULL_POLICY=never)."
+            return
+        }
+        default {
+            Write-Warn "Unbekannte PROTOKOLL_PULL_POLICY '$script:PROTOKOLL_PULL_POLICY'; verwende 'missing'."
+            if ($script:MissingItems.Count -eq 0) {
+                return
+            }
+        }
+    }
+
+    if ($script:USE_GPU) {
+        docker compose -f docker-compose.yml -f docker-compose.gpu.yml pull 2>&1 | Out-Null
+    } else {
+        docker compose pull 2>&1 | Out-Null
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Konnte Images nicht aktualisieren - verwende lokale Images"
+    }
 }
 
 #######################################
@@ -653,16 +714,7 @@ function Invoke-Start {
     }
     Write-Host ""
 
-    # Always pull latest images to ensure municipalities get fixes
-    Write-Info "Pruefe auf Aktualisierungen..."
-    if ($script:USE_GPU) {
-        docker compose -f docker-compose.yml -f docker-compose.gpu.yml pull 2>&1 | Out-Null
-    } else {
-        docker compose pull 2>&1 | Out-Null
-    }
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Konnte nicht auf Updates pruefen - verwende lokale Images"
-    }
+    Invoke-PullImages
     Write-Host ""
 
     if ($script:USE_GPU) {

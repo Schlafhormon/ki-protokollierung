@@ -8,7 +8,7 @@
 
 services:
   backend:
-    image: ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:gpu-latest
+    image: ${BACKEND_GPU_IMAGE:-ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:gpu-latest}
     environment:
       - WHISPER_DEVICE=cuda
     deploy:

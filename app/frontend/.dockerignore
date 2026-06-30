@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+coverage/
+.vite/
+.eslintcache
+*.log
+Dockerfile*
+src/**/*.test.ts
+src/**/*.test.tsx
+src/test/

@@ -24,12 +24,30 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Docker images
-FRONTEND_IMAGE="ghcr.io/aihpi/pilotproject-protokollierungsassistenz/frontend:latest"
-BACKEND_CPU_IMAGE="ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:cpu-latest"
-BACKEND_GPU_IMAGE="ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:gpu-latest"
-OLLAMA_IMAGE="ollama/ollama:latest"
+# Docker images. Defaults keep the established deployment path; set
+# PROTOKOLL_IMAGE_TAG=v1.2.3 to pin application images to a release tag.
+IMAGE_BASE="ghcr.io/aihpi/pilotproject-protokollierungsassistenz"
+PROTOKOLL_IMAGE_TAG="${PROTOKOLL_IMAGE_TAG:-}"
+PROTOKOLL_PULL_POLICY="${PROTOKOLL_PULL_POLICY:-missing}" # missing|always|never
+
+if [ -n "$PROTOKOLL_IMAGE_TAG" ]; then
+    FRONTEND_IMAGE="${FRONTEND_IMAGE:-${IMAGE_BASE}/frontend:${PROTOKOLL_IMAGE_TAG}}"
+    BACKEND_CPU_IMAGE="${BACKEND_IMAGE:-${IMAGE_BASE}/backend:${PROTOKOLL_IMAGE_TAG}}"
+    BACKEND_GPU_IMAGE="${BACKEND_GPU_IMAGE:-${IMAGE_BASE}/backend:${PROTOKOLL_IMAGE_TAG}-gpu}"
+else
+    FRONTEND_IMAGE="${FRONTEND_IMAGE:-${IMAGE_BASE}/frontend:latest}"
+    BACKEND_CPU_IMAGE="${BACKEND_IMAGE:-${IMAGE_BASE}/backend:cpu-latest}"
+    BACKEND_GPU_IMAGE="${BACKEND_GPU_IMAGE:-${IMAGE_BASE}/backend:gpu-latest}"
+fi
+
+BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
+OLLAMA_IMAGE="${OLLAMA_IMAGE:-ollama/ollama:${OLLAMA_IMAGE_TAG:-latest}}"
 OLLAMA_MODEL="${LLM_MODEL:-qwen3:8b}"
+
+export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE OLLAMA_IMAGE
+
+# Global state
+MISSING_ITEMS=()
 
 # Ports used by the application
 PORT_FRONTEND=3000
@@ -66,8 +84,14 @@ show_help() {
     echo "  cleanup     Alle Daten loeschen und neu starten"
     echo "  help        Diese Hilfe anzeigen"
     echo ""
+    echo "Optionale Umgebungsvariablen:"
+    echo "  PROTOKOLL_IMAGE_TAG=v1.2.3       Stabile App-Images verwenden"
+    echo "  PROTOKOLL_PULL_POLICY=missing    Pull-Verhalten: missing, always, never"
+    echo "  FRONTEND_IMAGE/BACKEND_IMAGE/... Vollstaendige Image-Referenzen setzen"
+    echo ""
     echo "Beispiele:"
     echo "  ./setup.sh          # Normale Installation/Start"
+    echo "  PROTOKOLL_IMAGE_TAG=v1.2.3 ./setup.sh"
     echo "  ./setup.sh status   # Pruefen ob alles laeuft"
     echo "  ./setup.sh logs     # Fehlersuche mit Logs"
     echo ""
@@ -135,26 +159,26 @@ check_disk_space() {
 
     # Calculate required space based on what's already downloaded
     local required_gb=3  # Base runtime buffer
-    local missing_items=()
+    MISSING_ITEMS=()
 
     if ! image_exists "$BACKEND_CPU_IMAGE" && ! image_exists "$BACKEND_GPU_IMAGE"; then
         required_gb=$((required_gb + 9))
-        missing_items+=("Backend-Image (~9GB)")
+        MISSING_ITEMS+=("Backend-Image (~9GB)")
     fi
 
     if ! image_exists "$FRONTEND_IMAGE"; then
         required_gb=$((required_gb + 1))
-        missing_items+=("Frontend-Image (~1GB)")
+        MISSING_ITEMS+=("Frontend-Image (~1GB)")
     fi
 
     if ! image_exists "$OLLAMA_IMAGE"; then
         required_gb=$((required_gb + 2))
-        missing_items+=("Ollama-Image (~2GB)")
+        MISSING_ITEMS+=("Ollama-Image (~2GB)")
     fi
 
     if ! ollama_model_exists; then
         required_gb=$((required_gb + 5))
-        missing_items+=("Sprachmodell (~5GB)")
+        MISSING_ITEMS+=("Sprachmodell (~5GB)")
     fi
 
     # Get available disk space
@@ -165,14 +189,14 @@ check_disk_space() {
         available_gb=$(df -BG . | tail -1 | awk '{print $4}' | sed 's/G//')
     fi
 
-    if [ ${#missing_items[@]} -eq 0 ]; then
+    if [ ${#MISSING_ITEMS[@]} -eq 0 ]; then
         success "Alle Images bereits heruntergeladen"
         success "Verfuegbarer Speicherplatz: ${available_gb}GB (nur ~3GB benoetigt)"
         return 0
     fi
 
     echo "  Noch herunterzuladen:"
-    for item in "${missing_items[@]}"; do
+    for item in "${MISSING_ITEMS[@]}"; do
         echo "    - $item"
     done
     echo ""
@@ -189,6 +213,40 @@ check_disk_space() {
 
     success "Speicherplatz OK (${available_gb}GB verfuegbar, ~${required_gb}GB benoetigt)"
     return 0
+}
+
+########################################
+# Pull images according to policy
+########################################
+pull_images() {
+    case "$PROTOKOLL_PULL_POLICY" in
+        always)
+            info "Pruefe auf Aktualisierungen (Pull-Policy: always)..."
+            ;;
+        missing)
+            if [ ${#MISSING_ITEMS[@]} -eq 0 ]; then
+                info "Lokale Images vorhanden; ueberspringe Pull (PROTOKOLL_PULL_POLICY=missing)."
+                return 0
+            fi
+            info "Lade fehlende Images (Pull-Policy: missing)..."
+            ;;
+        never)
+            info "Ueberspringe Image-Pull (PROTOKOLL_PULL_POLICY=never)."
+            return 0
+            ;;
+        *)
+            warn "Unbekannte PROTOKOLL_PULL_POLICY '$PROTOKOLL_PULL_POLICY'; verwende 'missing'."
+            if [ ${#MISSING_ITEMS[@]} -eq 0 ]; then
+                return 0
+            fi
+            ;;
+    esac
+
+    if [ "$USE_GPU" = true ]; then
+        docker compose -f docker-compose.yml -f docker-compose.gpu.yml pull 2>/dev/null || warn "Konnte Images nicht aktualisieren - verwende lokale Images"
+    else
+        docker compose pull 2>/dev/null || warn "Konnte Images nicht aktualisieren - verwende lokale Images"
+    fi
 }
 
 ########################################
@@ -644,18 +702,12 @@ do_start() {
     echo ""
     info "Starte die Anwendung..."
 
-    if [ ${#missing_items[@]} -gt 0 ]; then
+    if [ ${#MISSING_ITEMS[@]} -gt 0 ]; then
         echo "Downloads koennen einige Minuten dauern."
     fi
     echo ""
 
-    # Always pull latest images to ensure municipalities get fixes
-    info "Pruefe auf Aktualisierungen..."
-    if [ "$USE_GPU" = true ]; then
-        docker compose -f docker-compose.yml -f docker-compose.gpu.yml pull 2>/dev/null || warn "Konnte nicht auf Updates pruefen - verwende lokale Images"
-    else
-        docker compose pull 2>/dev/null || warn "Konnte nicht auf Updates pruefen - verwende lokale Images"
-    fi
+    pull_images
     echo ""
 
     if [ "$USE_GPU" = true ]; then

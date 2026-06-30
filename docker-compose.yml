@@ -7,7 +7,7 @@
 
 services:
   frontend:
-    image: ghcr.io/aihpi/pilotproject-protokollierungsassistenz/frontend:latest
+    image: ${FRONTEND_IMAGE:-ghcr.io/aihpi/pilotproject-protokollierungsassistenz/frontend:latest}
     ports:
       - "3000:80"
     depends_on:
@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
 
   backend:
-    image: ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:cpu-latest
+    image: ${BACKEND_IMAGE:-ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:cpu-latest}
     ports:
       - "8010:8010"
     environment:
@@ -43,7 +43,7 @@ services:
     restart: unless-stopped
 
   ollama:
-    image: ollama/ollama:latest
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     ports:
       - "11434:11434"
     volumes:

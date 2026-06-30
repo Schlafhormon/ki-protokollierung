@@ -12,7 +12,7 @@ Kubernetes manifests for deploying TUIV (Protokollierungsassistenz) on the HPI c
 ## Architecture
 
 ```
-Internet → Ingress (tops.aisc.hpi.de)
+Internet → LoadBalancer Service (tops-frontend)
               ↓
          Frontend (nginx:80) — serves React SPA
               ↓ proxy_pass /api/ & /health
@@ -24,6 +24,7 @@ Internet → Ingress (tops.aisc.hpi.de)
 - **Frontend**: nginx serving the React SPA, proxies API requests to the backend
 - **Backend**: FastAPI with WhisperX (GPU) for transcription and PyAnnote for diarization; uses the AISC LLM API for summarization via the OpenAI SDK
 - **No Ollama needed**: The AISC LLM API replaces the local Ollama instance used in Docker Compose
+- **External access**: The checked-in default is a `LoadBalancer` Service. An optional Ingress example is provided but not applied by Kustomize.
 
 ## Directory Structure
 
@@ -37,8 +38,8 @@ k8s/
 │   └── service.yaml            # ClusterIP "backend" on port 8010
 ├── frontend/
 │   ├── deployment.yaml         # CPU pod, nginx + React SPA
-│   └── service.yaml            # ClusterIP on port 80
-├── ingress.yaml                # External access (edit hostname)
+│   ├── service.yaml            # LoadBalancer on port 80
+│   └── ingress.example.yaml    # Optional Ingress template, not in Kustomize
 ├── secrets/
 │   ├── example-secret.yaml     # Template — copy to secret.yaml
 │   └── .gitkeep
@@ -72,15 +73,18 @@ kubectl apply -f secret.yaml
 
 The secret is referenced as `optional: true` in the deployment, so the pod will still start without it (defaulting to `"ollama"`).
 
-### Ingress
+### External Access
 
-Edit `ingress.yaml` to set the actual hostname before deploying:
+By default, `frontend/service.yaml` exposes the app as a `LoadBalancer` Service:
 
-```yaml
-spec:
-  rules:
-    - host: tops.aisc.hpi.de  # ← change this to your desired hostname
+```bash
+kubectl get svc -n tops tops-frontend
 ```
+
+If your cluster uses an Ingress controller instead, copy
+`frontend/ingress.example.yaml`, set the real host and ingress class, and apply
+it separately. The example is intentionally not included in `kustomization.yaml`
+so existing LoadBalancer deployments keep working.
 
 ## Deployment
 
@@ -125,12 +129,11 @@ kubectl port-forward -n tops svc/tops-frontend 3000:80
 When new container images are pushed to GHCR (handled by the existing GitHub Actions pipeline on push to `main`):
 
 ```bash
-# Restart to pull latest images
-kubectl rollout restart deployment/tops-backend -n tops
-kubectl rollout restart deployment/tops-frontend -n tops
-
-# Watch the rollout
+# The GitHub Actions deploy job pins manifests to commit-specific sha tags.
+# Apply the updated manifests, then watch the rollout:
+kubectl apply -k k8s
 kubectl rollout status deployment/tops-backend -n tops
+kubectl rollout status deployment/tops-frontend -n tops
 ```
 
 ## Troubleshooting
@@ -163,7 +166,7 @@ kubectl rollout status deployment/tops-backend -n tops
 |---------|---------------|------------|
 | LLM inference | Local Ollama container | AISC LLM API (api.aisc.hpi.de) |
 | GPU access | Docker `--gpus` / compose `deploy.resources` | `runtimeClassName: nvidia` + `nodeSelector` |
-| Backend image | `backend:cpu-latest` or `backend:gpu-latest` | `backend:gpu-latest` (always GPU) |
+| Backend image | `backend:cpu-latest` or `backend:gpu-latest` | Commit-pinned `sha-...-gpu` image (always GPU) |
 | Networking | Docker network (service names) | K8s Services + DNS |
 | Storage | `./uploads` volume mount | Ephemeral (jobs auto-clean after 2h) |
-| External access | `localhost:3000` | Ingress with hostname |
+| External access | `localhost:3000` | LoadBalancer by default; optional Ingress example |
