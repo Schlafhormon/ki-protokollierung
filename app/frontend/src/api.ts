@@ -4,6 +4,8 @@
 
 import type {
   AssignmentSuggestionsResponse,
+  ExportFormat,
+  ExportMetadata,
   SessionResponse,
   SessionSavePayload,
   SummaryReviewWarning,
@@ -270,6 +272,54 @@ export async function extractTOPsFromPDF(
 
   const data = await response.json();
   return data.tops;
+}
+
+export interface ProtocolExportPayload {
+  format: ExportFormat;
+  metadata: ExportMetadata;
+  tops: string[];
+  transcript: TranscriptLine[];
+  assignments: (number | null)[];
+  speakerNames: Record<string, string>;
+  summaries: Record<number, string>;
+  summaryReviews?: Record<number, unknown>;
+}
+
+export async function exportProtocol(payload: ProtocolExportPayload): Promise<Blob> {
+  const response = await fetch(`${API_BASE}/api/export`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      format: payload.format,
+      metadata: {
+        committee: payload.metadata.committee,
+        date: payload.metadata.date,
+        location: payload.metadata.location,
+        title: payload.metadata.title,
+        participants: payload.metadata.participants,
+      },
+      appendix: {
+        include_speaker_list: payload.metadata.includeSpeakerList,
+        include_transcript_excerpt: payload.metadata.includeTranscriptExcerpt,
+        include_generation_note: payload.metadata.includeGenerationNote,
+      },
+      tops: payload.tops,
+      transcript: payload.transcript,
+      assignments: payload.assignments,
+      speaker_names: payload.speakerNames,
+      summaries: payload.summaries,
+      summary_reviews: payload.summaryReviews ?? {},
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || "Fehler beim Exportieren des Protokolls");
+  }
+
+  return response.blob();
 }
 
 /**

@@ -13,6 +13,7 @@ vi.mock('./api', () => ({
   generateSummary: vi.fn(),
   reportSessionComplete: vi.fn(),
   extractTOPsFromPDF: vi.fn(),
+  exportProtocol: vi.fn(),
 }));
 
 describe('App session restore', () => {

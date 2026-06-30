@@ -36,6 +36,7 @@ def init_db(db_path: Path | None = None) -> None:
                 job_id TEXT,
                 current_step INTEGER,
                 skipped_assignment INTEGER NOT NULL DEFAULT 0,
+                export_metadata_json TEXT,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             );
@@ -153,6 +154,16 @@ def init_db(db_path: Path | None = None) -> None:
                 """
                 ALTER TABLE transcription_jobs
                 ADD COLUMN cancellation_requested INTEGER NOT NULL DEFAULT 0
+                """
+            )
+        session_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "export_metadata_json" not in session_columns:
+            db.execute(
+                """
+                ALTER TABLE sessions
+                ADD COLUMN export_metadata_json TEXT
                 """
             )
 
@@ -339,14 +350,15 @@ def save_session(
         db.execute(
             """
             INSERT INTO sessions (
-                session_id, job_id, current_step, skipped_assignment,
+                session_id, job_id, current_step, skipped_assignment, export_metadata_json,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 job_id = excluded.job_id,
                 current_step = excluded.current_step,
                 skipped_assignment = excluded.skipped_assignment,
+                export_metadata_json = excluded.export_metadata_json,
                 updated_at = excluded.updated_at
             """,
             (
@@ -354,6 +366,7 @@ def save_session(
                 state.get("job_id"),
                 state.get("current_step"),
                 1 if state.get("skipped_assignment") else 0,
+                _to_json(state.get("export_metadata") or {}),
                 created_at,
                 now,
             ),
@@ -528,5 +541,6 @@ def load_session(
         int(item["top_index"]): _from_json(item["review_json"]) or {}
         for item in summary_reviews
     }
+    session["export_metadata"] = _from_json(session.get("export_metadata_json")) or {}
     session["transcript"] = [dict(line) for line in transcript] if transcript else None
     return session

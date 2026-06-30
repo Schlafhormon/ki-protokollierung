@@ -19,6 +19,7 @@ import {
   loadSession,
 } from "./api";
 import type {
+  ExportMetadata,
   SessionResponse,
   SessionSavePayload,
   SummaryReview,
@@ -33,6 +34,16 @@ const SESSION_DRAFT_KEY = "active-session-draft";
 // Implicit TOP title when no TOPs are defined
 const DEFAULT_TOP_TITLE = "Gesamtes Gespräch";
 const EMPTY_TOPS = ["", "", ""];
+const DEFAULT_EXPORT_METADATA: ExportMetadata = {
+  committee: "",
+  date: "",
+  location: "",
+  title: "Sitzungsprotokoll",
+  participants: [],
+  includeSpeakerList: true,
+  includeTranscriptExcerpt: false,
+  includeGenerationNote: true,
+};
 
 // Generic system prompt for conversations without TOPs
 const GENERIC_SUMMARY_PROMPT = `Du bist ein Experte für die Zusammenfassung von Gesprächen und Audioaufnahmen.
@@ -124,6 +135,7 @@ export default function App() {
   const [assignments, setAssignments] = useState<(number | null)[]>([]);
   const [summaries, setSummaries] = useState<Record<number, string>>({});
   const [summaryReviews, setSummaryReviews] = useState<Record<number, SummaryReview>>({});
+  const [exportMetadata, setExportMetadata] = useState<ExportMetadata>(DEFAULT_EXPORT_METADATA);
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
@@ -175,11 +187,13 @@ export default function App() {
       speaker_names: overrides.speaker_names ?? speakerNames,
       summaries: overrides.summaries ?? summaries,
       summary_reviews: overrides.summary_reviews ?? summaryReviews,
+      export_metadata: overrides.export_metadata ?? exportMetadata,
       skipped_assignment: overrides.skipped_assignment ?? skippedAssignment,
     }),
     [
       assignments,
       currentStep,
+      exportMetadata,
       jobId,
       sessionId,
       skippedAssignment,
@@ -201,6 +215,10 @@ export default function App() {
     setSpeakerNames(session.speaker_names ?? {});
     setSummaries(normalizeSummaries(session.summaries));
     setSummaryReviews(normalizeSummaryReviews(session.summary_reviews));
+    setExportMetadata({
+      ...DEFAULT_EXPORT_METADATA,
+      ...(session.export_metadata ?? {}),
+    });
     setSkippedAssignment(Boolean(session.skipped_assignment));
     setAudioUrl(withApiBase(session.audio_url));
     setAudioFile(null);
@@ -224,6 +242,7 @@ export default function App() {
     setAssignments([]);
     setSummaries({});
     setSummaryReviews({});
+    setExportMetadata(DEFAULT_EXPORT_METADATA);
     setAudioUrl(null);
     setSpeakerNames({});
     setSkippedAssignment(false);
@@ -781,6 +800,8 @@ export default function App() {
           isGenerating={isGeneratingSummary}
           audioUrl={audioUrl ?? undefined}
           speakerNames={speakerNames}
+          exportMetadata={exportMetadata}
+          setExportMetadata={setExportMetadata}
         />
       )}
     </Layout>

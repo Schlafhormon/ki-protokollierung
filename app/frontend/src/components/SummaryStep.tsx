@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, type ChangeEvent } from 'react';
-import type { StructuredSummary, SummaryStepProps, TranscriptLine } from '../types';
+import { exportProtocol } from '../api';
+import type { ExportFormat, ExportMetadata, StructuredSummary, SummaryStepProps, TranscriptLine } from '../types';
 import AudioPlayer from './AudioPlayer';
 import { useAudioSync } from '../hooks/useAudioSync';
 
@@ -34,12 +35,16 @@ export default function SummaryStep({
   isGenerating,
   audioUrl,
   speakerNames,
+  exportMetadata,
+  setExportMetadata,
 }: SummaryStepProps) {
   const [selectedTop, setSelectedTop] = useState(0);
   const [editingTop, setEditingTop] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
   const [copied, setCopied] = useState(false);
   const [activeSourceLine, setActiveSourceLine] = useState<number | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(null);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
   const transcriptLineRefs = useRef<Array<HTMLDivElement | null>>([]);
 
@@ -138,23 +143,38 @@ export default function SummaryStep({
     }
   };
 
-  const handleExport = () => {
-    // Generate the full protocol text
-    let content = 'SITZUNGSPROTOKOLL\n';
-    content += '='.repeat(50) + '\n\n';
+  const updateExportMetadata = (patch: Partial<ExportMetadata>) => {
+    setExportMetadata({ ...exportMetadata, ...patch });
+  };
 
-    tops.forEach((top, index) => {
-      content += `TOP ${index + 1}: ${top}\n`;
-      content += '-'.repeat(40) + '\n';
-      content += (summaries[index] || 'Keine Zusammenfassung vorhanden.') + '\n\n';
-    });
+  const handleExport = async (format: ExportFormat) => {
+    setExportError(null);
+    setExportingFormat(format);
+    try {
+      const blob = await exportProtocol({
+        format,
+        metadata: exportMetadata,
+        tops,
+        transcript,
+        assignments,
+        speakerNames,
+        summaries,
+        summaryReviews,
+      });
+      downloadBlob(blob, format);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Export fehlgeschlagen';
+      setExportError(message);
+    } finally {
+      setExportingFormat(null);
+    }
+  };
 
-    // Create and download file
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const downloadBlob = (blob: Blob, format: ExportFormat) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'protokoll.txt';
+    a.download = `protokoll.${format}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -453,21 +473,128 @@ export default function SummaryStep({
 
       {/* Export Section */}
       <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="font-medium text-gray-900">Export</h3>
-            <p className="text-sm text-gray-500">
-              Protokoll als Datei herunterladen
-            </p>
+        <div className="space-y-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="font-medium text-gray-900">Export</h3>
+              <p className="text-sm text-gray-500">
+                Metadaten erfassen und Protokoll als Datei herunterladen
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {(['docx', 'pdf', 'txt'] as ExportFormat[]).map((format) => (
+                <button
+                  key={format}
+                  onClick={() => handleExport(format)}
+                  disabled={exportingFormat !== null}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 ${
+                    format === 'docx'
+                      ? 'bg-blue-600 text-white hover:bg-blue-700'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  {exportingFormat === format
+                    ? 'Exportiert...'
+                    : format === 'docx'
+                      ? 'DOCX'
+                      : format === 'pdf'
+                        ? 'PDF'
+                        : 'Text (.txt)'}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="flex gap-3">
-            <button
-              onClick={handleExport}
-              className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 flex items-center gap-2"
-            >
-              📄 Text (.txt)
-            </button>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="text-sm font-medium text-gray-700">
+              Gremium
+              <input
+                value={exportMetadata.committee}
+                onChange={(event) => updateExportMetadata({ committee: event.target.value })}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 font-normal text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="z. B. Hauptausschuss"
+              />
+            </label>
+            <label className="text-sm font-medium text-gray-700">
+              Datum
+              <input
+                type="date"
+                value={exportMetadata.date}
+                onChange={(event) => updateExportMetadata({ date: event.target.value })}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 font-normal text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </label>
+            <label className="text-sm font-medium text-gray-700">
+              Ort
+              <input
+                value={exportMetadata.location}
+                onChange={(event) => updateExportMetadata({ location: event.target.value })}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 font-normal text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="z. B. Rathaus, Sitzungssaal"
+              />
+            </label>
+            <label className="text-sm font-medium text-gray-700">
+              Sitzungstitel
+              <input
+                value={exportMetadata.title}
+                onChange={(event) => updateExportMetadata({ title: event.target.value })}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 font-normal text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Sitzungsprotokoll"
+              />
+            </label>
+            <label className="text-sm font-medium text-gray-700 md:col-span-2">
+              Teilnehmer
+              <textarea
+                value={exportMetadata.participants.join('\n')}
+                onChange={(event) =>
+                  updateExportMetadata({
+                    participants: event.target.value
+                      .split(/\n|;/)
+                      .map((participant) => participant.trim())
+                      .filter(Boolean),
+                  })
+                }
+                className="mt-1 h-20 w-full resize-none rounded-md border border-gray-300 px-3 py-2 font-normal text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Eine Person pro Zeile"
+              />
+            </label>
           </div>
+
+          <div className="flex flex-wrap gap-4 text-sm text-gray-700">
+            <label className="inline-flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={exportMetadata.includeSpeakerList}
+                onChange={(event) => updateExportMetadata({ includeSpeakerList: event.target.checked })}
+                className="h-4 w-4 rounded border-gray-300"
+              />
+              Sprecherliste
+            </label>
+            <label className="inline-flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={exportMetadata.includeTranscriptExcerpt}
+                onChange={(event) => updateExportMetadata({ includeTranscriptExcerpt: event.target.checked })}
+                className="h-4 w-4 rounded border-gray-300"
+              />
+              Transkript-Auszug
+            </label>
+            <label className="inline-flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={exportMetadata.includeGenerationNote}
+                onChange={(event) => updateExportMetadata({ includeGenerationNote: event.target.checked })}
+                className="h-4 w-4 rounded border-gray-300"
+              />
+              Generierungshinweis
+            </label>
+          </div>
+
+          {exportError && (
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {exportError}
+            </div>
+          )}
         </div>
       </div>
 

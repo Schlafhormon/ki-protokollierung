@@ -30,6 +30,7 @@ export interface SessionSavePayload {
   speaker_names: Record<string, string>;
   summaries: Record<number, string>;
   summary_reviews?: Record<number, SummaryReview>;
+  export_metadata?: ExportMetadata;
   skipped_assignment: boolean;
 }
 
@@ -116,6 +117,19 @@ export interface AssignmentSuggestionsResponse {
   uncertain_count: number;
 }
 
+export interface ExportMetadata {
+  committee: string;
+  date: string;
+  location: string;
+  title: string;
+  participants: string[];
+  includeSpeakerList: boolean;
+  includeTranscriptExcerpt: boolean;
+  includeGenerationNote: boolean;
+}
+
+export type ExportFormat = 'txt' | 'docx' | 'pdf';
+
 // Component Props Types
 export interface LayoutProps {
   children: React.ReactNode;
@@ -170,6 +184,8 @@ export interface SummaryStepProps {
   isGenerating: boolean;
   audioUrl?: string;  // URL to stream audio for playback
   speakerNames: Record<string, string>;
+  exportMetadata: ExportMetadata;
+  setExportMetadata: (metadata: ExportMetadata) => void;
 }
 
 // Color palette type for TOPs

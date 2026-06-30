@@ -1,8 +1,13 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { exportProtocol } from '../api';
 import type { SummaryStepProps, TranscriptLine } from '../types';
 import SummaryStep from './SummaryStep';
+
+vi.mock('../api', () => ({
+  exportProtocol: vi.fn(),
+}));
 
 const transcript: TranscriptLine[] = [
   { speaker: 'SPEAKER_00', text: 'Willkommen', start: 0, end: 4 },
@@ -21,6 +26,17 @@ const defaultProps: SummaryStepProps = {
   onRegenerateSummary: vi.fn().mockResolvedValue(undefined),
   isGenerating: false,
   speakerNames: {},
+  exportMetadata: {
+    committee: 'Hauptausschuss',
+    date: '2026-06-30',
+    location: 'Rathaus',
+    title: 'Sitzung Hauptausschuss',
+    participants: ['Alice', 'Bob'],
+    includeSpeakerList: true,
+    includeTranscriptExcerpt: false,
+    includeGenerationNote: true,
+  },
+  setExportMetadata: vi.fn(),
 };
 
 function renderSummaryStep(overrides: Partial<SummaryStepProps> = {}) {
@@ -42,7 +58,7 @@ describe('SummaryStep', () => {
     Element.prototype.scrollIntoView = vi.fn();
   });
 
-  it('exports all TOP summaries as a text protocol', async () => {
+  it('exports protocol data through the backend and downloads the result', async () => {
     const user = userEvent.setup();
     const exportedBlobs: Blob[] = [];
     const createObjectURL = vi.fn((blob: Blob | MediaSource) => {
@@ -62,12 +78,23 @@ describe('SummaryStep', () => {
       configurable: true,
       value: revokeObjectURL,
     });
+    vi.mocked(exportProtocol).mockResolvedValue(
+      new Blob(['SITZUNGSPROTOKOLL'], { type: 'text/plain;charset=utf-8' })
+    );
 
     renderSummaryStep();
 
     await user.click(screen.getByRole('button', { name: /text \(\.txt\)/i }));
 
     expect(click).toHaveBeenCalledTimes(1);
+    expect(exportProtocol).toHaveBeenCalledWith(
+      expect.objectContaining({
+        format: 'txt',
+        metadata: defaultProps.exportMetadata,
+        tops: defaultProps.tops,
+        summaries: defaultProps.summaries,
+      })
+    );
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:test-protocol');
 
@@ -77,10 +104,19 @@ describe('SummaryStep', () => {
     const content = await readBlobAsText(blob!);
 
     expect(content).toContain('SITZUNGSPROTOKOLL');
-    expect(content).toContain('TOP 1: Begruessung');
-    expect(content).toContain('Die Sitzung wurde eroeffnet.');
-    expect(content).toContain('TOP 2: Haushalt');
-    expect(content).toContain('Keine Zusammenfassung vorhanden.');
+  });
+
+  it('updates export metadata from the form', async () => {
+    const setExportMetadata = vi.fn();
+    renderSummaryStep({ setExportMetadata });
+
+    fireEvent.change(screen.getByLabelText(/gremium/i), {
+      target: { value: 'Finanzausschuss' },
+    });
+
+    expect(setExportMetadata).toHaveBeenLastCalledWith(
+      expect.objectContaining({ committee: 'Finanzausschuss' })
+    );
   });
 
   it('shows structured review sections and jumps from evidence to transcript', async () => {

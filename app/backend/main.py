@@ -45,6 +45,13 @@ from summarize import (
 )
 from extract_tops import extract_tops_from_pdf
 from assignment_suggestions import TranscriptUtterance, suggest_assignments
+from export_protocol import (
+    ProtocolAppendix,
+    ProtocolMetadata,
+    TranscriptLine as ExportTranscriptLine,
+    build_protocol_document,
+    render_protocol,
+)
 from telemetry import TelemetryCollector
 from persistence import (
     init_db,
@@ -617,6 +624,7 @@ class SessionSaveRequest(BaseModel):
     speaker_names: Dict[str, str] = Field(default_factory=dict)
     summaries: Dict[int, str] = Field(default_factory=dict)
     summary_reviews: Dict[int, Any] = Field(default_factory=dict)
+    export_metadata: Dict[str, Any] = Field(default_factory=dict)
     skipped_assignment: bool = False
 
 
@@ -629,6 +637,7 @@ class SessionResponse(BaseModel):
     speaker_names: Dict[str, str] = Field(default_factory=dict)
     summaries: Dict[int, str] = Field(default_factory=dict)
     summary_reviews: Dict[int, Any] = Field(default_factory=dict)
+    export_metadata: Dict[str, Any] = Field(default_factory=dict)
     skipped_assignment: bool = False
     transcript: Optional[List[TranscriptLine]] = None
     audio_url: Optional[str] = None
@@ -716,6 +725,33 @@ class AssignmentSuggestionsResponse(BaseModel):
     uncertain_count: int
 
 
+class ExportMetadataRequest(BaseModel):
+    committee: str = ""
+    date: str = ""
+    location: str = ""
+    title: str = ""
+    participants: List[str] = Field(default_factory=list)
+
+
+class ExportAppendixRequest(BaseModel):
+    include_speaker_list: bool = True
+    include_transcript_excerpt: bool = False
+    include_generation_note: bool = True
+    transcript_excerpt_limit: int = Field(default=20, ge=1, le=200)
+
+
+class ProtocolExportRequest(BaseModel):
+    format: str = "docx"
+    metadata: ExportMetadataRequest = Field(default_factory=ExportMetadataRequest)
+    appendix: ExportAppendixRequest = Field(default_factory=ExportAppendixRequest)
+    tops: List[str] = Field(default_factory=list)
+    transcript: List[TranscriptLine] = Field(default_factory=list)
+    assignments: List[Optional[int]] = Field(default_factory=list)
+    speaker_names: Dict[str, str] = Field(default_factory=dict)
+    summaries: Dict[int, str] = Field(default_factory=dict)
+    summary_reviews: Dict[int, Any] = Field(default_factory=dict)
+
+
 class SessionCompleteRequest(BaseModel):
     """Request model for reporting session completion with telemetry."""
 
@@ -779,6 +815,7 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
         speaker_names=session.get("speaker_names") or {},
         summaries=session.get("summaries") or {},
         summary_reviews=session.get("summary_reviews") or {},
+        export_metadata=session.get("export_metadata") or {},
         skipped_assignment=bool(session.get("skipped_assignment")),
         transcript=transcript,
         audio_url=job_response.audio_url if job_response else None,
@@ -844,6 +881,73 @@ async def get_session(session_id: str):
     if session is None:
         raise HTTPException(status_code=404, detail="Session nicht gefunden")
     return build_session_response(session)
+
+
+@app.post("/api/export")
+async def export_protocol_endpoint(request: ProtocolExportRequest):
+    """Render the completed protocol as TXT, DOCX or PDF."""
+    export_format = request.format.lower().strip()
+    if export_format not in {"txt", "docx", "pdf"}:
+        raise HTTPException(status_code=400, detail="Exportformat nicht unterstützt")
+    if not request.tops:
+        raise HTTPException(status_code=400, detail="Keine TOPs vorhanden")
+
+    filtered_tops = [top.strip() for top in request.tops if top.strip()]
+    if not filtered_tops:
+        raise HTTPException(status_code=400, detail="Keine TOPs vorhanden")
+
+    metadata = ProtocolMetadata(
+        committee=request.metadata.committee.strip(),
+        date=request.metadata.date.strip(),
+        location=request.metadata.location.strip(),
+        title=request.metadata.title.strip() or "Sitzungsprotokoll",
+        participants=[
+            participant.strip()
+            for participant in request.metadata.participants
+            if participant.strip()
+        ],
+    )
+    appendix = ProtocolAppendix(
+        include_speaker_list=request.appendix.include_speaker_list,
+        include_transcript_excerpt=request.appendix.include_transcript_excerpt,
+        include_generation_note=request.appendix.include_generation_note,
+        transcript_excerpt_limit=request.appendix.transcript_excerpt_limit,
+    )
+    export_transcript = [
+        ExportTranscriptLine(
+            speaker=request.speaker_names.get(line.speaker, line.speaker),
+            text=line.text,
+            start=line.start,
+            end=line.end,
+        )
+        for line in request.transcript
+    ]
+    document = build_protocol_document(
+        metadata=metadata,
+        tops=filtered_tops,
+        summaries=request.summaries,
+        summary_reviews=request.summary_reviews,
+        transcript=export_transcript,
+        speaker_names=request.speaker_names,
+        appendix=appendix,
+    )
+    content = render_protocol(document, export_format)  # type: ignore[arg-type]
+    media_types = {
+        "txt": "text/plain; charset=utf-8",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pdf": "application/pdf",
+    }
+    title_stem = normalize_upload_filename(
+        metadata.title or "protokoll",
+        default_stem="protokoll",
+        allowed_extensions=(),
+    ).removesuffix(".")
+    filename = f"{title_stem or 'protokoll'}.{export_format}"
+    return Response(
+        content=content,
+        media_type=media_types[export_format],
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/transcribe", response_model=TranscriptionJob)

@@ -163,6 +163,16 @@ def test_session_state_is_saved_and_loaded_with_linked_job(tmp_path, monkeypatch
                 "0": "Begrüßung wurde abgeschlossen.",
                 "1": "Haushalt wurde beschlossen.",
             },
+            "export_metadata": {
+                "committee": "Hauptausschuss",
+                "date": "2026-06-30",
+                "location": "Rathaus",
+                "title": "Sitzung Hauptausschuss",
+                "participants": ["Alice", "Bob"],
+                "includeSpeakerList": True,
+                "includeTranscriptExcerpt": False,
+                "includeGenerationNote": True,
+            },
             "summary_reviews": {
                 "1": {
                     "structured": {
@@ -214,6 +224,8 @@ def test_session_state_is_saved_and_loaded_with_linked_job(tmp_path, monkeypatch
         "1": "Haushalt wurde beschlossen.",
     }
     assert body["summary_reviews"]["1"]["source_links"][0]["line_indices"] == [1]
+    assert body["export_metadata"]["committee"] == "Hauptausschuss"
+    assert body["export_metadata"]["participants"] == ["Alice", "Bob"]
     assert body["transcript"][0]["text"] == "Korrigierter Bericht zu TOP 1"
     assert body["transcript"][1]["text"] == "Korrigierter Beschluss zu TOP 2"
     assert body["audio_url"] == "/api/audio/job-2"

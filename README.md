@@ -283,6 +283,11 @@ This application provides a web-based workflow for generating meeting minutes (S
 4. **Summarize** - Generate summaries per TOP using an LLM (Qwen3 8B via Ollama)
 5. **Export** - Download the final meeting minutes
 
+Der Exportbereich im letzten Schritt enthält Metadatenfelder für Gremium, Datum,
+Ort, Sitzungstitel und Teilnehmer. Das Protokoll kann als DOCX, PDF oder TXT
+heruntergeladen werden. Optional lassen sich Sprecherliste, Transkript-Auszug und
+ein Bearbeitungs-/Generierungshinweis als Anhang aufnehmen.
+
 ### Project Structure
 
 ```
@@ -389,6 +394,7 @@ docker build -f Dockerfile.gpu --build-arg HF_TOKEN=$HF_TOKEN -t backend:gpu ./a
 | `/api/audio/{job_id}`            | GET    | Stream audio file                    |
 | `/api/summarize`                 | POST   | Generate summary for a TOP segment   |
 | `/api/extract-tops`              | POST   | Extract TOPs from PDF                |
+| `/api/export`                    | POST   | Export minutes as TXT, DOCX or PDF   |
 | `/api/telemetry/session-complete`| POST   | Report session completion telemetry  |
 
 ### Technology Stack

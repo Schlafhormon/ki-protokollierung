@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { loadSession, saveSession, startTranscription } from './api';
+import { exportProtocol, loadSession, saveSession, startTranscription } from './api';
 
 describe('api session client', () => {
   beforeEach(() => {
@@ -99,5 +99,53 @@ describe('api session client', () => {
     });
     expect(fetchMock.mock.calls[1]![0]).toBe('/api/sessions/session-1');
     expect(fetchMock.mock.calls[1]![1]).toBeUndefined();
+  });
+
+  it('posts protocol export data and returns the generated blob', async () => {
+    const blob = new Blob(['docx-bytes'], {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      blob: () => Promise.resolve(blob),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await exportProtocol({
+      format: 'docx',
+      metadata: {
+        committee: 'Hauptausschuss',
+        date: '2026-06-30',
+        location: 'Rathaus',
+        title: 'Sitzung Hauptausschuss',
+        participants: ['Alice'],
+        includeSpeakerList: true,
+        includeTranscriptExcerpt: true,
+        includeGenerationNote: true,
+      },
+      tops: ['Begruessung'],
+      transcript: [{ speaker: 'SPEAKER_00', text: 'Hallo', start: 0, end: 1 }],
+      assignments: [0],
+      speakerNames: { SPEAKER_00: 'Alice' },
+      summaries: { 0: 'Diskussion:\nHallo' },
+      summaryReviews: {},
+    });
+
+    expect(result).toBe(blob);
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/export');
+    const body = JSON.parse(fetchMock.mock.calls[0]![1]!.body as string);
+    expect(body).toMatchObject({
+      format: 'docx',
+      metadata: {
+        committee: 'Hauptausschuss',
+        participants: ['Alice'],
+      },
+      appendix: {
+        include_speaker_list: true,
+        include_transcript_excerpt: true,
+        include_generation_note: true,
+      },
+      speaker_names: { SPEAKER_00: 'Alice' },
+    });
   });
 });
