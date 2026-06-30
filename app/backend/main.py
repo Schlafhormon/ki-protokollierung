@@ -110,6 +110,28 @@ jobs: OrderedDict = OrderedDict()
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+ALLOWED_AUDIO_CONTENT_TYPES = {
+    "audio/mpeg",
+    "audio/wav",
+    "audio/mp4",
+    "audio/x-m4a",
+    "audio/mp3",
+}
+ALLOWED_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a")
+
+
+def is_allowed_audio_file(filename: str | None, content_type: str | None) -> bool:
+    """Return whether an uploaded file is an accepted audio format."""
+    normalized_filename = (filename or "").lower()
+    return (content_type in ALLOWED_AUDIO_CONTENT_TYPES) or normalized_filename.endswith(
+        ALLOWED_AUDIO_EXTENSIONS
+    )
+
+
+def is_allowed_pdf_file(filename: str | None, content_type: str | None) -> bool:
+    """Return whether an uploaded file is a PDF."""
+    return content_type == "application/pdf" or (filename or "").lower().endswith(".pdf")
+
 
 def cleanup_old_jobs() -> int:
     """
@@ -122,8 +144,14 @@ def cleanup_old_jobs() -> int:
 
     def cleanup_job_audio(job_id: str, job_data: dict) -> None:
         """Clean up audio file associated with a job."""
-        audio_path = job_data.get("audio_path")
-        if audio_path and os.path.exists(audio_path):
+        file_paths = {
+            path
+            for path in (job_data.get("audio_path"), job_data.get("file_path"))
+            if path
+        }
+        for audio_path in file_paths:
+            if not os.path.exists(audio_path):
+                continue
             try:
                 os.remove(audio_path)
                 logger.info(f"Cleaned up audio file for job {job_id}")
@@ -249,10 +277,7 @@ async def start_transcription(
         )
 
     # Validate file type
-    allowed_types = ["audio/mpeg", "audio/wav", "audio/mp4", "audio/x-m4a", "audio/mp3"]
-    if audio.content_type not in allowed_types and not audio.filename.endswith(
-        (".mp3", ".wav", ".m4a")
-    ):
+    if not is_allowed_audio_file(audio.filename, audio.content_type):
         logger.warning(f"Rejected file with invalid type: {audio.content_type}")
         raise HTTPException(
             status_code=400, detail=f"Ungültiger Dateityp. Erlaubt: MP3, WAV, M4A"
@@ -438,7 +463,7 @@ async def extract_tops_endpoint(
     logger.info(f"Received PDF for TOP extraction: {pdf.filename} ({pdf.content_type})")
 
     # Validate file type
-    if pdf.content_type != "application/pdf" and not pdf.filename.endswith(".pdf"):
+    if not is_allowed_pdf_file(pdf.filename, pdf.content_type):
         logger.warning(f"Rejected non-PDF file: {pdf.content_type}")
         raise HTTPException(status_code=400, detail="Nur PDF-Dateien sind erlaubt")
 

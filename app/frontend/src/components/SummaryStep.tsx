@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, type ChangeEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, type ChangeEvent } from 'react';
 import type { SummaryStepProps, TranscriptLine } from '../types';
 import AudioPlayer from './AudioPlayer';
 import { useAudioSync } from '../hooks/useAudioSync';
@@ -36,6 +36,10 @@ export default function SummaryStep({
     isAutoScroll,
   } = useAudioSync(transcript);
 
+  const getTranscriptForTop = useCallback((topIndex: number) => {
+    return transcript.filter((_, i) => assignments[i] === topIndex);
+  }, [assignments, transcript]);
+
   // Auto-scroll to current line during playback (within filtered transcript)
   useEffect(() => {
     if (isAutoScroll && currentLineIndex >= 0 && transcriptContainerRef.current) {
@@ -52,14 +56,10 @@ export default function SummaryStep({
         }
       }
     }
-  }, [currentLineIndex, isAutoScroll, selectedTop]);
+  }, [currentLineIndex, getTranscriptForTop, isAutoScroll, selectedTop, transcript]);
 
   // Helper to get display name for a speaker
   const getDisplayName = (speakerId: string) => speakerNames[speakerId] || speakerId;
-
-  const getTranscriptForTop = (topIndex: number) => {
-    return transcript.filter((_, i) => assignments[i] === topIndex);
-  };
 
   const handleLineDoubleClick = (line: TranscriptLine) => {
     if (audioUrl) {
