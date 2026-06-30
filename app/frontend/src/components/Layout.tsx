@@ -56,7 +56,7 @@ export default function Layout({ children, onSettingsClick }: LayoutProps) {
               />
             </div>
             <p className="text-sm text-gray-500">
-              Entwickelt am KI-Servicezentrum Berlin-Brandenburg
+              Weiterentwickelt durch Keule-Services und der Stadt Doberlug-Kirchhain
             </p>
           </div>
         </div>
