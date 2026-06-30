@@ -755,12 +755,13 @@ class ProtocolExportRequest(BaseModel):
 class SessionCompleteRequest(BaseModel):
     """Request model for reporting session completion with telemetry."""
 
+    telemetry_consent: bool = False
     job_id: str
     top_count: int
     protocol_char_count: int
     summarization_duration_seconds: float
     llm_model: str
-    system_prompt: str
+    system_prompt_kind: str = "custom"
 
 
 class SessionCompleteResponse(BaseModel):
@@ -1282,6 +1283,13 @@ async def report_session_complete(request: SessionCompleteRequest):
     Called by the frontend when the user exports the protocol.
     Combines transcription metrics (stored in job) with summarization metrics (from frontend).
     """
+    if not request.telemetry_consent:
+        logger.info("Telemetry report ignored because consent was not provided")
+        return SessionCompleteResponse(
+            success=True,
+            message="Telemetry disabled by user",
+        )
+
     logger.info(f"Received session complete report for job: {request.job_id}")
 
     # Get job data
@@ -1292,7 +1300,7 @@ async def report_session_complete(request: SessionCompleteRequest):
         collector = TelemetryCollector()
         collector.set_summarization_metrics(
             llm_model=request.llm_model,
-            system_prompt=request.system_prompt,
+            system_prompt_kind=request.system_prompt_kind,
             top_count=request.top_count,
             summarization_duration_seconds=request.summarization_duration_seconds,
             protocol_char_count=request.protocol_char_count,
@@ -1327,7 +1335,7 @@ async def report_session_complete(request: SessionCompleteRequest):
     # Set summarization metrics from frontend
     collector.set_summarization_metrics(
         llm_model=request.llm_model,
-        system_prompt=request.system_prompt,
+        system_prompt_kind=request.system_prompt_kind,
         top_count=request.top_count,
         summarization_duration_seconds=request.summarization_duration_seconds,
         protocol_char_count=request.protocol_char_count,

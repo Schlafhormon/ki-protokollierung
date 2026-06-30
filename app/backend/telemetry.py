@@ -1,11 +1,15 @@
 """
-Telemetry module for collecting usage metrics.
+Telemetry module for collecting opt-in usage metrics.
 
-Sends anonymous usage data to a Google Sheets webhook for analytics.
-Data is collected to help improve the application for municipalities.
+Telemetry must be explicitly enabled by the user in the frontend before this
+module is called. Payloads only contain operational metadata and aggregate
+counts; transcript, audio, person, protocol and prompt contents are excluded.
 
 Configuration:
-- TELEMETRY_WEBHOOK_URL: Google Apps Script webhook URL (required for sending)
+- TELEMETRY_WEBHOOK_URL: webhook URL (required for sending)
+- TELEMETRY_BACKUP_ENABLED: save local jsonl backup files (default: false)
+- TELEMETRY_BACKUP_RETENTION_DAYS: delete older backup files (default: 14)
+- TELEMETRY_BACKUP_MAX_FILES: keep at most this many backup files (default: 30)
 - APP_VERSION: Application version string (default: 0.1.0)
 """
 
@@ -14,7 +18,7 @@ import json
 import logging
 import threading
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 import urllib.request
@@ -25,7 +29,14 @@ logger = logging.getLogger(__name__)
 # Configuration
 TELEMETRY_WEBHOOK_URL = os.environ.get("TELEMETRY_WEBHOOK_URL", "")
 APP_VERSION = os.environ.get("APP_VERSION", "0.1.0")
-TELEMETRY_BACKUP_DIR = Path("telemetry_backup")
+TELEMETRY_BACKUP_DIR = Path(os.environ.get("TELEMETRY_BACKUP_DIR", "telemetry_backup"))
+TELEMETRY_BACKUP_ENABLED = (
+    os.environ.get("TELEMETRY_BACKUP_ENABLED", "false").lower() == "true"
+)
+TELEMETRY_BACKUP_RETENTION_DAYS = int(
+    os.environ.get("TELEMETRY_BACKUP_RETENTION_DAYS", "14")
+)
+TELEMETRY_BACKUP_MAX_FILES = int(os.environ.get("TELEMETRY_BACKUP_MAX_FILES", "30"))
 
 
 @dataclass
@@ -53,7 +64,7 @@ class TelemetryEvent:
 
     # LLM/Summarization metrics
     llm_model: Optional[str] = None
-    system_prompt: Optional[str] = None
+    system_prompt_kind: Optional[str] = None
 
     # Session metrics (from frontend)
     top_count: Optional[int] = None
@@ -62,7 +73,7 @@ class TelemetryEvent:
 
     # Status
     success: bool = True
-    error: Optional[str] = None
+    error_type: Optional[str] = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -93,8 +104,12 @@ def get_gpu_info() -> tuple[Optional[str], Optional[float], str]:
 
 def _save_backup(event: TelemetryEvent) -> None:
     """Save telemetry event to local backup file."""
+    if not TELEMETRY_BACKUP_ENABLED:
+        return
+
     try:
         TELEMETRY_BACKUP_DIR.mkdir(exist_ok=True)
+        _cleanup_backups()
         backup_file = TELEMETRY_BACKUP_DIR / f"telemetry_{datetime.now().strftime('%Y%m%d')}.jsonl"
 
         with open(backup_file, "a", encoding="utf-8") as f:
@@ -103,6 +118,29 @@ def _save_backup(event: TelemetryEvent) -> None:
         logger.info(f"Telemetry backup saved to {backup_file}")
     except Exception as e:
         logger.warning(f"Failed to save telemetry backup: {e}")
+
+
+def _cleanup_backups() -> None:
+    """Apply retention limits to local telemetry backups."""
+    if not TELEMETRY_BACKUP_DIR.exists():
+        return
+
+    backup_files = sorted(
+        TELEMETRY_BACKUP_DIR.glob("telemetry_*.jsonl"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    cutoff = datetime.now(timezone.utc) - timedelta(days=TELEMETRY_BACKUP_RETENTION_DAYS)
+
+    for index, backup_file in enumerate(backup_files):
+        modified = datetime.fromtimestamp(backup_file.stat().st_mtime, tz=timezone.utc)
+        exceeds_age = modified < cutoff
+        exceeds_count = index >= TELEMETRY_BACKUP_MAX_FILES
+        if exceeds_age or exceeds_count:
+            try:
+                backup_file.unlink()
+            except OSError as e:
+                logger.warning(f"Failed to remove old telemetry backup {backup_file}: {e}")
 
 
 def _send_to_webhook(event: TelemetryEvent) -> bool:
@@ -148,11 +186,11 @@ def send_telemetry(event: TelemetryEvent) -> None:
     """
     Send telemetry event asynchronously.
 
-    Always saves a local backup, then attempts to send to webhook.
+    Optionally saves a retention-limited local backup, then attempts to send to webhook.
     Runs in background thread to avoid blocking the main request.
     """
     def _send():
-        # Always save backup first
+        # Local backups are optional and retention-limited.
         _save_backup(event)
 
         # Attempt to send to webhook
@@ -206,22 +244,22 @@ class TelemetryCollector:
     def set_summarization_metrics(
         self,
         llm_model: str,
-        system_prompt: str,
+        system_prompt_kind: str,
         top_count: int,
         summarization_duration_seconds: float,
         protocol_char_count: int,
     ) -> None:
         """Set metrics from summarization phase (called from frontend)."""
         self.event.llm_model = llm_model
-        self.event.system_prompt = system_prompt
+        self.event.system_prompt_kind = system_prompt_kind
         self.event.top_count = top_count
         self.event.summarization_duration_seconds = summarization_duration_seconds
         self.event.protocol_char_count = protocol_char_count
 
-    def set_error(self, error: str) -> None:
-        """Mark session as failed with error message."""
+    def set_error(self, error_type: str) -> None:
+        """Mark session as failed without storing free-form error contents."""
         self.event.success = False
-        self.event.error = error
+        self.event.error_type = error_type
 
     def send(self) -> None:
         """Send collected telemetry."""

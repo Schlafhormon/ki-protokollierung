@@ -16,6 +16,8 @@ const defaultProps: UploadStepProps = {
   tops: [''],
   setTops: vi.fn(),
   llmSettings: { model: 'qwen3:8b', systemPrompt: '' },
+  telemetryOptIn: false,
+  setTelemetryOptIn: vi.fn(),
 };
 
 function renderUploadStep(overrides: Partial<UploadStepProps> = {}) {
@@ -49,6 +51,8 @@ describe('UploadStep', () => {
         onNext={onNext}
         audioFile={audioFile}
         setAudioFile={setAudioFile}
+        telemetryOptIn={false}
+        setTelemetryOptIn={vi.fn()}
       />,
     );
 
@@ -72,5 +76,21 @@ describe('UploadStep', () => {
       expect(setTops).toHaveBeenCalledWith(['Begruessung', 'Haushalt']);
     });
     expect(await screen.findByText(/2 TOPs erfolgreich extrahiert/i)).toBeInTheDocument();
+  });
+
+  it('shows telemetry fields and lets the user opt in explicitly', async () => {
+    const user = userEvent.setup();
+    const setTelemetryOptIn = vi.fn();
+    renderUploadStep({ setTelemetryOptIn });
+
+    expect(screen.getByText(/Anonyme Nutzungsstatistiken teilen/i)).toBeInTheDocument();
+    expect(screen.getByText(/Nicht übertragen werden/i)).toBeInTheDocument();
+    expect(screen.getByText(/System-Prompt-Inhalt/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('checkbox', {
+      name: /Anonyme Nutzungsstatistiken teilen/i,
+    }));
+
+    expect(setTelemetryOptIn).toHaveBeenCalledWith(true);
   });
 });

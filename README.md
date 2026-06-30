@@ -211,24 +211,44 @@ docker compose down -v
 
 ## Nutzungsstatistiken / Usage Statistics
 
-Diese Anwendung sendet anonyme Nutzungsstatistiken, um uns bei der Weiterentwicklung zu helfen.
+Telemetrie ist standardmäßig deaktiviert und wird nur gesendet, wenn Nutzerinnen
+oder Nutzer sie in der UI ausdrücklich einschalten. Zusätzlich muss zur Laufzeit
+`TELEMETRY_WEBHOOK_URL` gesetzt sein; die URL wird nicht ins Image eingebrannt.
 
-This application sends anonymous usage statistics to help us improve the tool.
+Telemetry is disabled by default and is only sent after explicit opt-in in the UI.
+`TELEMETRY_WEBHOOK_URL` must also be configured at runtime; it is not baked into
+the container image.
 
 ### Erfasste Daten / Data Collected
 
-- Audiodauer und Verarbeitungszeiten / Audio duration and processing times
-- Hardware-Informationen (GPU-Typ, Speicher) / Hardware info (GPU type, memory)
-- Verwendete Modelle (Whisper, LLM) / Models used (Whisper, LLM)
-- Anzahl Tagesordnungspunkte / Number of agenda items
-- Textlängen (Transkript, Protokoll) / Text lengths (transcript, protocol)
-- Verwendeter System-Prompt / System prompt used
+- Zeitstempel und App-Version / timestamp and app version
+- Geräteklasse, GPU-Name und VRAM, falls verfügbar / device type, GPU name and VRAM if available
+- Verwendete Whisper- und LLM-Modelle / Whisper and LLM model names
+- Whisper-Batch-Größe / Whisper batch size
+- Audiodauer und Verarbeitungszeiten / audio duration and processing times
+- Anzahl Transkriptzeilen und Zeichenanzahl / transcript line and character counts
+- Anzahl Tagesordnungspunkte / number of agenda items
+- Protokoll-Zeichenanzahl / protocol character count
+- Prompt-Kategorie (`default`, `custom`, `generic`), nicht der Prompt selbst / prompt category, not the prompt content
+- Erfolgsstatus und technische Fehlerkategorie, falls gesetzt / success status and technical error category if set
 
 ### Nicht erfasste Daten / Data NOT Collected
 
-- Inhalte von Transkripten oder Protokollen / Transcript or protocol content
-- Namen oder persönliche Daten / Names or personal data
-- Audio-Dateien / Audio files
+- Audio-Dateien, Audiodaten oder Dateinamen / audio files, audio data or filenames
+- Inhalte von Transkripten, TOPs oder Protokollen / transcript, agenda item or protocol content
+- Namen, Sprecherzuordnungen oder andere Personenangaben / names, speaker mappings or other personal data
+- System-Prompt-Inhalte oder Prompt-Auszüge / system prompt content or prompt excerpts
+
+### Lokale Backups / Local Backups
+
+Lokale Telemetrie-Backups sind standardmäßig deaktiviert
+(`TELEMETRY_BACKUP_ENABLED=false`). Wenn sie aktiviert werden, werden nur die oben
+genannten aggregierten Telemetrie-Felder als JSONL gespeichert. Die Retention ist
+konfigurierbar und wird beim Schreiben angewendet:
+
+- `TELEMETRY_BACKUP_RETENTION_DAYS` (Standard: `14`)
+- `TELEMETRY_BACKUP_MAX_FILES` (Standard: `30`)
+- `TELEMETRY_BACKUP_DIR` (Standard: `telemetry_backup`)
 
 ---
 
@@ -382,7 +402,11 @@ docker build -f Dockerfile.gpu --build-arg HF_TOKEN=$HF_TOKEN -t backend:gpu ./a
 | `WHISPER_LANGUAGE`   | Language code                                       | `de`                        |
 | `LLM_BASE_URL`       | Ollama API endpoint                                 | `http://localhost:11434/v1` |
 | `LLM_MODEL`          | Model name for summarization                        | `qwen3:8b`                  |
-| `TELEMETRY_WEBHOOK_URL` | Google Apps Script webhook URL for telemetry     | (empty, disabled)           |
+| `TELEMETRY_WEBHOOK_URL` | Runtime webhook URL for opt-in telemetry          | (empty, disabled)           |
+| `TELEMETRY_BACKUP_ENABLED` | Enable local telemetry JSONL backups          | `false`                     |
+| `TELEMETRY_BACKUP_RETENTION_DAYS` | Retention for local telemetry backups | `14`                        |
+| `TELEMETRY_BACKUP_MAX_FILES` | Maximum local telemetry backup files       | `30`                        |
+| `TELEMETRY_BACKUP_DIR` | Directory for local telemetry backups             | `telemetry_backup`          |
 
 ### API Endpoints
 
@@ -395,7 +419,7 @@ docker build -f Dockerfile.gpu --build-arg HF_TOKEN=$HF_TOKEN -t backend:gpu ./a
 | `/api/summarize`                 | POST   | Generate summary for a TOP segment   |
 | `/api/extract-tops`              | POST   | Extract TOPs from PDF                |
 | `/api/export`                    | POST   | Export minutes as TXT, DOCX or PDF   |
-| `/api/telemetry/session-complete`| POST   | Report session completion telemetry  |
+| `/api/telemetry/session-complete`| POST   | Report opt-in aggregate telemetry    |
 
 ### Technology Stack
 

@@ -30,6 +30,7 @@ import type {
 const LLM_SETTINGS_KEY = "llm-settings";
 const ACTIVE_SESSION_KEY = "active-session-id";
 const SESSION_DRAFT_KEY = "active-session-draft";
+const TELEMETRY_OPT_IN_KEY = "telemetry-opt-in";
 
 // Implicit TOP title when no TOPs are defined
 const DEFAULT_TOP_TITLE = "Gesamtes Gespräch";
@@ -78,6 +79,15 @@ function withApiBase(url?: string | null): string | null {
   if (/^https?:\/\//i.test(url)) return url;
   const baseUrl = import.meta.env.VITE_API_URL || "";
   return `${baseUrl}${url}`;
+}
+
+function getSystemPromptKind(
+  prompt: string,
+  genericPrompt: string
+): "default" | "custom" | "generic" {
+  if (prompt === genericPrompt) return "generic";
+  if (prompt === DEFAULT_LLM_SETTINGS.systemPrompt) return "default";
+  return "custom";
 }
 
 function normalizeSummaries(
@@ -160,6 +170,13 @@ export default function App() {
 
   // Telemetry state
   const [jobId, setJobId] = useState<string | null>(null);
+  const [telemetryOptIn, setTelemetryOptIn] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(TELEMETRY_OPT_IN_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
 
   // LLM Settings state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -293,6 +310,14 @@ export default function App() {
       console.error("Failed to save LLM settings to localStorage:", e);
     }
   }, [llmSettings]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(TELEMETRY_OPT_IN_KEY, String(telemetryOptIn));
+    } catch (e) {
+      console.error("Failed to save telemetry setting:", e);
+    }
+  }, [telemetryOptIn]);
 
   useEffect(() => {
     if (saveTimerRef.current !== null) {
@@ -500,14 +525,18 @@ export default function App() {
       });
 
       // Send telemetry
-      if (currentJobId) {
+      if (telemetryOptIn && currentJobId) {
         reportSessionComplete({
+          telemetryConsent: telemetryOptIn,
           jobId: currentJobId,
           topCount: 1,
           protocolCharCount: result.summary.length,
           summarizationDurationSeconds: result.durationSeconds,
           llmModel: llmSettings.model,
-          systemPrompt: GENERIC_SUMMARY_PROMPT,
+          systemPromptKind: getSystemPromptKind(
+            GENERIC_SUMMARY_PROMPT,
+            GENERIC_SUMMARY_PROMPT
+          ),
         });
       }
     } catch (error) {
@@ -600,18 +629,22 @@ export default function App() {
     );
 
     // Send telemetry after all summaries are generated
-    if (jobId) {
+    if (telemetryOptIn && jobId) {
       const protocolCharCount = Object.values(newSummaries).reduce(
         (sum, s) => sum + (s?.length || 0),
         0
       );
       reportSessionComplete({
+        telemetryConsent: telemetryOptIn,
         jobId,
         topCount: validTops.length,
         protocolCharCount,
         summarizationDurationSeconds: totalDuration,
         llmModel: llmSettings.model,
-        systemPrompt: llmSettings.systemPrompt,
+        systemPromptKind: getSystemPromptKind(
+          llmSettings.systemPrompt,
+          GENERIC_SUMMARY_PROMPT
+        ),
       });
       console.log(`[Summary] Telemetry sent`);
     }
@@ -773,6 +806,8 @@ export default function App() {
           tops={tops}
           setTops={setTops}
           llmSettings={llmSettings}
+          telemetryOptIn={telemetryOptIn}
+          setTelemetryOptIn={setTelemetryOptIn}
         />
       ) : currentStep === 2 ? (
         <AssignmentStep

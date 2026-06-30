@@ -9,6 +9,8 @@ export default function UploadStep({
   tops,
   setTops,
   llmSettings,
+  telemetryOptIn,
+  setTelemetryOptIn,
 }: UploadStepProps) {
   const audioInputRef = useRef<HTMLInputElement>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
@@ -342,6 +344,35 @@ export default function UploadStep({
           <span className="text-lg">+</span>
           TOP hinzufügen
         </button>
+      </div>
+
+      {/* Telemetry Opt-in */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={telemetryOptIn}
+            onChange={(event) => setTelemetryOptIn(event.target.checked)}
+            className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+          <span>
+            <span className="block text-sm font-medium text-gray-900">
+              Anonyme Nutzungsstatistiken teilen
+            </span>
+            <span className="block text-sm text-gray-600 mt-1">
+              Nur aktiv, wenn diese Option eingeschaltet ist. Erfasst werden:
+              App-Version, Geräteklasse/GPU, Whisper- und LLM-Modell,
+              Audiodauer, Verarbeitungszeiten, Anzahl der Transkriptzeilen und
+              Zeichen, Anzahl TOPs, Protokoll-Zeichenanzahl, Prompt-Kategorie
+              und Erfolgsstatus.
+            </span>
+            <span className="block text-sm text-gray-600 mt-2">
+              Nicht übertragen werden: Audio, Transkript- oder Protokollinhalte,
+              TOP-Titel, Namen, Sprecherzuordnungen, Dateinamen und
+              System-Prompt-Inhalt.
+            </span>
+          </span>
+        </label>
       </div>
 
       {/* Action Button */}

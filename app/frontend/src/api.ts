@@ -339,12 +339,13 @@ export async function checkBackendHealth(): Promise<boolean> {
  * Session complete telemetry data.
  */
 export interface SessionCompleteData {
+  telemetryConsent: boolean;
   jobId: string;
   topCount: number;
   protocolCharCount: number;
   summarizationDurationSeconds: number;
   llmModel: string;
-  systemPrompt: string;
+  systemPromptKind: "default" | "custom" | "generic";
 }
 
 /**
@@ -354,6 +355,10 @@ export interface SessionCompleteData {
 export async function reportSessionComplete(
   data: SessionCompleteData
 ): Promise<void> {
+  if (!data.telemetryConsent) {
+    return;
+  }
+
   try {
     const response = await fetch(`${API_BASE}/api/telemetry/session-complete`, {
       method: "POST",
@@ -361,12 +366,13 @@ export async function reportSessionComplete(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        telemetry_consent: true,
         job_id: data.jobId,
         top_count: data.topCount,
         protocol_char_count: data.protocolCharCount,
         summarization_duration_seconds: data.summarizationDurationSeconds,
         llm_model: data.llmModel,
-        system_prompt: data.systemPrompt,
+        system_prompt_kind: data.systemPromptKind,
       }),
     });
 

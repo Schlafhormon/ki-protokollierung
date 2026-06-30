@@ -69,10 +69,6 @@ ENV HF_TOKEN=
 # Set flag indicating models are pre-cached (runtime won't require HF_TOKEN)
 ENV MODELS_PRECACHED=1
 
-# Telemetry webhook URL (injected at build time from GitHub secret)
-ARG TELEMETRY_WEBHOOK_URL
-ENV TELEMETRY_WEBHOOK_URL=${TELEMETRY_WEBHOOK_URL:-}
-
 # Expose port
 EXPOSE 8010
 

@@ -152,6 +152,8 @@ export interface UploadStepProps {
   tops: string[];
   setTops: (tops: string[]) => void;
   llmSettings?: LLMSettings;
+  telemetryOptIn: boolean;
+  setTelemetryOptIn: (enabled: boolean) => void;
 }
 
 export interface ProcessingStepProps {
