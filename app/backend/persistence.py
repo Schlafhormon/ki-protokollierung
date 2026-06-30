@@ -297,6 +297,28 @@ def rename_speaker_profile(
     return load_speaker_profile(profile_id, include_archived=True, db_path=db_path)
 
 
+def update_speaker_profile(
+    profile_id: str,
+    *,
+    display_name: str | None = None,
+    scope: str | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    now = time.time()
+    with connect(db_path) as db:
+        db.execute(
+            """
+            UPDATE speaker_profiles
+            SET display_name = COALESCE(?, display_name),
+                scope = ?,
+                updated_at = ?
+            WHERE profile_id = ?
+            """,
+            (display_name, scope, now, profile_id),
+        )
+    return load_speaker_profile(profile_id, include_archived=True, db_path=db_path)
+
+
 def archive_speaker_profile(
     profile_id: str,
     db_path: Path | None = None,

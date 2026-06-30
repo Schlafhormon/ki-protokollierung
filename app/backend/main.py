@@ -54,13 +54,23 @@ from export_protocol import (
 )
 from telemetry import TelemetryCollector
 from persistence import (
+    archive_speaker_profile,
+    confirm_speaker_observation,
+    create_speaker_profile,
     init_db,
     load_job,
     load_jobs,
     load_session,
+    load_speaker_observation,
+    load_speaker_observations,
+    load_speaker_profile,
+    load_speaker_profiles,
     mark_interrupted_jobs,
+    reject_speaker_observation,
     save_job,
     save_session,
+    save_speaker_observation,
+    update_speaker_profile,
 )
 
 # Configure logging with timestamps
@@ -645,6 +655,56 @@ class SessionResponse(BaseModel):
     job: Optional[TranscriptionJob] = None
 
 
+class SpeakerProfileCreateRequest(BaseModel):
+    display_name: str = Field(..., min_length=1)
+    scope: Optional[str] = None
+
+
+class SpeakerProfileUpdateRequest(BaseModel):
+    display_name: Optional[str] = Field(None, min_length=1)
+    scope: Optional[str] = None
+
+
+class SpeakerProfileResponse(BaseModel):
+    profile_id: str
+    display_name: str
+    scope: Optional[str] = None
+    created_at: float
+    updated_at: float
+    archived_at: Optional[float] = None
+    archived: bool = False
+
+
+class SpeakerObservationResponse(BaseModel):
+    observation_id: int
+    job_id: str
+    session_id: str
+    local_speaker_id: str
+    local_display_name: str
+    profile_id: Optional[str] = None
+    profile_display_name: Optional[str] = None
+    profile: Optional[SpeakerProfileResponse] = None
+    confidence: Optional[float] = None
+    status: str
+    display_name: str
+    created_at: float
+    updated_at: float
+
+
+class SpeakerObservationConfirmRequest(BaseModel):
+    profile_id: Optional[str] = None
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+
+
+class SpeakerObservationManualRequest(BaseModel):
+    local_speaker_id: str = Field(..., min_length=1)
+    profile_id: Optional[str] = None
+    display_name: Optional[str] = Field(None, min_length=1)
+    scope: Optional[str] = None
+    confidence: Optional[float] = Field(default=1.0, ge=0.0, le=1.0)
+    observation_id: Optional[int] = None
+
+
 class SummarizeRequest(BaseModel):
     top_title: str
     lines: List[TranscriptLine]
@@ -825,6 +885,130 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
     )
 
 
+def build_speaker_profile_response(profile: dict[str, Any]) -> SpeakerProfileResponse:
+    return SpeakerProfileResponse(
+        profile_id=profile["profile_id"],
+        display_name=profile["display_name"],
+        scope=profile.get("scope"),
+        created_at=profile["created_at"],
+        updated_at=profile["updated_at"],
+        archived_at=profile.get("archived_at"),
+        archived=profile.get("archived_at") is not None,
+    )
+
+
+def build_speaker_observation_response(
+    observation: dict[str, Any],
+    session: dict[str, Any],
+) -> SpeakerObservationResponse:
+    profile = None
+    if observation.get("profile_id"):
+        profile = load_speaker_profile(
+            observation["profile_id"],
+            include_archived=True,
+        )
+    profile_response = build_speaker_profile_response(profile) if profile else None
+    profile_display_name = profile.get("display_name") if profile else None
+    local_display_name = (session.get("speaker_names") or {}).get(
+        observation["local_speaker_id"],
+        observation["local_speaker_id"],
+    )
+    display_name = profile_display_name or local_display_name
+
+    return SpeakerObservationResponse(
+        observation_id=observation["observation_id"],
+        job_id=observation["job_id"],
+        session_id=observation["session_id"],
+        local_speaker_id=observation["local_speaker_id"],
+        local_display_name=local_display_name,
+        profile_id=observation.get("profile_id"),
+        profile_display_name=profile_display_name,
+        profile=profile_response,
+        confidence=observation.get("confidence"),
+        status=observation["status"],
+        display_name=display_name,
+        created_at=observation["created_at"],
+        updated_at=observation["updated_at"],
+    )
+
+
+def get_required_session(session_id: str) -> dict[str, Any]:
+    session = load_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session nicht gefunden")
+    return session
+
+
+def get_required_active_profile(profile_id: str) -> dict[str, Any]:
+    profile = load_speaker_profile(profile_id, include_archived=True)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profil nicht gefunden")
+    if profile.get("archived_at") is not None:
+        raise HTTPException(status_code=409, detail="Profil ist archiviert")
+    return profile
+
+
+def validate_display_name(display_name: str) -> str:
+    cleaned = display_name.strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Anzeigename darf nicht leer sein")
+    return cleaned
+
+
+def known_local_speaker_ids(session: dict[str, Any]) -> set[str]:
+    speaker_ids = set((session.get("speaker_names") or {}).keys())
+    for line in session.get("transcript") or []:
+        if line.get("speaker"):
+            speaker_ids.add(str(line["speaker"]))
+    return speaker_ids
+
+
+def ensure_local_speaker_exists(session: dict[str, Any], local_speaker_id: str) -> None:
+    if local_speaker_id not in known_local_speaker_ids(session):
+        raise HTTPException(status_code=404, detail="Lokaler Sprecher nicht gefunden")
+
+
+def get_observation_for_session(
+    session_id: str,
+    observation_id: int,
+) -> dict[str, Any]:
+    observation = load_speaker_observation(observation_id)
+    if observation is None or observation.get("session_id") != session_id:
+        raise HTTPException(status_code=404, detail="Observation nicht gefunden")
+    return observation
+
+
+def ensure_no_accepted_local_mapping(
+    session_id: str,
+    local_speaker_id: str,
+    *,
+    exclude_observation_id: int | None = None,
+) -> None:
+    observations = load_speaker_observations(session_id=session_id)
+    for observation in observations:
+        if observation["observation_id"] == exclude_observation_id:
+            continue
+        if observation.get("local_speaker_id") != local_speaker_id:
+            continue
+        if observation.get("status") in {"confirmed", "manual"}:
+            raise HTTPException(
+                status_code=409,
+                detail="Lokaler Sprecher ist bereits einem Profil zugeordnet",
+            )
+
+
+def apply_profile_display_name_to_session(
+    session: dict[str, Any],
+    local_speaker_id: str,
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    updated_session = dict(session)
+    speaker_names = dict(updated_session.get("speaker_names") or {})
+    speaker_names[local_speaker_id] = profile["display_name"]
+    updated_session["speaker_names"] = speaker_names
+    return save_session(session["session_id"], updated_session)
+
+
 def model_to_dict(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
@@ -882,6 +1066,221 @@ async def get_session(session_id: str):
     if session is None:
         raise HTTPException(status_code=404, detail="Session nicht gefunden")
     return build_session_response(session)
+
+
+@app.get("/api/speaker-profiles", response_model=List[SpeakerProfileResponse])
+async def list_speaker_profiles(
+    scope: Optional[str] = None,
+    include_archived: bool = False,
+):
+    """List global speaker profiles. Archived profiles are hidden by default."""
+    return [
+        build_speaker_profile_response(profile)
+        for profile in load_speaker_profiles(
+            scope=scope,
+            include_archived=include_archived,
+        )
+    ]
+
+
+@app.post("/api/speaker-profiles", response_model=SpeakerProfileResponse)
+async def create_speaker_profile_endpoint(request: SpeakerProfileCreateRequest):
+    """Create a speaker profile only after explicit user action."""
+    profile = create_speaker_profile(
+        validate_display_name(request.display_name),
+        scope=request.scope,
+    )
+    return build_speaker_profile_response(profile)
+
+
+@app.put("/api/speaker-profiles/{profile_id}", response_model=SpeakerProfileResponse)
+async def update_speaker_profile_endpoint(
+    profile_id: str,
+    request: SpeakerProfileUpdateRequest,
+):
+    """Rename or rescope an active speaker profile."""
+    existing = get_required_active_profile(profile_id)
+    fields_set = (
+        request.model_fields_set
+        if hasattr(request, "model_fields_set")
+        else request.__fields_set__
+    )
+    display_name = (
+        validate_display_name(request.display_name)
+        if request.display_name is not None
+        else existing["display_name"]
+    )
+    scope = request.scope if "scope" in fields_set else existing.get("scope")
+    updated = update_speaker_profile(
+        profile_id,
+        display_name=display_name,
+        scope=scope,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Profil nicht gefunden")
+    if updated.get("archived_at") is not None:
+        raise HTTPException(status_code=409, detail="Profil ist archiviert")
+    return build_speaker_profile_response(updated)
+
+
+@app.delete("/api/speaker-profiles/{profile_id}", response_model=SpeakerProfileResponse)
+async def archive_speaker_profile_endpoint(profile_id: str):
+    """Archive a speaker profile instead of hard-deleting it."""
+    get_required_active_profile(profile_id)
+    archived = archive_speaker_profile(profile_id)
+    if archived is None:
+        raise HTTPException(status_code=404, detail="Profil nicht gefunden")
+    return build_speaker_profile_response(archived)
+
+
+@app.get(
+    "/api/sessions/{session_id}/speaker-observations",
+    response_model=List[SpeakerObservationResponse],
+)
+async def list_session_speaker_observations(session_id: str):
+    """Return reviewable speaker observations for a session."""
+    session = get_required_session(session_id)
+    observations = load_speaker_observations(session_id=session_id)
+    return [
+        build_speaker_observation_response(observation, session)
+        for observation in observations
+    ]
+
+
+@app.post(
+    "/api/sessions/{session_id}/speaker-observations/{observation_id}/confirm",
+    response_model=SpeakerObservationResponse,
+)
+async def confirm_session_speaker_observation(
+    session_id: str,
+    observation_id: int,
+    request: SpeakerObservationConfirmRequest | None = None,
+):
+    """Confirm a suggested speaker-profile match after user review."""
+    session = get_required_session(session_id)
+    observation = get_observation_for_session(session_id, observation_id)
+    if observation.get("status") == "rejected":
+        raise HTTPException(
+            status_code=409,
+            detail="Abgelehnte Observation kann nicht bestätigt werden",
+        )
+    ensure_local_speaker_exists(session, observation["local_speaker_id"])
+    ensure_no_accepted_local_mapping(
+        session_id,
+        observation["local_speaker_id"],
+        exclude_observation_id=observation_id,
+    )
+
+    requested_profile_id = request.profile_id if request else None
+    profile_id = requested_profile_id or observation.get("profile_id")
+    if profile_id is None:
+        raise HTTPException(status_code=400, detail="Profil fehlt für Bestätigung")
+    profile = get_required_active_profile(profile_id)
+
+    confirmed = confirm_speaker_observation(
+        observation_id,
+        profile_id=profile_id,
+        confidence=request.confidence if request else None,
+    )
+    if confirmed is None:
+        raise HTTPException(status_code=404, detail="Observation nicht gefunden")
+    updated_session = apply_profile_display_name_to_session(
+        session,
+        observation["local_speaker_id"],
+        profile,
+    )
+    return build_speaker_observation_response(confirmed, updated_session)
+
+
+@app.post(
+    "/api/sessions/{session_id}/speaker-observations/{observation_id}/reject",
+    response_model=SpeakerObservationResponse,
+)
+async def reject_session_speaker_observation(session_id: str, observation_id: int):
+    """Reject a suggested speaker-profile match after user review."""
+    session = get_required_session(session_id)
+    observation = get_observation_for_session(session_id, observation_id)
+    if observation.get("status") in {"confirmed", "manual"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Bestätigte Zuordnung kann nicht abgelehnt werden",
+        )
+    rejected = reject_speaker_observation(observation_id)
+    if rejected is None:
+        raise HTTPException(status_code=404, detail="Observation nicht gefunden")
+    return build_speaker_observation_response(rejected, session)
+
+
+@app.post(
+    "/api/sessions/{session_id}/speaker-observations/manual",
+    response_model=SpeakerObservationResponse,
+)
+async def create_manual_speaker_observation(
+    session_id: str,
+    request: SpeakerObservationManualRequest,
+):
+    """Manually link a local speaker to an active or newly created profile."""
+    session = get_required_session(session_id)
+    local_speaker_id = request.local_speaker_id.strip()
+    ensure_local_speaker_exists(session, local_speaker_id)
+    ensure_no_accepted_local_mapping(session_id, local_speaker_id)
+
+    if bool(request.profile_id) == bool(request.display_name):
+        raise HTTPException(
+            status_code=400,
+            detail="Genau eines von profile_id oder display_name ist erforderlich",
+        )
+
+    profile = (
+        get_required_active_profile(request.profile_id)
+        if request.profile_id
+        else create_speaker_profile(
+            validate_display_name(request.display_name or ""),
+            scope=request.scope,
+        )
+    )
+
+    observation_id = request.observation_id
+    if observation_id is not None:
+        existing = get_observation_for_session(session_id, observation_id)
+        if existing["local_speaker_id"] != local_speaker_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Observation gehört zu einem anderen lokalen Sprecher",
+            )
+        job_id = existing["job_id"]
+    else:
+        job_id = session.get("job_id")
+        if not job_id or load_job(job_id) is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Session hat keinen gültigen Transkriptionsjob",
+            )
+        for existing in load_speaker_observations(session_id=session_id):
+            if (
+                existing["local_speaker_id"] == local_speaker_id
+                and existing.get("profile_id") == profile["profile_id"]
+                and existing.get("status") == "suggested"
+            ):
+                observation_id = existing["observation_id"]
+                job_id = existing["job_id"]
+                break
+
+    manual = save_speaker_observation(
+        job_id=job_id,
+        session_id=session_id,
+        local_speaker_id=local_speaker_id,
+        profile_id=profile["profile_id"],
+        confidence=request.confidence,
+        status="manual",
+        observation_id=observation_id,
+    )
+    updated_session = apply_profile_display_name_to_session(
+        session,
+        local_speaker_id,
+        profile,
+    )
+    return build_speaker_observation_response(manual, updated_session)
 
 
 @app.post("/api/export")
