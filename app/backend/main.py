@@ -45,6 +45,7 @@ from summarize import (
 )
 from extract_tops import extract_tops_from_pdf
 from assignment_suggestions import TranscriptUtterance, suggest_assignments
+from agenda_detection import detect_agenda_from_transcript, segment_known_agenda
 from export_protocol import (
     ProtocolAppendix,
     ProtocolMetadata,
@@ -785,6 +786,13 @@ class AssignmentSuggestionsRequest(BaseModel):
     tops: List[str]
 
 
+class AgendaDetectionRequest(BaseModel):
+    transcript: List[TranscriptLine]
+    tops: List[str] = Field(default_factory=list)
+    model: Optional[str] = None
+    system_prompt: Optional[str] = None
+
+
 class AssignmentSuggestionSegmentResponse(BaseModel):
     top_index: int
     top_title: str
@@ -803,6 +811,14 @@ class AssignmentSuggestionsResponse(BaseModel):
     segments: List[AssignmentSuggestionSegmentResponse]
     strategy: str
     uncertain_count: int
+
+
+class AgendaDetectionResponse(BaseModel):
+    tops: List[str]
+    assignments: List[Optional[int]]
+    segments: List[AssignmentSuggestionSegmentResponse]
+    uncertain_count: int
+    strategy: str
 
 
 class ExportMetadataRequest(BaseModel):
@@ -1869,6 +1885,60 @@ async def assignment_suggestions_endpoint(request: AssignmentSuggestionsRequest)
         ],
         strategy=result.strategy,
         uncertain_count=result.uncertain_count,
+    )
+
+
+@app.post("/api/agenda-detection", response_model=AgendaDetectionResponse)
+async def agenda_detection_endpoint(request: AgendaDetectionRequest):
+    """
+    Detect reviewable TOPs and transcript segments.
+
+    If TOPs are supplied, only boundaries are detected/refined. Without TOPs,
+    the endpoint detects agenda titles from transcript transition signals and
+    optionally an LLM structured-output pass.
+    """
+    if not request.transcript:
+        raise HTTPException(status_code=400, detail="Kein Transkript vorhanden")
+
+    transcript = [
+        TranscriptUtterance(speaker=line.speaker, text=line.text)
+        for line in request.transcript
+    ]
+    valid_tops = [top.strip() for top in request.tops if top.strip()]
+    if valid_tops:
+        result = segment_known_agenda(
+            transcript,
+            valid_tops,
+            model=request.model,
+            system_prompt=request.system_prompt,
+        )
+    else:
+        result = detect_agenda_from_transcript(
+            transcript,
+            model=request.model,
+            system_prompt=request.system_prompt,
+        )
+
+    return AgendaDetectionResponse(
+        tops=result.tops,
+        assignments=result.assignments,
+        segments=[
+            AssignmentSuggestionSegmentResponse(
+                top_index=segment.top_index,
+                top_title=segment.top_title,
+                start_index=segment.start_index,
+                end_index=segment.end_index,
+                confidence=segment.confidence,
+                uncertain=segment.uncertain,
+                transition_type=segment.transition_type,
+                reason=segment.reason,
+                evidence_index=segment.evidence_index,
+                evidence_text=segment.evidence_text,
+            )
+            for segment in result.segments
+        ],
+        uncertain_count=result.uncertain_count,
+        strategy=result.strategy,
     )
 
 

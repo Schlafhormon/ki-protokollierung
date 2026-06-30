@@ -341,6 +341,42 @@ def test_assignment_suggestions_endpoint_returns_reviewable_segments():
     assert data["segments"][1]["reason"]
 
 
+def test_agenda_detection_endpoint_detects_tops_without_pdf_or_manual_list():
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/agenda-detection",
+            json={
+                "transcript": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "text": "Kommen wir zu TOP 1 Haushalt.",
+                        "start": 0,
+                        "end": 3,
+                    },
+                    {
+                        "speaker": "SPEAKER_01",
+                        "text": "Der Haushalt wird beraten.",
+                        "start": 4,
+                        "end": 8,
+                    },
+                    {
+                        "speaker": "SPEAKER_00",
+                        "text": "Als nächstes rufe ich TOP 2 Schulbau auf.",
+                        "start": 9,
+                        "end": 12,
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["tops"] == ["Haushalt", "Schulbau"]
+    assert data["assignments"] == [0, 0, 1]
+    assert data["segments"][0]["evidence_text"] == "Kommen wir zu TOP 1 Haushalt."
+    assert data["strategy"] == "heuristic_transcript_fallback"
+
+
 def test_cleanup_old_jobs_removes_expired_jobs_and_upload_files(tmp_path, monkeypatch):
     old_file_path = tmp_path / "old-upload.mp3"
     old_audio_path = tmp_path / "old-audio.mp3"

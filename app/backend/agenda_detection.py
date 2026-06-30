@@ -1,0 +1,660 @@
+"""
+Agenda detection and segmentation for meeting transcripts.
+
+This module builds on the existing deterministic assignment suggestions and
+adds an optional LLM pass for reviewable TOP detection when no PDF/manual agenda
+is available, or for refined boundaries when an agenda is already known.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+from dataclasses import dataclass
+from typing import Any
+
+from assignment_suggestions import (
+    AssignmentSegment,
+    TranscriptUtterance,
+    assignments_from_segments,
+    has_transition_phrase,
+    likely_moderator_speakers,
+    normalize_text,
+    suggest_assignments,
+)
+
+
+logger = logging.getLogger(__name__)
+
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
+LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
+AGENDA_DETECTION_USE_LLM = (
+    os.environ.get("AGENDA_DETECTION_USE_LLM", "false").lower() == "true"
+)
+AGENDA_DETECTION_TIMEOUT_SECONDS = float(
+    os.environ.get("AGENDA_DETECTION_TIMEOUT_SECONDS", "8")
+)
+
+DEFAULT_AGENDA_DETECTION_PROMPT = """Du erkennst Tagesordnungspunkte (TOPs) und Segmentgrenzen in deutschen Sitzungstranskripten.
+
+Gib ausschliesslich valides JSON im folgenden Format zurueck:
+{
+  "tops": [
+    {
+      "top_title": "Titel ohne TOP-Nummer",
+      "start_index": 0,
+      "end_index": 4,
+      "confidence": 0.0,
+      "evidence_text": "kurzer Beleg aus dem Transkript",
+      "uncertain": false
+    }
+  ]
+}
+
+Regeln:
+- Indizes sind 0-basiert und beziehen sich auf die Transkriptzeilen.
+- TOPs muessen in Transkriptreihenfolge stehen.
+- Segmente duerfen sich nicht ueberlappen.
+- Markiere geschaetzte oder schwache Grenzen mit uncertain=true.
+- Nutze Moderationssignale wie "kommen wir zu", "rufe ich auf", "naechster Punkt" und explizite TOP-Zahlen."""
+
+
+@dataclass(frozen=True)
+class AgendaDetectionResult:
+    tops: list[str]
+    assignments: list[int | None]
+    segments: list[AssignmentSegment]
+    uncertain_count: int
+    strategy: str
+
+
+@dataclass(frozen=True)
+class _RawSegment:
+    top_title: str
+    start_index: int | None
+    end_index: int | None
+    confidence: float
+    evidence_text: str | None
+    uncertain: bool
+    reason: str
+    transition_type: str
+
+
+def detect_agenda_from_transcript(
+    transcript: list[TranscriptUtterance],
+    model: str | None = None,
+    system_prompt: str | None = None,
+) -> AgendaDetectionResult:
+    """Detect TOP titles and line boundaries without a known agenda list."""
+    if not transcript:
+        return AgendaDetectionResult([], [], [], 0, "heuristic_transcript_empty")
+
+    heuristic_segments = _heuristic_detect_unknown_agenda(transcript)
+    llm_segments = _maybe_detect_with_llm(
+        transcript,
+        tops=None,
+        heuristic_segments=heuristic_segments,
+        model=model,
+        system_prompt=system_prompt,
+    )
+
+    if llm_segments:
+        segments, repaired = _validate_unknown_segments(
+            len(transcript),
+            llm_segments,
+            fallback_segments=heuristic_segments,
+        )
+        strategy = "heuristic_transcript_llm_repaired" if repaired else "heuristic_transcript_llm"
+    else:
+        segments, repaired = _validate_unknown_segments(
+            len(transcript),
+            [_segment_to_raw(segment) for segment in heuristic_segments],
+            fallback_segments=[],
+        )
+        strategy = "heuristic_transcript_fallback" if not _should_use_llm(model, system_prompt) else "heuristic_transcript_llm_fallback"
+        if repaired:
+            strategy += "_repaired"
+
+    return _result_from_segments(len(transcript), segments, strategy)
+
+
+def segment_known_agenda(
+    transcript: list[TranscriptUtterance],
+    tops: list[str],
+    model: str | None = None,
+    system_prompt: str | None = None,
+) -> AgendaDetectionResult:
+    """Detect start/end lines for an already known TOP list."""
+    valid_tops = [top.strip() for top in tops if top.strip()]
+    if not transcript or not valid_tops:
+        return AgendaDetectionResult(valid_tops, [None] * len(transcript), [], 0, "known_agenda_empty")
+
+    heuristic_result = suggest_assignments(transcript, valid_tops)
+    heuristic_segments = list(heuristic_result.segments)
+    llm_segments = _maybe_detect_with_llm(
+        transcript,
+        tops=valid_tops,
+        heuristic_segments=heuristic_segments,
+        model=model,
+        system_prompt=system_prompt,
+    )
+
+    if llm_segments:
+        segments, repaired = _validate_known_segments(
+            len(transcript),
+            valid_tops,
+            llm_segments,
+            heuristic_segments,
+        )
+        strategy = "known_agenda_heuristic_llm_repaired" if repaired else "known_agenda_heuristic_llm"
+    else:
+        segments, repaired = _validate_known_segments(
+            len(transcript),
+            valid_tops,
+            [_segment_to_raw(segment) for segment in heuristic_segments],
+            heuristic_segments,
+        )
+        strategy = "known_agenda_heuristic"
+        if _should_use_llm(model, system_prompt):
+            strategy += "_llm_fallback"
+        if repaired:
+            strategy += "_repaired"
+
+    return _result_from_segments(len(transcript), segments, strategy, tops=valid_tops)
+
+
+def _result_from_segments(
+    transcript_length: int,
+    segments: list[AssignmentSegment],
+    strategy: str,
+    *,
+    tops: list[str] | None = None,
+) -> AgendaDetectionResult:
+    assignments = assignments_from_segments(transcript_length, segments)
+    return AgendaDetectionResult(
+        tops=tops if tops is not None else [segment.top_title for segment in segments],
+        assignments=assignments,
+        segments=segments,
+        uncertain_count=sum(1 for segment in segments if segment.uncertain),
+        strategy=strategy,
+    )
+
+
+def _should_use_llm(model: str | None, system_prompt: str | None) -> bool:
+    return bool(model or system_prompt or AGENDA_DETECTION_USE_LLM)
+
+
+def _maybe_detect_with_llm(
+    transcript: list[TranscriptUtterance],
+    *,
+    tops: list[str] | None,
+    heuristic_segments: list[AssignmentSegment],
+    model: str | None,
+    system_prompt: str | None,
+) -> list[_RawSegment]:
+    if not _should_use_llm(model, system_prompt):
+        return []
+
+    try:
+        return _detect_with_llm(
+            transcript,
+            tops=tops,
+            heuristic_segments=heuristic_segments,
+            model=model,
+            system_prompt=system_prompt,
+        )
+    except Exception as exc:
+        logger.warning("Agenda LLM detection failed; using heuristic fallback: %s", exc)
+        return []
+
+
+def _detect_with_llm(
+    transcript: list[TranscriptUtterance],
+    *,
+    tops: list[str] | None,
+    heuristic_segments: list[AssignmentSegment],
+    model: str | None,
+    system_prompt: str | None,
+) -> list[_RawSegment]:
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("OpenAI client nicht installiert") from exc
+
+    actual_model = model or LLM_MODEL
+    actual_system_prompt = system_prompt or DEFAULT_AGENDA_DETECTION_PROMPT
+    client = OpenAI(
+        base_url=LLM_BASE_URL,
+        api_key=LLM_API_KEY,
+        timeout=AGENDA_DETECTION_TIMEOUT_SECONDS,
+    )
+
+    response = client.chat.completions.create(
+        model=actual_model,
+        messages=[
+            {"role": "system", "content": actual_system_prompt},
+            {"role": "user", "content": _build_llm_user_prompt(transcript, tops, heuristic_segments)},
+        ],
+        temperature=0.1,
+        max_tokens=2048,
+    )
+    raw_response = response.choices[0].message.content or ""
+    return _parse_llm_segments(raw_response)
+
+
+def _build_llm_user_prompt(
+    transcript: list[TranscriptUtterance],
+    tops: list[str] | None,
+    heuristic_segments: list[AssignmentSegment],
+) -> str:
+    indexed_transcript = "\n".join(
+        f"{index}: {line.speaker}: {line.text}" for index, line in enumerate(transcript)
+    )
+    heuristic_json = [
+        {
+            "top_title": segment.top_title,
+            "start_index": segment.start_index,
+            "end_index": segment.end_index,
+            "confidence": segment.confidence,
+            "uncertain": segment.uncertain,
+            "evidence_text": segment.evidence_text,
+        }
+        for segment in heuristic_segments
+    ]
+
+    if tops:
+        agenda = "\n".join(f"{index}: {top}" for index, top in enumerate(tops))
+        task = (
+            "Bekannte TOP-Liste. Pruefe und verbessere die Segmentgrenzen. "
+            "Gib genau einen Eintrag pro TOP in derselben Reihenfolge zurueck.\n\n"
+            f"TOPs:\n{agenda}"
+        )
+    else:
+        task = (
+            "Keine TOP-Liste vorhanden. Erkenne TOP-Titel und Segmentgrenzen aus "
+            "dem Transkript. Gib nur TOPs zurueck, die im Transkript belegbar sind."
+        )
+
+    return (
+        f"{task}\n\n"
+        f"Heuristische Voranalyse:\n{json.dumps(heuristic_json, ensure_ascii=False)}\n\n"
+        f"Transkript:\n{indexed_transcript}"
+    )
+
+
+def _parse_llm_segments(response_text: str) -> list[_RawSegment]:
+    payload = _extract_json_payload(response_text)
+    if isinstance(payload, dict):
+        raw_items = payload.get("tops") or payload.get("segments") or []
+    elif isinstance(payload, list):
+        raw_items = payload
+    else:
+        raw_items = []
+
+    segments: list[_RawSegment] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("top_title") or item.get("title") or "").strip()
+        if not title:
+            continue
+        segments.append(
+            _RawSegment(
+                top_title=title,
+                start_index=_coerce_int(item.get("start_index")),
+                end_index=_coerce_int(item.get("end_index")),
+                confidence=_coerce_confidence(item.get("confidence"), default=0.55),
+                evidence_text=_coerce_optional_text(item.get("evidence_text")),
+                uncertain=bool(item.get("uncertain", False)),
+                reason="LLM-Erkennung mit strukturierter Ausgabe.",
+                transition_type="llm",
+            )
+        )
+    return segments
+
+
+def _extract_json_payload(response_text: str) -> Any:
+    text = response_text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    object_start = text.find("{")
+    object_end = text.rfind("}")
+    array_start = text.find("[")
+    array_end = text.rfind("]")
+    candidates = []
+    if object_start != -1 and object_end > object_start:
+        candidates.append(text[object_start : object_end + 1])
+    if array_start != -1 and array_end > array_start:
+        candidates.append(text[array_start : array_end + 1])
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    raise ValueError("LLM-Antwort enthaelt kein valides JSON")
+
+
+def _heuristic_detect_unknown_agenda(
+    transcript: list[TranscriptUtterance],
+) -> list[AssignmentSegment]:
+    moderator_speakers = likely_moderator_speakers(transcript)
+    raw_segments: list[_RawSegment] = []
+
+    for index, line in enumerate(transcript):
+        parsed = _parse_heuristic_top_announcement(line.text)
+        if parsed is None:
+            continue
+        title, explicit_number = parsed
+        if line.speaker not in moderator_speakers and not explicit_number:
+            continue
+        confidence = 0.86 if explicit_number else 0.62
+        if line.speaker in moderator_speakers:
+            confidence = min(0.95, confidence + 0.08)
+        raw_segments.append(
+            _RawSegment(
+                top_title=title,
+                start_index=index,
+                end_index=None,
+                confidence=round(confidence, 2),
+                evidence_text=line.text,
+                uncertain=confidence < 0.7,
+                reason=(
+                    "Explizite TOP-Ankuendigung im Transkript."
+                    if explicit_number
+                    else "Moderationsformulierung als TOP-Wechsel erkannt."
+                ),
+                transition_type="explicit" if explicit_number else "heuristic",
+            )
+        )
+
+    segments, _ = _validate_unknown_segments(len(transcript), raw_segments, fallback_segments=[])
+    return segments
+
+
+def _parse_heuristic_top_announcement(text: str) -> tuple[str, bool] | None:
+    if not has_transition_phrase(text):
+        return None
+
+    explicit_match = re.search(
+        r"\b(?:top|tagesordnungspunkt|punkt)\s*(\d+(?:\.\d+)*)\b[\s).:-]*(?P<title>.*)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if explicit_match:
+        title = _clean_detected_title(explicit_match.group("title"))
+        number = explicit_match.group(1)
+        return (title or f"TOP {number}", True)
+
+    transition_match = re.search(
+        r"(?:kommen\s+wir\s+(?:zu|zum|zur)|komme\s+ich\s+(?:zu|zum|zur)|"
+        r"weiter\s+geht\s+es\s+(?:mit|um)|als\s+n(?:ä|ae)chstes|"
+        r"n(?:ä|ae)chste(?:r|n|s)?\s+punkt|dann\s+haben\s+wir)\s+(?P<title>.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not transition_match:
+        return None
+    title = _clean_detected_title(transition_match.group("title"))
+    if len(title) < 4:
+        return None
+    return title, False
+
+
+def _clean_detected_title(value: str) -> str:
+    title = value.strip(" \t\n\r.:;-")
+    title = re.sub(r"\b(?:rufe\s+ich|rufen\s+wir|ich\s+rufe)\b", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\b(?:auf|an)\s*$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\b(?:bitte|dazu)\s*$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s+", " ", title).strip(" \t\n\r.:;-")
+    if len(title) > 120:
+        title = title[:117].rstrip() + "..."
+    return title
+
+
+def _validate_unknown_segments(
+    transcript_length: int,
+    raw_segments: list[_RawSegment],
+    *,
+    fallback_segments: list[AssignmentSegment],
+) -> tuple[list[AssignmentSegment], bool]:
+    if transcript_length <= 0:
+        return [], False
+
+    candidates = list(raw_segments)
+    if not candidates:
+        candidates = [_segment_to_raw(segment) for segment in fallback_segments]
+
+    candidates = [
+        candidate for candidate in candidates if candidate.top_title.strip()
+    ]
+    candidates.sort(key=lambda item: item.start_index if item.start_index is not None else transcript_length)
+
+    deduped: list[_RawSegment] = []
+    seen_starts: set[int] = set()
+    for candidate in candidates:
+        start = candidate.start_index
+        if start is not None and start in seen_starts:
+            continue
+        if start is not None:
+            seen_starts.add(start)
+        deduped.append(candidate)
+
+    return _materialize_ordered_segments(
+        transcript_length,
+        deduped,
+        tops=[candidate.top_title for candidate in deduped],
+        heuristic_fallbacks=_match_fallback_segments(deduped, fallback_segments),
+    )
+
+
+def _validate_known_segments(
+    transcript_length: int,
+    tops: list[str],
+    raw_segments: list[_RawSegment],
+    heuristic_segments: list[AssignmentSegment],
+) -> tuple[list[AssignmentSegment], bool]:
+    if transcript_length <= 0:
+        return [], False
+
+    ordered_raw: list[_RawSegment] = []
+    for index, top in enumerate(tops):
+        if index < len(raw_segments):
+            raw = raw_segments[index]
+            ordered_raw.append(
+                _RawSegment(
+                    top_title=top,
+                    start_index=raw.start_index,
+                    end_index=raw.end_index,
+                    confidence=raw.confidence,
+                    evidence_text=raw.evidence_text,
+                    uncertain=raw.uncertain,
+                    reason=raw.reason,
+                    transition_type=raw.transition_type,
+                )
+            )
+        elif index < len(heuristic_segments):
+            ordered_raw.append(_segment_to_raw(heuristic_segments[index], top_title=top))
+        else:
+            ordered_raw.append(
+                _RawSegment(
+                    top_title=top,
+                    start_index=None,
+                    end_index=None,
+                    confidence=0.35,
+                    evidence_text=None,
+                    uncertain=True,
+                    reason="Keine Grenze gefunden; Segment wurde aus der Reihenfolge geschaetzt.",
+                    transition_type="inferred",
+                )
+            )
+
+    return _materialize_ordered_segments(
+        transcript_length,
+        ordered_raw,
+        tops=tops,
+        heuristic_fallbacks=heuristic_segments,
+    )
+
+
+def _materialize_ordered_segments(
+    transcript_length: int,
+    raw_segments: list[_RawSegment],
+    *,
+    tops: list[str],
+    heuristic_fallbacks: list[AssignmentSegment],
+) -> tuple[list[AssignmentSegment], bool]:
+    repaired = False
+    starts: list[int] = []
+    prepared: list[_RawSegment] = []
+
+    for index, raw in enumerate(raw_segments):
+        if len(starts) >= transcript_length:
+            repaired = True
+            break
+
+        fallback = heuristic_fallbacks[index] if index < len(heuristic_fallbacks) else None
+        fallback_start = fallback.start_index if fallback else None
+        start = raw.start_index if raw.start_index is not None else fallback_start
+        if start is None:
+            remaining_segments = max(1, len(raw_segments) - index)
+            remaining_lines = max(1, transcript_length - (starts[-1] + 1 if starts else 0))
+            start = (starts[-1] + 1 if starts else 0) + max(0, remaining_lines // remaining_segments - 1)
+            repaired = True
+
+        minimum_start = starts[-1] + 1 if starts else 0
+        if fallback_start is not None and (
+            start < minimum_start or start < 0 or start >= transcript_length
+        ):
+            if fallback_start >= minimum_start:
+                start = fallback_start
+
+        original_start = start
+        start = max(0, min(int(start), transcript_length - 1))
+        if start < minimum_start:
+            start = minimum_start
+        if start != original_start:
+            repaired = True
+        if start >= transcript_length:
+            repaired = True
+            break
+
+        starts.append(start)
+        prepared.append(raw)
+
+    segments: list[AssignmentSegment] = []
+    for index, (raw, start) in enumerate(zip(prepared, starts)):
+        next_start = starts[index + 1] if index + 1 < len(starts) else transcript_length
+        max_end = max(start, next_start - 1)
+        fallback = heuristic_fallbacks[index] if index < len(heuristic_fallbacks) else None
+        raw_end = raw.end_index if raw.end_index is not None else (fallback.end_index if fallback else None)
+        original_end = raw_end
+        if raw_end is None:
+            end = max_end
+        else:
+            end = max(start, min(int(raw_end), transcript_length - 1, max_end))
+        if original_end is not None and end != original_end:
+            repaired = True
+
+        title = tops[index] if index < len(tops) and tops[index].strip() else raw.top_title
+        segment_repaired = (
+            raw.start_index != start
+            or (raw.end_index is not None and raw.end_index != end)
+            or raw.start_index is None
+        )
+        confidence = max(0.0, min(1.0, raw.confidence))
+        if segment_repaired:
+            confidence = min(confidence, 0.5)
+
+        segments.append(
+            AssignmentSegment(
+                top_index=index,
+                top_title=title,
+                start_index=start,
+                end_index=end,
+                confidence=round(confidence, 2),
+                uncertain=raw.uncertain or segment_repaired or confidence < 0.55,
+                transition_type=raw.transition_type,
+                reason=(
+                    raw.reason
+                    if not segment_repaired
+                    else f"{raw.reason} Grenzen wurden validiert oder repariert."
+                ),
+                evidence_index=start,
+                evidence_text=raw.evidence_text,
+            )
+        )
+
+    return segments, repaired
+
+
+def _match_fallback_segments(
+    raw_segments: list[_RawSegment],
+    fallback_segments: list[AssignmentSegment],
+) -> list[AssignmentSegment]:
+    if not fallback_segments:
+        return []
+
+    by_title = {
+        normalize_text(segment.top_title): segment
+        for segment in fallback_segments
+        if segment.top_title.strip()
+    }
+    matched: list[AssignmentSegment] = []
+    for index, raw in enumerate(raw_segments):
+        fallback = by_title.get(normalize_text(raw.top_title))
+        if fallback is None and index < len(fallback_segments):
+            fallback = fallback_segments[index]
+        if fallback is not None:
+            matched.append(fallback)
+    return matched
+
+
+def _segment_to_raw(
+    segment: AssignmentSegment,
+    *,
+    top_title: str | None = None,
+) -> _RawSegment:
+    return _RawSegment(
+        top_title=top_title or segment.top_title,
+        start_index=segment.start_index,
+        end_index=segment.end_index,
+        confidence=segment.confidence,
+        evidence_text=segment.evidence_text,
+        uncertain=segment.uncertain,
+        reason=segment.reason,
+        transition_type=segment.transition_type,
+    )
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_confidence(value: Any, *, default: float) -> float:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
