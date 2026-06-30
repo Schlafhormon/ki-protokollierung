@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "tuiv-backend"
 version = "0.1.0"
@@ -22,6 +26,18 @@ dependencies = [
 test = [
     "httpx>=0.28.0",
     "pytest>=8.0.0",
+]
+
+[tool.setuptools]
+py-modules = [
+    "assignment_suggestions",
+    "export_protocol",
+    "extract_tops",
+    "main",
+    "persistence",
+    "summarize",
+    "telemetry",
+    "transcribe",
 ]
 
 [tool.pytest.ini_options]

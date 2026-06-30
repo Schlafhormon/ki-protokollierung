@@ -33,7 +33,7 @@ export default function Layout({ children, onSettingsClick }: LayoutProps) {
       <footer className="bg-white border-t border-gray-200 px-6 py-6">
         <div className="max-w-6xl mx-auto">
           <div className="flex flex-col items-center gap-4">
-            <div className="flex items-center gap-8">
+            <div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-4">
               <img
                 src="/logos/logo_bmftr_de.png"
                 alt="BMFTR Logo"
@@ -43,6 +43,16 @@ export default function Layout({ children, onSettingsClick }: LayoutProps) {
                 src="/logos/logo_aisc_150dpi.png"
                 alt="AISC Logo"
                 className="h-10 object-contain"
+              />
+              <img
+                src="/logos/Keule-Logo.png"
+                alt="Keule Logo"
+                className="h-10 object-contain"
+              />
+              <img
+                src="/logos/Logo-jpeg_4c.jpg"
+                alt="Doberlug-Kirchhain Logo"
+                className="h-12 object-contain"
               />
             </div>
             <p className="text-sm text-gray-500">

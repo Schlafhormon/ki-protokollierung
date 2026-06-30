@@ -37,13 +37,14 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock ./
 COPY *.py ./
 
-# Create runtime directories
-RUN mkdir -p uploads data
-
 # Install dependencies with CUDA support
 # Note: torch will automatically use CUDA when available
 ENV UV_NO_CACHE=1
 RUN uv pip install --system -e .
+
+# Create runtime directories after editable install so setuptools package
+# discovery does not treat them as Python packages.
+RUN mkdir -p uploads data
 
 # Install nvidia-cudnn-cu12 for WhisperX GPU support
 # This provides the cuDNN libraries needed for faster-whisper

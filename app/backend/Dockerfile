@@ -24,12 +24,13 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock ./
 COPY *.py ./
 
-# Create runtime directories
-RUN mkdir -p uploads data
-
 # Install dependencies
 ENV UV_NO_CACHE=1
 RUN uv pip install --system -e .
+
+# Create runtime directories after editable install so setuptools package
+# discovery does not treat them as Python packages.
+RUN mkdir -p uploads data
 
 # Set cache directories inside the container
 ENV HF_HOME=/app/.cache/huggingface
