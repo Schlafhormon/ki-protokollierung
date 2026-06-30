@@ -24,8 +24,8 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock ./
 COPY *.py ./
 
-# Create uploads directory
-RUN mkdir -p uploads
+# Create runtime directories
+RUN mkdir -p uploads data
 
 # Install dependencies
 ENV UV_NO_CACHE=1

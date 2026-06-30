@@ -34,6 +34,7 @@ k8s/
 ├── namespace.yaml              # tops namespace
 ├── backend/
 │   ├── configmap.yaml          # Whisper + LLM environment variables
+│   ├── pvc.yaml                # Persistent backend data/uploads volume
 │   ├── deployment.yaml         # GPU pod (A30), WhisperX + FastAPI
 │   └── service.yaml            # ClusterIP "backend" on port 8010
 ├── frontend/
@@ -59,6 +60,27 @@ k8s/
 | `WHISPER_LANGUAGE` | `de` | Audio language |
 | `LLM_BASE_URL` | `https://api.aisc.hpi.de` | AISC LLM API endpoint |
 | `LLM_MODEL` | `llama-3-3-70b` | Model name for summarization |
+| `LLM_TIMEOUT_SECONDS` | `120` | Timeout per LLM request |
+| `LLM_MAX_RETRIES` | `2` | Retries for transient LLM errors |
+| `LLM_RETRY_BACKOFF_SECONDS` | `0.5` | Backoff between retries |
+| `LLM_CHUNK_CHARS` | `12000` | Target chunk size for long TOP transcripts |
+| `LLM_STRUCTURED_FALLBACK` | `true` | Use plain-text fallback if structured output parsing fails |
+| `PERSISTENCE_DB_PATH` | `/app/data/sessions.sqlite3` | SQLite session database path |
+| `JOB_MAX_AGE_SECONDS` | `7200` | Max age for in-memory job cache cleanup |
+| `JOB_MAX_COUNT` | `100` | Max jobs retained in memory |
+| `MAX_UPLOAD_BYTES` | `524288000` | Maximum upload size |
+| `TRANSCRIPTION_CONCURRENCY` | `1` | Concurrent transcription workers |
+
+### Storage
+
+`backend/pvc.yaml` creates a `ReadWriteOnce` PVC named `tops-backend-data`.
+The backend mounts it as:
+
+- `/app/data` for the SQLite session database and optional telemetry backups
+- `/app/uploads` for retained audio playback after session restore
+
+If your cluster has no default `StorageClass`, set one in `backend/pvc.yaml`
+before applying the manifests.
 
 ### Secrets
 
@@ -168,5 +190,5 @@ kubectl rollout status deployment/tops-frontend -n tops
 | GPU access | Docker `--gpus` / compose `deploy.resources` | `runtimeClassName: nvidia` + `nodeSelector` |
 | Backend image | `backend:cpu-latest` or `backend:gpu-latest` | Commit-pinned `sha-...-gpu` image (always GPU) |
 | Networking | Docker network (service names) | K8s Services + DNS |
-| Storage | `./uploads` volume mount | Ephemeral (jobs auto-clean after 2h) |
+| Storage | `./uploads` and `./data` bind mounts | `tops-backend-data` PVC mounted at `/app/uploads` and `/app/data` |
 | External access | `localhost:3000` | LoadBalancer by default; optional Ingress example |

@@ -129,6 +129,11 @@ The setup scripts pull missing images by default. Set
 `PROTOKOLL_PULL_POLICY=always` for the old "always check for updates" behavior,
 or `PROTOKOLL_PULL_POLICY=never` for fully offline starts with local images.
 
+Runtime state is stored in local bind mounts:
+
+- `./uploads` for retained audio playback after session restore
+- `./data` for the SQLite session database and optional telemetry backups
+
 ---
 
 ### Step 4: Wait for Download
@@ -269,7 +274,7 @@ konfigurierbar und wird beim Schreiben angewendet:
 
 - `TELEMETRY_BACKUP_RETENTION_DAYS` (Standard: `14`)
 - `TELEMETRY_BACKUP_MAX_FILES` (Standard: `30`)
-- `TELEMETRY_BACKUP_DIR` (Standard: `telemetry_backup`)
+- `TELEMETRY_BACKUP_DIR` (Docker/K8s-Standard: `/app/data/telemetry_backup`)
 
 ---
 
@@ -454,11 +459,23 @@ BACKEND_GPU_IMAGE=ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:v
 | `WHISPER_LANGUAGE`   | Language code                                       | `de`                        |
 | `LLM_BASE_URL`       | Ollama API endpoint                                 | `http://localhost:11434/v1` |
 | `LLM_MODEL`          | Model name for summarization                        | `qwen3:8b`                  |
+| `LLM_TIMEOUT_SECONDS` | Timeout per LLM request                            | `120`                       |
+| `LLM_MAX_RETRIES`    | Retries for transient LLM errors                    | `2`                         |
+| `LLM_RETRY_BACKOFF_SECONDS` | Backoff between transient LLM retries       | `0.5`                       |
+| `LLM_CHUNK_CHARS`    | Target chunk size for long TOP transcripts          | `12000`                     |
+| `LLM_STRUCTURED_FALLBACK` | Fall back to plain text when structured output parsing fails | `true`        |
+| `PERSISTENCE_DB_PATH` | SQLite session database path inside backend container | `/app/data/sessions.sqlite3` |
+| `JOB_MAX_AGE_SECONDS` | Max age for in-memory job cache cleanup            | `7200`                      |
+| `JOB_MAX_COUNT`      | Max number of jobs retained in memory               | `100`                       |
+| `DELETE_UPLOADS_ON_JOB_CLEANUP` | Delete upload files when old jobs are cleaned up | `false`          |
+| `DELETE_UPLOADS_ON_CANCEL_OR_FAILURE` | Delete upload files after cancelled/failed jobs | `true`        |
+| `MAX_UPLOAD_BYTES`   | Maximum upload size                                 | `524288000`                 |
+| `TRANSCRIPTION_CONCURRENCY` | Concurrent transcription workers             | `1`                         |
 | `TELEMETRY_WEBHOOK_URL` | Runtime webhook URL for opt-in telemetry          | (empty, disabled)           |
 | `TELEMETRY_BACKUP_ENABLED` | Enable local telemetry JSONL backups          | `false`                     |
 | `TELEMETRY_BACKUP_RETENTION_DAYS` | Retention for local telemetry backups | `14`                        |
 | `TELEMETRY_BACKUP_MAX_FILES` | Maximum local telemetry backup files       | `30`                        |
-| `TELEMETRY_BACKUP_DIR` | Directory for local telemetry backups             | `telemetry_backup`          |
+| `TELEMETRY_BACKUP_DIR` | Directory for local telemetry backups             | `/app/data/telemetry_backup` |
 
 ### API Endpoints
 

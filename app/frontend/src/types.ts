@@ -10,6 +10,12 @@ export interface TranscriptLine {
   end: number;    // End time in seconds
 }
 
+export interface AudioMetadata {
+  filename?: string | null;
+  content_type?: string | null;
+  size_bytes?: number | null;
+}
+
 export interface TranscriptionJob {
   job_id: string;
   status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
@@ -17,6 +23,7 @@ export interface TranscriptionJob {
   message: string;
   transcript?: TranscriptLine[];
   audio_url?: string;  // URL to stream audio for playback
+  audio_metadata?: AudioMetadata | null;
   error?: string;
 }
 
@@ -37,6 +44,7 @@ export interface SessionSavePayload {
 export interface SessionResponse extends SessionSavePayload {
   session_id: string;
   audio_url?: string | null;
+  audio_metadata?: AudioMetadata | null;
   job?: TranscriptionJob | null;
 }
 

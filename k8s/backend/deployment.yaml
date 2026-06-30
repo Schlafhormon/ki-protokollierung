@@ -17,11 +17,25 @@ spec:
       runtimeClassName: nvidia
       nodeSelector:
         accelerator: a30
+      initContainers:
+        - name: init-backend-data
+          image: busybox:1.36
+          command: ["sh", "-c", "mkdir -p /storage/data /storage/uploads"]
+          volumeMounts:
+            - name: backend-data
+              mountPath: /storage
       containers:
         - name: backend
           image: ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:sha-74353f6-gpu
           ports:
             - containerPort: 8010
+          volumeMounts:
+            - name: backend-data
+              mountPath: /app/data
+              subPath: data
+            - name: backend-data
+              mountPath: /app/uploads
+              subPath: uploads
           envFrom:
             - configMapRef:
                 name: tops-backend-config
@@ -56,3 +70,7 @@ spec:
               port: 8010
             periodSeconds: 30
             timeoutSeconds: 10
+      volumes:
+        - name: backend-data
+          persistentVolumeClaim:
+            claimName: tops-backend-data
