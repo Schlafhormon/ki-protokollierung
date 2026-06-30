@@ -60,6 +60,26 @@ export interface SummarizeResponse {
   chunks_processed?: number;
 }
 
+export interface AssignmentSuggestionSegment {
+  top_index: number;
+  top_title: string;
+  start_index: number;
+  end_index: number;
+  confidence: number;
+  uncertain: boolean;
+  transition_type: 'explicit' | 'keyword' | 'inferred' | string;
+  reason: string;
+  evidence_index?: number | null;
+  evidence_text?: string | null;
+}
+
+export interface AssignmentSuggestionsResponse {
+  suggested_assignments: (number | null)[];
+  segments: AssignmentSuggestionSegment[];
+  strategy: string;
+  uncertain_count: number;
+}
+
 // Component Props Types
 export interface LayoutProps {
   children: React.ReactNode;

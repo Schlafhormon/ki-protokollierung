@@ -1,5 +1,11 @@
 import { useState, useRef, useEffect, type MouseEvent } from 'react';
-import type { AssignmentStepProps, TopColor } from '../types';
+import type {
+  AssignmentSuggestionSegment,
+  AssignmentSuggestionsResponse,
+  AssignmentStepProps,
+  TopColor,
+} from '../types';
+import { generateAssignmentSuggestions } from '../api';
 import AudioPlayer from './AudioPlayer';
 import { useAudioSync } from '../hooks/useAudioSync';
 import SpeakerNameEditor from './SpeakerNameEditor';
@@ -36,8 +42,12 @@ export default function AssignmentStep({
 }: AssignmentStepProps) {
   const [selectedTop, setSelectedTop] = useState(0);
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
+  const [selectedLineIndex, setSelectedLineIndex] = useState<number | null>(null);
   const [editingLine, setEditingLine] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
+  const [suggestions, setSuggestions] = useState<AssignmentSuggestionsResponse | null>(null);
+  const [suggestionStatus, setSuggestionStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
 
   // Audio sync hook
@@ -59,6 +69,44 @@ export default function AssignmentStep({
     }
   }, [currentLineIndex, isAutoScroll]);
 
+  useEffect(() => {
+    let isCurrent = true;
+
+    const loadSuggestions = async () => {
+      if (!transcript.length || !tops.some((top) => top.trim())) {
+        setSuggestions(null);
+        setSuggestionStatus('idle');
+        return;
+      }
+
+      setSuggestionStatus('loading');
+      setSuggestionError(null);
+
+      try {
+        const result = await generateAssignmentSuggestions(tops, transcript);
+        if (!isCurrent) {
+          return;
+        }
+        setSuggestions(result);
+        setSuggestionStatus('ready');
+      } catch (error) {
+        if (!isCurrent) {
+          return;
+        }
+        setSuggestionStatus('error');
+        setSuggestionError(
+          error instanceof Error ? error.message : 'Zuordnungsvorschläge konnten nicht erzeugt werden'
+        );
+      }
+    };
+
+    loadSuggestions();
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [tops, transcript]);
+
   // Helper to get display name for a speaker
   const getDisplayName = (speakerId: string) => speakerNames[speakerId] || speakerId;
 
@@ -78,6 +126,7 @@ export default function AssignmentStep({
     if (editingLine === lineIndex) {
       return;
     }
+    setSelectedLineIndex(lineIndex);
 
     // Double-click to seek audio
     const line = transcript[lineIndex];
@@ -109,6 +158,96 @@ export default function AssignmentStep({
     }
   };
 
+  const applySuggestionSegment = (segment: AssignmentSuggestionSegment) => {
+    const newAssignments = [...assignments];
+    for (let i = segment.start_index; i <= segment.end_index; i++) {
+      if (i >= 0 && i < newAssignments.length) {
+        newAssignments[i] = segment.top_index;
+      }
+    }
+    setAssignments(newAssignments);
+    setSelectedTop(segment.top_index);
+    setSelectedLineIndex(segment.start_index);
+  };
+
+  const applyAllSuggestions = () => {
+    if (!suggestions) {
+      return;
+    }
+    setAssignments(suggestions.suggested_assignments);
+  };
+
+  const getCurrentSegmentBounds = (lineIndex: number): { start: number; end: number } => {
+    const value = assignments[lineIndex] ?? null;
+    let start = lineIndex;
+    let end = lineIndex;
+
+    while (start > 0 && (assignments[start - 1] ?? null) === value) {
+      start -= 1;
+    }
+    while (end < assignments.length - 1 && (assignments[end + 1] ?? null) === value) {
+      end += 1;
+    }
+
+    return { start, end };
+  };
+
+  const assignCurrentSegmentToSelectedTop = () => {
+    if (selectedLineIndex === null) {
+      return;
+    }
+    const { start, end } = getCurrentSegmentBounds(selectedLineIndex);
+    const newAssignments = [...assignments];
+    for (let i = start; i <= end; i++) {
+      newAssignments[i] = selectedTop;
+    }
+    setAssignments(newAssignments);
+  };
+
+  const splitCurrentSegmentAtSelectedLine = () => {
+    if (selectedLineIndex === null) {
+      return;
+    }
+    const { end } = getCurrentSegmentBounds(selectedLineIndex);
+    const newAssignments = [...assignments];
+    for (let i = selectedLineIndex; i <= end; i++) {
+      newAssignments[i] = selectedTop;
+    }
+    setAssignments(newAssignments);
+  };
+
+  const mergeCurrentSegmentWithPrevious = () => {
+    if (selectedLineIndex === null) {
+      return;
+    }
+    const { start, end } = getCurrentSegmentBounds(selectedLineIndex);
+    if (start === 0) {
+      return;
+    }
+    const previousAssignment = assignments[start - 1] ?? null;
+    const newAssignments = [...assignments];
+    for (let i = start; i <= end; i++) {
+      newAssignments[i] = previousAssignment;
+    }
+    setAssignments(newAssignments);
+  };
+
+  const mergeCurrentSegmentWithNext = () => {
+    if (selectedLineIndex === null) {
+      return;
+    }
+    const { start, end } = getCurrentSegmentBounds(selectedLineIndex);
+    if (end >= assignments.length - 1) {
+      return;
+    }
+    const nextAssignment = assignments[end + 1] ?? null;
+    const newAssignments = [...assignments];
+    for (let i = start; i <= end; i++) {
+      newAssignments[i] = nextAssignment;
+    }
+    setAssignments(newAssignments);
+  };
+
   const startLineEdit = (lineIndex: number, text: string) => {
     setEditingLine(lineIndex);
     setEditText(text);
@@ -134,6 +273,8 @@ export default function AssignmentStep({
   const assignedCount = assignments.filter((a) => a !== null).length;
   const totalCount = transcript.length;
   const canProceed = assignedCount > 0;
+  const selectedSegmentBounds =
+    selectedLineIndex !== null ? getCurrentSegmentBounds(selectedLineIndex) : null;
 
   return (
     <div className="space-y-6">
@@ -153,6 +294,80 @@ export default function AssignmentStep({
         setSpeakerNames={setSpeakerNames}
       />
 
+      {/* Suggestions */}
+      <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <div>
+            <h3 className="font-medium text-gray-900">Zuordnungsvorschläge</h3>
+            <p className="text-sm text-gray-600">
+              Vorschläge werden aus Moderationshinweisen und TOP-Begriffen abgeleitet.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={applyAllSuggestions}
+            disabled={!suggestions?.segments.length}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400"
+          >
+            Alle Vorschläge übernehmen
+          </button>
+        </div>
+
+        {suggestionStatus === 'loading' && (
+          <div className="text-sm text-gray-600">Vorschläge werden erzeugt...</div>
+        )}
+        {suggestionStatus === 'error' && (
+          <div className="text-sm text-red-600">{suggestionError}</div>
+        )}
+        {suggestionStatus === 'ready' && suggestions && (
+          <div className="space-y-2">
+            <div className="text-xs text-gray-500">
+              {suggestions.segments.length} Segmente, {suggestions.uncertain_count} unsicher
+            </div>
+            <div className="grid gap-2 md:grid-cols-2">
+              {suggestions.segments.map((segment) => {
+                const color = getColor(segment.top_index);
+                return (
+                  <div
+                    key={`${segment.top_index}-${segment.start_index}`}
+                    className={`border rounded-lg p-3 ${segment.uncertain ? 'border-yellow-300 bg-yellow-50' : 'border-gray-200'}`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={`w-2.5 h-2.5 rounded-full ${color.dot}`} />
+                          <span className="font-medium text-sm text-gray-900 truncate">
+                            TOP {segment.top_index + 1}: {segment.top_title}
+                          </span>
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          Zeilen {segment.start_index + 1}-{segment.end_index + 1} · Confidence{' '}
+                          {Math.round(segment.confidence * 100)}%
+                          {segment.uncertain ? ' · unsicher' : ''}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => applySuggestionSegment(segment)}
+                        className="shrink-0 px-3 py-1.5 text-xs bg-gray-900 text-white rounded hover:bg-gray-700"
+                      >
+                        Übernehmen
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-700 mt-2">{segment.reason}</p>
+                    {segment.evidence_text && (
+                      <p className="text-xs text-gray-500 mt-1 line-clamp-2">
+                        Hinweis: {segment.evidence_text}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Progress */}
       <div className="flex items-center justify-between text-sm text-gray-600">
         <span>
@@ -164,6 +379,54 @@ export default function AssignmentStep({
             style={{ width: `${(assignedCount / totalCount) * 100}%` }}
           />
         </div>
+      </div>
+
+      <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 flex flex-wrap items-center gap-2 text-sm">
+        <span className="text-gray-700">
+          {selectedLineIndex === null
+            ? 'Keine Zeile ausgewählt'
+            : `Zeile ${selectedLineIndex + 1} ausgewählt${
+                selectedSegmentBounds
+                  ? ` · Segment ${selectedSegmentBounds.start + 1}-${selectedSegmentBounds.end + 1}`
+                  : ''
+              }`}
+        </span>
+        <button
+          type="button"
+          onClick={assignCurrentSegmentToSelectedTop}
+          disabled={selectedLineIndex === null}
+          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+        >
+          Segment korrigieren
+        </button>
+        <button
+          type="button"
+          onClick={splitCurrentSegmentAtSelectedLine}
+          disabled={selectedLineIndex === null}
+          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+        >
+          Ab hier splitten
+        </button>
+        <button
+          type="button"
+          onClick={mergeCurrentSegmentWithPrevious}
+          disabled={selectedLineIndex === null || selectedSegmentBounds?.start === 0}
+          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+        >
+          Mit vorherigem Segment mergen
+        </button>
+        <button
+          type="button"
+          onClick={mergeCurrentSegmentWithNext}
+          disabled={
+            selectedLineIndex === null ||
+            !selectedSegmentBounds ||
+            selectedSegmentBounds.end >= assignments.length - 1
+          }
+          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+        >
+          Mit nächstem Segment mergen
+        </button>
       </div>
 
       {/* Main Layout */}
@@ -226,6 +489,7 @@ export default function AssignmentStep({
               const assignedTo = assignments[index] ?? null;
               const color = assignedTo !== null ? getColor(assignedTo) : null;
               const isCurrentLine = index === currentLineIndex;
+              const isSelectedLine = index === selectedLineIndex;
               return (
                 <div
                   key={index}
@@ -234,7 +498,9 @@ export default function AssignmentStep({
                     color
                       ? `${color.bg} ${color.border} hover:opacity-80`
                       : 'border-transparent hover:bg-gray-100'
-                  } ${isCurrentLine ? 'ring-2 ring-blue-500 ring-offset-1' : ''}`}
+                  } ${isCurrentLine ? 'ring-2 ring-blue-500 ring-offset-1' : ''} ${
+                    isSelectedLine ? 'outline outline-2 outline-gray-800' : ''
+                  }`}
                 >
                   <span className="font-medium text-gray-600">
                     {getDisplayName(line.speaker)}:

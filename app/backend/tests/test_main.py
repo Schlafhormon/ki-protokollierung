@@ -237,6 +237,36 @@ def test_pdf_upload_validation_accepts_pdf_mime_or_extension():
     assert main.is_allowed_pdf_file("agenda.PDF", "application/octet-stream")
 
 
+def test_assignment_suggestions_endpoint_returns_reviewable_segments():
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/assignment-suggestions",
+            json={
+                "tops": ["1. Begrüßung", "2. Haushalt"],
+                "transcript": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "text": "Ich eröffne die Sitzung.",
+                        "start": 0,
+                        "end": 3,
+                    },
+                    {
+                        "speaker": "SPEAKER_00",
+                        "text": "Kommen wir zu TOP 2 Haushalt.",
+                        "start": 4,
+                        "end": 8,
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["suggested_assignments"] == [0, 1]
+    assert data["segments"][1]["confidence"] >= 0.7
+    assert data["segments"][1]["reason"]
+
+
 def test_cleanup_old_jobs_removes_expired_jobs_and_upload_files(tmp_path, monkeypatch):
     old_file_path = tmp_path / "old-upload.mp3"
     old_audio_path = tmp_path / "old-audio.mp3"

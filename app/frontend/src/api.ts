@@ -3,6 +3,7 @@
  */
 
 import type {
+  AssignmentSuggestionsResponse,
   SessionResponse,
   SessionSavePayload,
   StructuredSummary,
@@ -197,6 +198,32 @@ export async function generateSummary(
     fallbackUsed: Boolean(data.fallback_used),
     chunksProcessed: data.chunks_processed ?? 1,
   };
+}
+
+/**
+ * Suggest reviewable TOP assignments for a transcript.
+ */
+export async function generateAssignmentSuggestions(
+  tops: string[],
+  transcript: TranscriptLine[]
+): Promise<AssignmentSuggestionsResponse> {
+  const response = await fetch(`${API_BASE}/api/assignment-suggestions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      tops,
+      transcript,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || "Fehler beim Erzeugen der Zuordnungsvorschläge");
+  }
+
+  return response.json();
 }
 
 /**

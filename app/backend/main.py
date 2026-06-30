@@ -39,6 +39,7 @@ from transcribe import (
 )
 from summarize import LLMCallError, StructuredOutputError, summarize_segment
 from extract_tops import extract_tops_from_pdf
+from assignment_suggestions import TranscriptUtterance, suggest_assignments
 from telemetry import TelemetryCollector
 from persistence import (
     init_db,
@@ -656,6 +657,31 @@ class ExtractTOPsResponse(BaseModel):
     tops: List[str]
 
 
+class AssignmentSuggestionsRequest(BaseModel):
+    transcript: List[TranscriptLine]
+    tops: List[str]
+
+
+class AssignmentSuggestionSegmentResponse(BaseModel):
+    top_index: int
+    top_title: str
+    start_index: int
+    end_index: int
+    confidence: float
+    uncertain: bool
+    transition_type: str
+    reason: str
+    evidence_index: Optional[int] = None
+    evidence_text: Optional[str] = None
+
+
+class AssignmentSuggestionsResponse(BaseModel):
+    suggested_assignments: List[Optional[int]]
+    segments: List[AssignmentSuggestionSegmentResponse]
+    strategy: str
+    uncertain_count: int
+
+
 class SessionCompleteRequest(BaseModel):
     """Request model for reporting session completion with telemetry."""
 
@@ -1055,6 +1081,45 @@ async def extract_tops_endpoint(
                 logger.info(f"Cleaned up PDF file: {file_path}")
         except Exception as cleanup_error:
             logger.warning(f"Failed to clean up PDF: {cleanup_error}")
+
+
+@app.post("/api/assignment-suggestions", response_model=AssignmentSuggestionsResponse)
+async def assignment_suggestions_endpoint(request: AssignmentSuggestionsRequest):
+    """
+    Suggest transcript-to-TOP assignments with explainable heuristic boundaries.
+    Users still review and accept/correct the suggestions in the frontend.
+    """
+    if not request.transcript:
+        raise HTTPException(status_code=400, detail="Kein Transkript vorhanden")
+    if not any(top.strip() for top in request.tops):
+        raise HTTPException(status_code=400, detail="Keine TOPs vorhanden")
+
+    transcript = [
+        TranscriptUtterance(speaker=line.speaker, text=line.text)
+        for line in request.transcript
+    ]
+    result = suggest_assignments(transcript, request.tops)
+
+    return AssignmentSuggestionsResponse(
+        suggested_assignments=result.suggested_assignments,
+        segments=[
+            AssignmentSuggestionSegmentResponse(
+                top_index=segment.top_index,
+                top_title=segment.top_title,
+                start_index=segment.start_index,
+                end_index=segment.end_index,
+                confidence=segment.confidence,
+                uncertain=segment.uncertain,
+                transition_type=segment.transition_type,
+                reason=segment.reason,
+                evidence_index=segment.evidence_index,
+                evidence_text=segment.evidence_text,
+            )
+            for segment in result.segments
+        ],
+        strategy=result.strategy,
+        uncertain_count=result.uncertain_count,
+    )
 
 
 @app.post("/api/telemetry/session-complete", response_model=SessionCompleteResponse)

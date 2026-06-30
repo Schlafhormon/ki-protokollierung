@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AssignmentStepProps, TranscriptLine } from '../types';
 import AssignmentStep from './AssignmentStep';
 
@@ -28,6 +28,47 @@ function renderAssignmentStep(overrides: Partial<AssignmentStepProps> = {}) {
 describe('AssignmentStep', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          suggested_assignments: [0, 1],
+          strategy: 'heuristic_moderator_keyword',
+          uncertain_count: 0,
+          segments: [
+            {
+              top_index: 0,
+              top_title: 'Begruessung',
+              start_index: 0,
+              end_index: 0,
+              confidence: 0.6,
+              uncertain: false,
+              transition_type: 'inferred',
+              reason: 'Erster TOP beginnt am Anfang des Transkripts.',
+              evidence_index: 0,
+              evidence_text: 'Hallo zusammen',
+            },
+            {
+              top_index: 1,
+              top_title: 'Haushalt',
+              start_index: 1,
+              end_index: 1,
+              confidence: 0.82,
+              uncertain: false,
+              transition_type: 'keyword',
+              reason: 'Starker Begriffsabgleich mit dem TOP-Titel.',
+              evidence_index: 1,
+              evidence_text: 'Wir beraten den Haushalt',
+            },
+          ],
+        }),
+      }),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('assigns a clicked transcript line to the selected TOP', () => {
@@ -76,5 +117,28 @@ describe('AssignmentStep', () => {
       { ...transcript[0]!, text: 'Hallo korrigiert' },
       transcript[1],
     ]);
+  });
+
+  it('applies generated assignment suggestions after review', async () => {
+    const user = userEvent.setup();
+    const setAssignments = vi.fn();
+    renderAssignmentStep({ setAssignments });
+
+    await screen.findByText(/starker begriffsabgleich/i);
+    await user.click(screen.getByRole('button', { name: /alle vorschläge übernehmen/i }));
+
+    expect(setAssignments).toHaveBeenCalledWith([0, 1]);
+  });
+
+  it('can split the selected segment from a transcript line', async () => {
+    const user = userEvent.setup();
+    const setAssignments = vi.fn();
+    renderAssignmentStep({ assignments: [0, 0], setAssignments });
+
+    await user.click(screen.getByRole('button', { name: /2\. Haushalt/i }));
+    await user.click(screen.getByText('Wir beraten den Haushalt'));
+    await user.click(screen.getByRole('button', { name: /ab hier splitten/i }));
+
+    expect(setAssignments).toHaveBeenCalledWith([0, 1]);
   });
 });
