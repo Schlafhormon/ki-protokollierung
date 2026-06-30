@@ -37,7 +37,7 @@ from transcribe import (
     WHISPER_MODEL,
     WHISPER_BATCH_SIZE,
 )
-from summarize import summarize_segment
+from summarize import LLMCallError, StructuredOutputError, summarize_segment
 from extract_tops import extract_tops_from_pdf
 from telemetry import TelemetryCollector
 from persistence import (
@@ -635,9 +635,21 @@ class SummarizeRequest(BaseModel):
     system_prompt: Optional[str] = None  # Custom system prompt
 
 
+class StructuredSummaryResponse(BaseModel):
+    discussion: List[str] = Field(default_factory=list)
+    decisions: List[str] = Field(default_factory=list)
+    votes: List[str] = Field(default_factory=list)
+    action_items: List[str] = Field(default_factory=list)
+    open_points: List[str] = Field(default_factory=list)
+    uncertainties: List[str] = Field(default_factory=list)
+
+
 class SummarizeResponse(BaseModel):
     summary: str
     duration_seconds: float
+    structured: Optional[StructuredSummaryResponse] = None
+    fallback_used: bool = False
+    chunks_processed: int = 1
 
 
 class ExtractTOPsResponse(BaseModel):
@@ -961,6 +973,24 @@ async def generate_summary(request: SummarizeRequest):
         return SummarizeResponse(
             summary=result.summary,
             duration_seconds=result.duration_seconds,
+            structured=(
+                StructuredSummaryResponse(**result.structured.to_dict())
+                if result.structured
+                else None
+            ),
+            fallback_used=result.fallback_used,
+            chunks_processed=result.chunks_processed,
+        )
+    except LLMCallError as e:
+        status_code = 504 if e.category == "timeout" else 503 if e.transient else 500
+        raise HTTPException(
+            status_code=status_code,
+            detail=f"Fehler bei der Zusammenfassung ({e.category}): {str(e)}",
+        )
+    except StructuredOutputError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Fehler bei der strukturierten Zusammenfassung: {str(e)}",
         )
     except Exception as e:
         raise HTTPException(

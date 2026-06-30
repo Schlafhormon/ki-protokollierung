@@ -39,10 +39,17 @@ def fake_openai_module(monkeypatch):
 
         def create(self, **kwargs):
             self.owner.calls.append(kwargs)
+            if type(self.owner).responses:
+                response = type(self.owner).responses.pop(0)
+                if isinstance(response, Exception):
+                    raise response
+                content = response
+            else:
+                content = self.owner.content
             return types.SimpleNamespace(
                 choices=[
                     types.SimpleNamespace(
-                        message=types.SimpleNamespace(content=self.owner.content)
+                        message=types.SimpleNamespace(content=content)
                     )
                 ]
             )
@@ -50,6 +57,7 @@ def fake_openai_module(monkeypatch):
     class FakeOpenAI:
         instances = []
         content = ""
+        responses = []
 
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -60,6 +68,9 @@ def fake_openai_module(monkeypatch):
             )
             type(self).instances.append(self)
 
+    FakeOpenAI.instances = []
+    FakeOpenAI.content = ""
+    FakeOpenAI.responses = []
     module = types.ModuleType("openai")
     module.OpenAI = FakeOpenAI
     monkeypatch.setitem(sys.modules, "openai", module)

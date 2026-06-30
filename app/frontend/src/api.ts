@@ -5,6 +5,7 @@
 import type {
   SessionResponse,
   SessionSavePayload,
+  StructuredSummary,
   TranscriptLine,
   TranscriptionJob,
 } from "./types";
@@ -157,6 +158,9 @@ export interface SummarizeOptions {
 export interface SummarizeResult {
   summary: string;
   durationSeconds: number;
+  structured?: StructuredSummary | null;
+  fallbackUsed: boolean;
+  chunksProcessed: number;
 }
 
 /**
@@ -189,6 +193,9 @@ export async function generateSummary(
   return {
     summary: data.summary,
     durationSeconds: data.duration_seconds,
+    structured: data.structured ?? null,
+    fallbackUsed: Boolean(data.fallback_used),
+    chunksProcessed: data.chunks_processed ?? 1,
   };
 }
 

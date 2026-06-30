@@ -12,33 +12,21 @@ interface LLMSettingsPanelProps {
   onSettingsChange: (settings: LLMSettings) => void;
 }
 
-export const DEFAULT_SYSTEM_PROMPT = `Du bist ein Experte für die Erstellung von Sitzungsprotokollen für deutsche Kommunalverwaltungen.
+export const DEFAULT_SYSTEM_PROMPT = `Du bist ein Experte für Niederschriften deutscher kommunaler Gremien.
 
-Deine Aufgabe ist es, aus einem Transkript eines Tagesordnungspunktes (TOP) eine Zusammenfassung im Stil einer offiziellen Niederschrift zu erstellen.
+Arbeite protokollarisch, sachlich und verwaltungsnah:
+- formale Verwaltungssprache, dritte Person
+- paraphrasieren statt wörtlich zitieren
+- Beschlüsse, Abstimmungen und Aufträge nur aufnehmen, wenn sie aus dem Transkript hervorgehen
+- fehlende oder unklare Informationen als Unsicherheit markieren
+- Geschäftsordnungs- und Technikdetails nur aufnehmen, wenn sie fachlich relevant sind
 
-STIL:
-- Formale Verwaltungssprache, dritte Person
-- Beispiel: "Die Vorsitzende erläuterte den Sachverhalt.", "Herr Müller wies auf die Kostenfrage hin."
-- Paraphrasieren statt wörtlich zitieren
-
-INHALT:
-- Wesentliche Diskussionspunkte und Argumente
-- Getroffene Beschlüsse mit Abstimmungsergebnis (z.B. "einstimmig beschlossen", "mit 5:2 Stimmen angenommen")
-- Wichtige Positionen der Teilnehmer
-- Vereinbarte Maßnahmen oder nächste Schritte
-
-IGNORIEREN:
-- Verfahrensdetails (Mikrofon, Redezeit, Begrüßungen)
-- Füllwörter, Versprecher, triviale Zwischenbemerkungen
-- Technische Störungen
-
-FORMAT:
-- Kurze TOPs (< 10 Äußerungen): 1-2 Absätze
-- Mittlere TOPs (10-50 Äußerungen): 2-3 Absätze
-- Lange TOPs (> 50 Äußerungen): 3-5 Absätze
-- Chronologischer Ablauf
-- Direkt mit Inhalt beginnen, keine Einleitung
-- NUR Fließtext, KEINE Markdown-Formatierung (keine **, keine #)`;
+Strukturiere die Auswertung fachlich nach:
+- Diskussion
+- Beschluss
+- Abstimmung
+- Maßnahmen und offene Punkte
+- Unsicherheiten`;
 
 export const DEFAULT_LLM_SETTINGS: LLMSettings = {
   model: '',

@@ -43,8 +43,21 @@ export interface SummarizeRequest {
   lines: TranscriptLine[];
 }
 
+export interface StructuredSummary {
+  discussion: string[];
+  decisions: string[];
+  votes: string[];
+  action_items: string[];
+  open_points: string[];
+  uncertainties: string[];
+}
+
 export interface SummarizeResponse {
   summary: string;
+  duration_seconds?: number;
+  structured?: StructuredSummary | null;
+  fallback_used?: boolean;
+  chunks_processed?: number;
 }
 
 // Component Props Types
