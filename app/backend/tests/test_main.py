@@ -1,12 +1,14 @@
 import time
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 import main
 import persistence
 from conftest import FakeTranscriptionResult
+from speaker_recognition import LocalSpeakerEmbedding
 
 
 def wait_until(predicate, timeout=5.0, interval=0.02):
@@ -148,6 +150,78 @@ def test_transcription_jobs_are_queued_and_respect_concurrency_limit(tmp_path, m
             lambda: client.get(f"/api/transcribe/{second}").json()["status"]
             == "completed"
         )
+
+
+def test_transcription_creates_reviewable_speaker_suggestions(
+    tmp_path, monkeypatch
+):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+    monkeypatch.setenv("SPEAKER_EMBEDDING_MODEL", "test-embedding")
+    monkeypatch.setenv("SPEAKER_MATCH_AUTO_THRESHOLD", "0.98")
+    monkeypatch.setenv("SPEAKER_MATCH_SUGGEST_THRESHOLD", "0.9")
+    profile = persistence.create_speaker_profile("Alice Global", profile_id="alice")
+    persistence.save_speaker_embedding(
+        profile["profile_id"],
+        [1.0, 0.0],
+        model_name="test-embedding",
+        quality=1.0,
+    )
+
+    def fake_transcribe(file_path, models, progress_callback=None):
+        return SimpleNamespace(
+            transcript=[
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Hallo",
+                    "start": 0.0,
+                    "end": 1.0,
+                }
+            ],
+            audio_duration_seconds=1.0,
+            speaker_embeddings=[
+                LocalSpeakerEmbedding(
+                    local_speaker_id="SPEAKER_00",
+                    embedding=[0.95, 0.05],
+                    model_name="test-embedding",
+                    quality=0.9,
+                    quality_metadata={"total_seconds": 9.0},
+                )
+            ],
+        )
+
+    monkeypatch.setattr(main, "transcribe_audio", fake_transcribe)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/transcribe",
+            data={"session_id": "session-speaker-match"},
+            files={"audio": ("meeting.mp3", b"audio", "audio/mpeg")},
+        )
+        assert response.status_code == 200
+        job_id = response.json()["job_id"]
+
+        assert wait_until(
+            lambda: client.get(f"/api/transcribe/{job_id}").json()["status"]
+            == "completed"
+        )
+        body = client.get(f"/api/transcribe/{job_id}").json()
+
+    assert body["speaker_suggestions"] == [
+        {
+            "observation_id": 1,
+            "local_speaker_id": "SPEAKER_00",
+            "profile_id": "alice",
+            "profile_display_name": "Alice Global",
+            "confidence": body["speaker_suggestions"][0]["confidence"],
+            "status": "suggested",
+        }
+    ]
+    assert body["speaker_suggestions"][0]["confidence"] >= 0.98
+    observations = persistence.load_speaker_observations(
+        job_id=job_id,
+        session_id="session-speaker-match",
+    )
+    assert observations[0]["status"] == "suggested"
 
 
 def test_cancel_pending_job_marks_cancelled_and_cleans_upload(tmp_path, monkeypatch):

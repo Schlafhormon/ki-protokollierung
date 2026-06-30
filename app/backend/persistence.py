@@ -121,9 +121,24 @@ def init_db(db_path: Path | None = None) -> None:
                 embedding_blob BLOB,
                 model_name TEXT NOT NULL,
                 quality REAL,
+                metadata_json TEXT,
                 created_at REAL NOT NULL,
                 FOREIGN KEY (profile_id) REFERENCES speaker_profiles(profile_id)
                     ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS job_speaker_embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                local_speaker_id TEXT NOT NULL,
+                embedding_json TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                quality REAL,
+                quality_metadata_json TEXT,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (job_id) REFERENCES transcription_jobs(job_id)
+                    ON DELETE CASCADE,
+                UNIQUE (job_id, local_speaker_id, model_name)
             );
 
             CREATE TABLE IF NOT EXISTS speaker_observations (
@@ -206,6 +221,8 @@ def init_db(db_path: Path | None = None) -> None:
                 ON speaker_profiles(scope);
             CREATE INDEX IF NOT EXISTS idx_speaker_embeddings_profile_id
                 ON speaker_embeddings(profile_id);
+            CREATE INDEX IF NOT EXISTS idx_job_speaker_embeddings_job_id
+                ON job_speaker_embeddings(job_id);
             CREATE INDEX IF NOT EXISTS idx_speaker_observations_job_session
                 ON speaker_observations(job_id, session_id);
             CREATE INDEX IF NOT EXISTS idx_speaker_observations_profile_id
@@ -233,6 +250,17 @@ def init_db(db_path: Path | None = None) -> None:
                 """
                 ALTER TABLE sessions
                 ADD COLUMN export_metadata_json TEXT
+                """
+            )
+        embedding_columns = {
+            row["name"]
+            for row in db.execute("PRAGMA table_info(speaker_embeddings)").fetchall()
+        }
+        if "metadata_json" not in embedding_columns:
+            db.execute(
+                """
+                ALTER TABLE speaker_embeddings
+                ADD COLUMN metadata_json TEXT
                 """
             )
 
@@ -389,6 +417,7 @@ def save_speaker_embedding(
     *,
     model_name: str,
     quality: float | None = None,
+    metadata: dict[str, Any] | None = None,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
     """Store one speaker embedding without deriving or logging personal data."""
@@ -405,11 +434,19 @@ def save_speaker_embedding(
             """
             INSERT INTO speaker_embeddings (
                 profile_id, embedding_json, embedding_blob, model_name, quality,
-                created_at
+                metadata_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (profile_id, embedding_json, embedding_blob, model_name, quality, now),
+            (
+                profile_id,
+                embedding_json,
+                embedding_blob,
+                model_name,
+                quality,
+                _to_json(metadata or {}),
+                now,
+            ),
         )
         embedding_id = int(cursor.lastrowid)
 
@@ -450,6 +487,123 @@ def load_speaker_embeddings(
         embedding_json = item.pop("embedding_json")
         item["embedding"] = (
             bytes(blob) if blob is not None else _from_json(embedding_json)
+        )
+        item["metadata"] = _from_json(item.pop("metadata_json", None)) or {}
+        embeddings.append(item)
+    return embeddings
+
+
+def save_job_speaker_embedding(
+    *,
+    job_id: str,
+    local_speaker_id: str,
+    embedding: Any,
+    model_name: str,
+    quality: float | None = None,
+    quality_metadata: dict[str, Any] | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Store a local speaker embedding extracted from one transcription job."""
+    now = time.time()
+    with connect(db_path) as db:
+        db.execute(
+            """
+            INSERT INTO job_speaker_embeddings (
+                job_id, local_speaker_id, embedding_json, model_name, quality,
+                quality_metadata_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id, local_speaker_id, model_name) DO UPDATE SET
+                embedding_json = excluded.embedding_json,
+                quality = excluded.quality,
+                quality_metadata_json = excluded.quality_metadata_json
+            """,
+            (
+                job_id,
+                local_speaker_id,
+                _to_json(embedding) or "[]",
+                model_name,
+                quality,
+                _to_json(quality_metadata or {}),
+                now,
+            ),
+        )
+
+    embedding_record = load_job_speaker_embedding(
+        job_id,
+        local_speaker_id,
+        model_name=model_name,
+        db_path=db_path,
+    )
+    if embedding_record is None:
+        raise RuntimeError("Job speaker embedding could not be loaded after save")
+    return embedding_record
+
+
+def load_job_speaker_embedding(
+    job_id: str,
+    local_speaker_id: str,
+    *,
+    model_name: str | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    conditions = ["job_id = ?", "local_speaker_id = ?"]
+    params: list[Any] = [job_id, local_speaker_id]
+    if model_name is not None:
+        conditions.append("model_name = ?")
+        params.append(model_name)
+
+    with connect(db_path) as db:
+        row = db.execute(
+            f"""
+            SELECT *
+            FROM job_speaker_embeddings
+            WHERE {' AND '.join(conditions)}
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            params,
+        ).fetchone()
+    if row is None:
+        return None
+
+    item = dict(row)
+    item["embedding"] = _from_json(item.pop("embedding_json", None)) or []
+    item["quality_metadata"] = (
+        _from_json(item.pop("quality_metadata_json", None)) or {}
+    )
+    return item
+
+
+def load_job_speaker_embeddings(
+    job_id: str,
+    *,
+    model_name: str | None = None,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    conditions = ["job_id = ?"]
+    params: list[Any] = [job_id]
+    if model_name is not None:
+        conditions.append("model_name = ?")
+        params.append(model_name)
+
+    with connect(db_path) as db:
+        rows = db.execute(
+            f"""
+            SELECT *
+            FROM job_speaker_embeddings
+            WHERE {' AND '.join(conditions)}
+            ORDER BY local_speaker_id, created_at, id
+            """,
+            params,
+        ).fetchall()
+
+    embeddings = []
+    for row in rows:
+        item = dict(row)
+        item["embedding"] = _from_json(item.pop("embedding_json", None)) or []
+        item["quality_metadata"] = (
+            _from_json(item.pop("quality_metadata_json", None)) or {}
         )
         embeddings.append(item)
     return embeddings

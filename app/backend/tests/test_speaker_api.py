@@ -105,6 +105,14 @@ def test_speaker_observation_confirm_and_reject_flow(tmp_path, monkeypatch):
     session_id = setup_speaker_session(tmp_path, monkeypatch)
     alice = persistence.create_speaker_profile("Alice Global", profile_id="alice")
     bob = persistence.create_speaker_profile("Bob Global", profile_id="bob")
+    persistence.save_job_speaker_embedding(
+        job_id="job-speakers",
+        local_speaker_id="SPEAKER_00",
+        embedding=[1.0, 0.0],
+        model_name="test-embedding",
+        quality=0.9,
+        quality_metadata={"total_seconds": 10.0},
+    )
     suggested = persistence.save_speaker_observation(
         job_id="job-speakers",
         session_id=session_id,
@@ -149,6 +157,16 @@ def test_speaker_observation_confirm_and_reject_flow(tmp_path, monkeypatch):
     assert persistence.load_session(session_id)["speaker_names"]["SPEAKER_00"] == (
         "Alice Global"
     )
+    profile_embeddings = persistence.load_speaker_embeddings(
+        "alice",
+        model_name="test-embedding",
+    )
+    assert profile_embeddings[0]["embedding"] == [1.0, 0.0]
+    assert profile_embeddings[0]["quality"] == 0.9
+    assert profile_embeddings[0]["metadata"]["source_job_id"] == "job-speakers"
+    assert profile_embeddings[0]["metadata"]["source_local_speaker_id"] == (
+        "SPEAKER_00"
+    )
 
     duplicate_response = client.post(
         f"/api/sessions/{session_id}/speaker-observations/"
@@ -174,6 +192,13 @@ def test_manual_speaker_observation_can_link_existing_or_new_profile(
 ):
     session_id = setup_speaker_session(tmp_path, monkeypatch)
     alice = persistence.create_speaker_profile("Alice Global", profile_id="alice")
+    persistence.save_job_speaker_embedding(
+        job_id="job-speakers",
+        local_speaker_id="SPEAKER_01",
+        embedding=[0.0, 1.0],
+        model_name="test-embedding",
+        quality=0.8,
+    )
     client = TestClient(main.app)
 
     manual = client.post(
@@ -208,6 +233,11 @@ def test_manual_speaker_observation_can_link_existing_or_new_profile(
     assert persistence.load_speaker_profiles(scope="committee-1")[0][
         "display_name"
     ] == "Charlie Global"
+    created_profile_id = new_profile.json()["profile_id"]
+    assert persistence.load_speaker_embeddings(
+        created_profile_id,
+        model_name="test-embedding",
+    )[0]["embedding"] == [0.0, 1.0]
 
 
 def test_speaker_observation_errors_are_reported_cleanly(tmp_path, monkeypatch):

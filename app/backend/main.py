@@ -59,8 +59,10 @@ from persistence import (
     create_speaker_profile,
     init_db,
     load_job,
+    load_job_speaker_embedding,
     load_jobs,
     load_session,
+    load_speaker_embeddings,
     load_speaker_observation,
     load_speaker_observations,
     load_speaker_profile,
@@ -68,9 +70,17 @@ from persistence import (
     mark_interrupted_jobs,
     reject_speaker_observation,
     save_job,
+    save_job_speaker_embedding,
     save_session,
+    save_speaker_embedding,
     save_speaker_observation,
     update_speaker_profile,
+)
+from speaker_recognition import (
+    LocalSpeakerEmbedding,
+    build_profile_references,
+    match_speaker_embeddings,
+    speaker_embedding_config_from_env,
 )
 
 # Configure logging with timestamps
@@ -613,12 +623,22 @@ class AudioMetadata(BaseModel):
     size_bytes: Optional[int] = None
 
 
+class SpeakerSuggestionResponse(BaseModel):
+    observation_id: int
+    local_speaker_id: str
+    profile_id: str
+    profile_display_name: str
+    confidence: float
+    status: str
+
+
 class TranscriptionJob(BaseModel):
     job_id: str
     status: str  # "pending", "processing", "completed", "failed"
     progress: int
     message: str
     transcript: Optional[List[TranscriptLine]] = None
+    speaker_suggestions: Optional[List[SpeakerSuggestionResponse]] = None
     audio_url: Optional[str] = None  # URL to stream audio for playback
     audio_metadata: Optional[AudioMetadata] = None
     error: Optional[str] = None
@@ -829,6 +849,41 @@ class SessionCompleteResponse(BaseModel):
     message: str
 
 
+def build_speaker_suggestion_responses(
+    job_id: str,
+    session_id: str | None,
+) -> list[SpeakerSuggestionResponse] | None:
+    if not session_id:
+        return None
+
+    observations = load_speaker_observations(
+        job_id=job_id,
+        session_id=session_id,
+        status="suggested",
+    )
+    suggestions: list[SpeakerSuggestionResponse] = []
+    for observation in observations:
+        profile_id = observation.get("profile_id")
+        confidence = observation.get("confidence")
+        if not profile_id or confidence is None:
+            continue
+        profile = load_speaker_profile(profile_id, include_archived=True)
+        if profile is None:
+            continue
+        suggestions.append(
+            SpeakerSuggestionResponse(
+                observation_id=observation["observation_id"],
+                local_speaker_id=observation["local_speaker_id"],
+                profile_id=profile_id,
+                profile_display_name=profile["display_name"],
+                confidence=confidence,
+                status=observation["status"],
+            )
+        )
+
+    return suggestions or None
+
+
 def build_transcription_job_response(
     job_id: str, job: dict[str, Any]
 ) -> TranscriptionJob:
@@ -852,6 +907,10 @@ def build_transcription_job_response(
             [TranscriptLine(**line) for line in job["transcript"]]
             if job.get("transcript")
             else None
+        ),
+        speaker_suggestions=build_speaker_suggestion_responses(
+            job_id,
+            job.get("session_id"),
         ),
         audio_url=audio_url_for_job(job_id, job),
         audio_metadata=audio_metadata,
@@ -1007,6 +1066,133 @@ def apply_profile_display_name_to_session(
     speaker_names[local_speaker_id] = profile["display_name"]
     updated_session["speaker_names"] = speaker_names
     return save_session(session["session_id"], updated_session)
+
+
+def persist_job_speaker_embeddings(
+    job_id: str,
+    embeddings: list[LocalSpeakerEmbedding] | None,
+) -> None:
+    for embedding in embeddings or []:
+        save_job_speaker_embedding(
+            job_id=job_id,
+            local_speaker_id=embedding.local_speaker_id,
+            embedding=embedding.embedding,
+            model_name=embedding.model_name,
+            quality=embedding.quality,
+            quality_metadata=embedding.quality_metadata,
+        )
+
+
+def create_speaker_suggestion_observations(
+    *,
+    job_id: str,
+    session_id: str | None,
+    local_embeddings: list[LocalSpeakerEmbedding] | None,
+) -> None:
+    if not session_id or not local_embeddings:
+        return
+
+    config = speaker_embedding_config_from_env()
+    profiles = load_speaker_profiles()
+    matches = []
+    model_names = sorted({embedding.model_name for embedding in local_embeddings})
+    for model_name in model_names:
+        model_local_embeddings = [
+            embedding
+            for embedding in local_embeddings
+            if embedding.model_name == model_name
+        ]
+        embeddings_by_profile = {
+            profile["profile_id"]: load_speaker_embeddings(
+                profile["profile_id"],
+                model_name=model_name,
+            )
+            for profile in profiles
+        }
+        references = build_profile_references(profiles, embeddings_by_profile)
+        matches.extend(
+            match_speaker_embeddings(
+                model_local_embeddings,
+                references,
+                auto_threshold=config.auto_threshold,
+                suggest_threshold=config.suggest_threshold,
+            )
+        )
+    if not matches:
+        return
+
+    existing_observations = load_speaker_observations(
+        job_id=job_id,
+        session_id=session_id,
+    )
+    existing_keys = {
+        (
+            observation.get("local_speaker_id"),
+            observation.get("profile_id"),
+            observation.get("status"),
+        )
+        for observation in existing_observations
+    }
+    accepted_local_speakers = {
+        observation.get("local_speaker_id")
+        for observation in load_speaker_observations(session_id=session_id)
+        if observation.get("status") in {"confirmed", "manual"}
+    }
+
+    for match in matches:
+        if match.local_speaker_id in accepted_local_speakers:
+            continue
+        key = (match.local_speaker_id, match.profile_id, "suggested")
+        if key in existing_keys:
+            continue
+        save_speaker_observation(
+            job_id=job_id,
+            session_id=session_id,
+            local_speaker_id=match.local_speaker_id,
+            profile_id=match.profile_id,
+            confidence=match.confidence,
+            status="suggested",
+        )
+
+
+def add_job_embedding_to_profile(
+    *,
+    job_id: str,
+    local_speaker_id: str,
+    profile_id: str,
+    observation_id: int | None = None,
+) -> None:
+    local_embedding = load_job_speaker_embedding(job_id, local_speaker_id)
+    if local_embedding is None:
+        return
+
+    metadata = dict(local_embedding.get("quality_metadata") or {})
+    metadata.update(
+        {
+            "source_job_id": job_id,
+            "source_local_speaker_id": local_speaker_id,
+            "source_observation_id": observation_id,
+        }
+    )
+
+    for existing in load_speaker_embeddings(
+        profile_id,
+        model_name=local_embedding["model_name"],
+    ):
+        existing_metadata = existing.get("metadata") or {}
+        if (
+            existing_metadata.get("source_job_id") == job_id
+            and existing_metadata.get("source_local_speaker_id") == local_speaker_id
+        ):
+            return
+
+    save_speaker_embedding(
+        profile_id,
+        local_embedding["embedding"],
+        model_name=local_embedding["model_name"],
+        quality=local_embedding.get("quality"),
+        metadata=metadata,
+    )
 
 
 def model_to_dict(model: BaseModel) -> dict[str, Any]:
@@ -1189,6 +1375,12 @@ async def confirm_session_speaker_observation(
         observation["local_speaker_id"],
         profile,
     )
+    add_job_embedding_to_profile(
+        job_id=observation["job_id"],
+        local_speaker_id=observation["local_speaker_id"],
+        profile_id=profile_id,
+        observation_id=observation_id,
+    )
     return build_speaker_observation_response(confirmed, updated_session)
 
 
@@ -1279,6 +1471,12 @@ async def create_manual_speaker_observation(
         session,
         local_speaker_id,
         profile,
+    )
+    add_job_embedding_to_profile(
+        job_id=job_id,
+        local_speaker_id=local_speaker_id,
+        profile_id=profile["profile_id"],
+        observation_id=manual["observation_id"],
     )
     return build_speaker_observation_response(manual, updated_session)
 
@@ -1815,6 +2013,22 @@ def run_transcription(
         # Calculate transcript metrics
         transcript_line_count = len(transcript)
         transcript_char_count = sum(len(line.get("text", "")) for line in transcript)
+        speaker_embeddings = getattr(result, "speaker_embeddings", None) or []
+
+        try:
+            persist_job_speaker_embeddings(job_id, speaker_embeddings)
+            create_speaker_suggestion_observations(
+                job_id=job_id,
+                session_id=job.get("session_id"),
+                local_embeddings=speaker_embeddings,
+            )
+        except Exception as e:
+            logger.warning(
+                "[Job %s] Speaker embedding matching failed without failing transcription: %s",
+                job_id,
+                e,
+                exc_info=True,
+            )
 
         update_job_state(
             job_id,

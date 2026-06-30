@@ -29,6 +29,7 @@ def test_persistence_initializes_expected_tables(tmp_path, monkeypatch):
         "speaker_names",
         "speaker_profiles",
         "speaker_embeddings",
+        "job_speaker_embeddings",
         "speaker_observations",
         "pipeline_jobs",
         "summaries",
@@ -112,6 +113,15 @@ def test_speaker_profiles_embeddings_observations_and_pipeline_jobs_roundtrip(
         [0.1, 0.2, 0.3],
         model_name="test-speaker-model",
         quality=0.87,
+        metadata={"source_job_id": "job-speakers"},
+    )
+    job_embedding = persistence.save_job_speaker_embedding(
+        job_id="job-speakers",
+        local_speaker_id="SPEAKER_00",
+        embedding=[0.2, 0.1, 0.4],
+        model_name="test-speaker-model",
+        quality=0.7,
+        quality_metadata={"total_seconds": 9.0},
     )
     blob_embedding = persistence.save_speaker_embedding(
         "profile-alice",
@@ -157,6 +167,11 @@ def test_speaker_profiles_embeddings_observations_and_pipeline_jobs_roundtrip(
     )
     assert embedding["embedding"] == [0.1, 0.2, 0.3]
     assert embedding["model_name"] == "test-speaker-model"
+    assert embedding["metadata"] == {"source_job_id": "job-speakers"}
+    assert job_embedding["embedding"] == [0.2, 0.1, 0.4]
+    assert persistence.load_job_speaker_embeddings("job-speakers")[0][
+        "quality_metadata"
+    ] == {"total_seconds": 9.0}
     assert blob_embedding["embedding"] == b"binary-embedding"
     assert persistence.load_speaker_embeddings(
         "profile-alice",

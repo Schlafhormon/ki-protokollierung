@@ -33,6 +33,12 @@ from typing import List, Dict, Callable, Optional, Any
 
 import torch
 from whisperx.diarize import DiarizationPipeline
+from speaker_recognition import (
+    LocalSpeakerEmbedding,
+    extract_local_speaker_embeddings,
+    load_pyannote_embedding_inference,
+    speaker_embedding_config_from_env,
+)
 
 # Configure logging with timestamps
 logging.basicConfig(
@@ -57,6 +63,7 @@ class TranscriptionModels:
     align_metadata: Any
     diarize_pipeline: Any
     device: str
+    speaker_embedding_inference: Any | None = None
 
 
 def load_models() -> TranscriptionModels:
@@ -131,6 +138,12 @@ def load_models() -> TranscriptionModels:
     )
     logger.info("[3/3] Diarization pipeline loaded successfully")
 
+    speaker_embedding_config = speaker_embedding_config_from_env()
+    speaker_embedding_inference = load_pyannote_embedding_inference(
+        device=device,
+        config=speaker_embedding_config,
+    )
+
     logger.info("=" * 60)
     logger.info("ALL MODELS LOADED SUCCESSFULLY - Server ready for requests")
     logger.info("=" * 60)
@@ -141,6 +154,7 @@ def load_models() -> TranscriptionModels:
         align_metadata=align_metadata,
         diarize_pipeline=diarize_pipeline,
         device=device,
+        speaker_embedding_inference=speaker_embedding_inference,
     )
 
 
@@ -161,6 +175,7 @@ class TranscriptionResult:
     """Result from transcription including metrics."""
     transcript: List[Dict[str, Any]]
     audio_duration_seconds: float
+    speaker_embeddings: List[LocalSpeakerEmbedding] | None = None
 
 
 def transcribe_audio(
@@ -233,6 +248,17 @@ def transcribe_audio(
         diarize_segments = models.diarize_pipeline(audio)
         logger.info("Diarization complete")
 
+        logger.info("Extracting local speaker embeddings...")
+        speaker_embeddings = extract_local_speaker_embeddings(
+            audio=audio,
+            diarize_segments=diarize_segments,
+            embedding_inference=getattr(models, "speaker_embedding_inference", None),
+        )
+        logger.info(
+            "Extracted speaker embeddings for %s local speakers",
+            len(speaker_embeddings),
+        )
+
         if progress_callback:
             progress_callback(85, "Segmente werden zusammengeführt...")
 
@@ -269,6 +295,7 @@ def transcribe_audio(
         return TranscriptionResult(
             transcript=transcript,
             audio_duration_seconds=audio_duration_seconds,
+            speaker_embeddings=speaker_embeddings,
         )
 
     finally:
