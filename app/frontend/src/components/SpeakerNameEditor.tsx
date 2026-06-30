@@ -1,11 +1,45 @@
-import { useState, useMemo } from 'react';
-import type { TranscriptLine } from '../types';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  archiveSpeakerProfile,
+  confirmSpeakerObservation,
+  createManualSpeakerObservation,
+  listSpeakerObservations,
+  listSpeakerProfiles,
+  rejectSpeakerObservation,
+  updateSpeakerProfile,
+} from '../api';
+import type { SpeakerObservation, SpeakerProfile, TranscriptLine } from '../types';
 
 interface SpeakerNameEditorProps {
   transcript: TranscriptLine[];
   setTranscript: (transcript: TranscriptLine[]) => void;
   speakerNames: Record<string, string>;
   setSpeakerNames: (names: Record<string, string>) => void;
+  sessionId?: string | null;
+}
+
+type ReviewStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+function formatConfidence(confidence?: number | null): string {
+  if (confidence === null || confidence === undefined) {
+    return 'ohne Confidence';
+  }
+  return `${Math.round(confidence * 100)}% Confidence`;
+}
+
+function upsertObservation(
+  observations: SpeakerObservation[],
+  updated: SpeakerObservation
+): SpeakerObservation[] {
+  const index = observations.findIndex(
+    (observation) => observation.observation_id === updated.observation_id
+  );
+  if (index === -1) {
+    return [...observations, updated];
+  }
+  return observations.map((observation) =>
+    observation.observation_id === updated.observation_id ? updated : observation
+  );
 }
 
 export default function SpeakerNameEditor({
@@ -13,31 +47,236 @@ export default function SpeakerNameEditor({
   setTranscript,
   speakerNames,
   setSpeakerNames,
+  sessionId,
 }: SpeakerNameEditorProps) {
-  // Extract unique speakers and a sample of their text
   const speakerInfo = useMemo(() => {
     const speakers = new Map<string, string>();
     for (const line of transcript) {
       if (!speakers.has(line.speaker)) {
-        // Store first text snippet as sample (truncate if too long)
-        const sample = line.text.length > 60
-          ? line.text.substring(0, 60) + '...'
-          : line.text;
+        const sample =
+          line.text.length > 60 ? `${line.text.substring(0, 60)}...` : line.text;
         speakers.set(line.speaker, sample);
       }
     }
     return Array.from(speakers.entries()).map(([id, sample]) => ({ id, sample }));
   }, [transcript]);
 
-  // Auto-expand if 3 or fewer speakers
   const [isExpanded, setIsExpanded] = useState(speakerInfo.length <= 3);
   const [mergeTargets, setMergeTargets] = useState<Record<string, string>>({});
+  const [profiles, setProfiles] = useState<SpeakerProfile[]>([]);
+  const [observations, setObservations] = useState<SpeakerObservation[]>([]);
+  const [reviewStatus, setReviewStatus] = useState<ReviewStatus>('idle');
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionSpeaker, setActionSpeaker] = useState<string | null>(null);
+  const [profileTargets, setProfileTargets] = useState<Record<string, string>>({});
+  const [selectedProfileId, setSelectedProfileId] = useState('');
+  const [profileNameDraft, setProfileNameDraft] = useState('');
+
+  useEffect(() => {
+    if (!isExpanded || !sessionId) {
+      return;
+    }
+
+    let isCurrent = true;
+    setReviewStatus('loading');
+    setReviewError(null);
+
+    Promise.all([listSpeakerProfiles(), listSpeakerObservations(sessionId)])
+      .then(([loadedProfiles, loadedObservations]) => {
+        if (!isCurrent) {
+          return;
+        }
+        setProfiles(loadedProfiles);
+        setObservations(loadedObservations);
+        setReviewStatus('ready');
+        const firstProfile = loadedProfiles[0];
+        if (firstProfile) {
+          setSelectedProfileId((current) => current || firstProfile.profile_id);
+          setProfileNameDraft((current) => current || firstProfile.display_name);
+        }
+      })
+      .catch((error) => {
+        if (!isCurrent) {
+          return;
+        }
+        setReviewStatus('error');
+        setReviewError(
+          error instanceof Error
+            ? error.message
+            : 'Sprecherprofile konnten nicht geladen werden'
+        );
+      });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [isExpanded, sessionId]);
+
+  const suggestionsBySpeaker = useMemo(() => {
+    const grouped = new Map<string, SpeakerObservation>();
+    for (const observation of observations) {
+      if (observation.status !== 'suggested' || !observation.profile_id) {
+        continue;
+      }
+      const current = grouped.get(observation.local_speaker_id);
+      if (
+        !current ||
+        (observation.confidence ?? 0) > (current.confidence ?? 0)
+      ) {
+        grouped.set(observation.local_speaker_id, observation);
+      }
+    }
+    return grouped;
+  }, [observations]);
+
+  const acceptedBySpeaker = useMemo(() => {
+    const grouped = new Map<string, SpeakerObservation>();
+    for (const observation of observations) {
+      if (observation.status === 'confirmed' || observation.status === 'manual') {
+        grouped.set(observation.local_speaker_id, observation);
+      }
+    }
+    return grouped;
+  }, [observations]);
+
+  const selectedProfile = profiles.find(
+    (profile) => profile.profile_id === selectedProfileId
+  );
+
+  const refreshProfiles = async () => {
+    const loadedProfiles = await listSpeakerProfiles();
+    setProfiles(loadedProfiles);
+    if (selectedProfileId && !loadedProfiles.some((profile) => profile.profile_id === selectedProfileId)) {
+      const nextProfile = loadedProfiles[0];
+      setSelectedProfileId(nextProfile?.profile_id ?? '');
+      setProfileNameDraft(nextProfile?.display_name ?? '');
+    }
+  };
 
   const handleNameChange = (speakerId: string, name: string) => {
     setSpeakerNames({
       ...speakerNames,
       [speakerId]: name,
     });
+  };
+
+  const applyObservationName = (speakerId: string, observation: SpeakerObservation) => {
+    setSpeakerNames({
+      ...speakerNames,
+      [speakerId]: observation.display_name,
+    });
+  };
+
+  const runSpeakerAction = async (
+    speakerId: string,
+    action: () => Promise<SpeakerObservation>,
+    successMessage: string
+  ) => {
+    setActionSpeaker(speakerId);
+    setActionMessage(null);
+    setReviewError(null);
+    try {
+      const updated = await action();
+      setObservations((current) => upsertObservation(current, updated));
+      applyObservationName(speakerId, updated);
+      setActionMessage(successMessage);
+      await refreshProfiles();
+    } catch (error) {
+      setReviewError(
+        error instanceof Error ? error.message : 'Sprecheraktion fehlgeschlagen'
+      );
+    } finally {
+      setActionSpeaker(null);
+    }
+  };
+
+  const handleConfirmSuggestion = (speakerId: string, suggestion: SpeakerObservation) => {
+    if (!sessionId) {
+      return;
+    }
+    runSpeakerAction(
+      speakerId,
+      () => confirmSpeakerObservation(sessionId, suggestion.observation_id),
+      'Vorschlag wurde dauerhaft bestätigt.'
+    );
+  };
+
+  const handleRejectSuggestion = async (suggestion: SpeakerObservation) => {
+    if (!sessionId) {
+      return;
+    }
+    setActionSpeaker(suggestion.local_speaker_id);
+    setActionMessage(null);
+    setReviewError(null);
+    try {
+      const updated = await rejectSpeakerObservation(
+        sessionId,
+        suggestion.observation_id
+      );
+      setObservations((current) => upsertObservation(current, updated));
+      setActionMessage('Vorschlag wurde abgelehnt.');
+    } catch (error) {
+      setReviewError(
+        error instanceof Error ? error.message : 'Vorschlag konnte nicht abgelehnt werden'
+      );
+    } finally {
+      setActionSpeaker(null);
+    }
+  };
+
+  const handleRememberNewProfile = (speakerId: string, suggestion?: SpeakerObservation) => {
+    if (!sessionId) {
+      return;
+    }
+    const displayName = speakerNames[speakerId]?.trim();
+    if (!displayName) {
+      setReviewError('Bitte zuerst einen lokalen Namen eingeben.');
+      return;
+    }
+    runSpeakerAction(
+      speakerId,
+      () =>
+        createManualSpeakerObservation(sessionId, {
+          localSpeakerId: speakerId,
+          displayName,
+          observationId: suggestion?.observation_id,
+        }),
+      'Neues Profil wurde dauerhaft gemerkt.'
+    );
+  };
+
+  const handleAssignExistingProfile = (speakerId: string, suggestion?: SpeakerObservation) => {
+    if (!sessionId) {
+      return;
+    }
+    const profileId = profileTargets[speakerId];
+    if (!profileId) {
+      setReviewError('Bitte ein gespeichertes Profil auswählen.');
+      return;
+    }
+    runSpeakerAction(
+      speakerId,
+      () =>
+        createManualSpeakerObservation(sessionId, {
+          localSpeakerId: speakerId,
+          profileId,
+          observationId: suggestion?.observation_id,
+        }),
+      'Sprecher wurde einem bestehenden Profil zugeordnet.'
+    );
+  };
+
+  const handleSessionOnly = async (speakerId: string, suggestion?: SpeakerObservation) => {
+    if (suggestion && sessionId) {
+      await handleRejectSuggestion(suggestion);
+      return;
+    }
+    setActionMessage(
+      speakerNames[speakerId]?.trim()
+        ? 'Name bleibt nur in dieser Sitzung.'
+        : 'Lokale Benennung bleibt leer und wird nicht dauerhaft gespeichert.'
+    );
   };
 
   const handleMergeSpeaker = (sourceSpeaker: string) => {
@@ -64,16 +303,61 @@ export default function SpeakerNameEditor({
     setMergeTargets(nextTargets);
   };
 
+  const handleProfileSelection = (profileId: string) => {
+    setSelectedProfileId(profileId);
+    const profile = profiles.find((item) => item.profile_id === profileId);
+    setProfileNameDraft(profile?.display_name ?? '');
+  };
+
+  const handleRenameProfile = async () => {
+    if (!selectedProfile || !profileNameDraft.trim()) {
+      return;
+    }
+    setReviewError(null);
+    try {
+      const updated = await updateSpeakerProfile(selectedProfile.profile_id, {
+        displayName: profileNameDraft.trim(),
+      });
+      setProfiles((current) =>
+        current.map((profile) =>
+          profile.profile_id === updated.profile_id ? updated : profile
+        )
+      );
+      setActionMessage('Profil wurde umbenannt.');
+    } catch (error) {
+      setReviewError(
+        error instanceof Error ? error.message : 'Profil konnte nicht umbenannt werden'
+      );
+    }
+  };
+
+  const handleArchiveProfile = async () => {
+    if (!selectedProfile) {
+      return;
+    }
+    setReviewError(null);
+    try {
+      await archiveSpeakerProfile(selectedProfile.profile_id);
+      await refreshProfiles();
+      setActionMessage('Profil wurde archiviert.');
+    } catch (error) {
+      setReviewError(
+        error instanceof Error ? error.message : 'Profil konnte nicht archiviert werden'
+      );
+    }
+  };
+
   if (speakerInfo.length === 0) return null;
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
       <button
+        type="button"
         onClick={() => setIsExpanded(!isExpanded)}
         className="w-full px-4 py-3 flex items-center justify-between bg-gray-50 hover:bg-gray-100 transition-colors"
       >
         <span className="font-medium text-gray-700">
-          Sprecher umbenennen
+          Sprecher umbenennen und Profile prüfen
           <span className="ml-2 text-sm font-normal text-gray-500">
             (optional)
           </span>
@@ -84,59 +368,226 @@ export default function SpeakerNameEditor({
       </button>
 
       {isExpanded && (
-        <div className="p-4 space-y-3 border-t border-gray-200">
-          {speakerInfo.map(({ id, sample }) => (
-            <div key={id} className="flex flex-wrap items-start gap-3">
-              <div className="w-28 flex-shrink-0">
-                <span className="text-sm font-mono text-gray-500">{id}</span>
-              </div>
-              <span className="text-gray-400 mt-1">→</span>
-              <div className="flex-1">
-                <input
-                  type="text"
-                  value={speakerNames[id] || ''}
-                  onChange={(e) => handleNameChange(id, e.target.value)}
-                  placeholder="Name eingeben..."
-                  className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                />
-                <p className="mt-1 text-xs text-gray-400 italic truncate">
-                  "{sample}"
-                </p>
-              </div>
-              {speakerInfo.length > 1 && (
-                <div className="w-full sm:w-64 flex gap-2">
-                  <select
-                    value={mergeTargets[id] || ''}
-                    onChange={(event) =>
-                      setMergeTargets({
-                        ...mergeTargets,
-                        [id]: event.target.value,
-                      })
-                    }
-                    className="min-w-0 flex-1 px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                    aria-label={`${id} mit Sprecher zusammenführen`}
-                  >
-                    <option value="">Zusammenführen mit...</option>
-                    {speakerInfo
-                      .filter((speaker) => speaker.id !== id)
-                      .map((speaker) => (
-                        <option key={speaker.id} value={speaker.id}>
-                          {speakerNames[speaker.id] || speaker.id}
+        <div className="p-4 space-y-4 border-t border-gray-200">
+          <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+            Lokale Benennung wirkt nur in dieser Sitzung. Ein dauerhaftes
+            Sprecherprofil wird erst gespeichert, wenn Sie einen Vorschlag
+            übernehmen, ein neues Profil merken oder ein bestehendes Profil
+            zuordnen.
+          </div>
+
+          {sessionId && reviewStatus === 'loading' && (
+            <div className="text-sm text-gray-600">Sprecherprofile werden geladen...</div>
+          )}
+          {reviewError && <div className="text-sm text-red-600">{reviewError}</div>}
+          {actionMessage && (
+            <div className="text-sm text-green-700">{actionMessage}</div>
+          )}
+
+          {speakerInfo.map(({ id, sample }) => {
+            const suggestion = suggestionsBySpeaker.get(id);
+            const accepted = acceptedBySpeaker.get(id);
+            const selectedTarget = profileTargets[id] || '';
+            const currentName = speakerNames[id] || '';
+            const isBusy = actionSpeaker === id;
+
+            return (
+              <div key={id} className="border border-gray-200 rounded-lg p-3 space-y-3">
+                <div className="flex flex-wrap items-start gap-3">
+                  <div className="w-28 flex-shrink-0">
+                    <span className="text-sm font-mono text-gray-500">{id}</span>
+                  </div>
+                  <span className="text-gray-400 mt-1">→</span>
+                  <div className="flex-1 min-w-64">
+                    <input
+                      type="text"
+                      value={currentName}
+                      onChange={(e) => handleNameChange(id, e.target.value)}
+                      placeholder="Name eingeben..."
+                      aria-label={`${id} lokal benennen`}
+                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                    />
+                    <p className="mt-1 text-xs text-gray-400 italic truncate">
+                      "{sample}"
+                    </p>
+                    {accepted && (
+                      <p className="mt-1 text-xs text-green-700">
+                        Dauerhaft zugeordnet: {accepted.display_name}
+                      </p>
+                    )}
+                  </div>
+                  {speakerInfo.length > 1 && (
+                    <div className="w-full sm:w-64 flex gap-2">
+                      <select
+                        value={mergeTargets[id] || ''}
+                        onChange={(event) =>
+                          setMergeTargets({
+                            ...mergeTargets,
+                            [id]: event.target.value,
+                          })
+                        }
+                        className="min-w-0 flex-1 px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                        aria-label={`${id} mit Sprecher zusammenführen`}
+                      >
+                        <option value="">Zusammenführen mit...</option>
+                        {speakerInfo
+                          .filter((speaker) => speaker.id !== id)
+                          .map((speaker) => (
+                            <option key={speaker.id} value={speaker.id}>
+                              {speakerNames[speaker.id] || speaker.id}
+                            </option>
+                          ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => handleMergeSpeaker(id)}
+                        disabled={!mergeTargets[id]}
+                        className="px-3 py-1.5 text-sm bg-gray-900 text-white rounded hover:bg-gray-700 disabled:bg-gray-200 disabled:text-gray-400"
+                      >
+                        Mergen
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="pl-0 sm:pl-36 space-y-2">
+                  {suggestion ? (
+                    <div className="rounded-md border border-yellow-200 bg-yellow-50 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="text-sm font-medium text-gray-900">
+                            Vorschlag: {suggestion.profile_display_name}
+                          </div>
+                          <div className="text-xs text-gray-600">
+                            {formatConfidence(suggestion.confidence)}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleConfirmSuggestion(id, suggestion)}
+                            disabled={isBusy}
+                            className="px-3 py-1.5 text-sm bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
+                          >
+                            Vorschlag übernehmen
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRejectSuggestion(suggestion)}
+                            disabled={isBusy}
+                            className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+                          >
+                            Ablehnen
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-500">
+                      Kein automatischer Profilvorschlag für diesen Sprecher.
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleRememberNewProfile(id, suggestion)}
+                      disabled={!sessionId || !currentName.trim() || isBusy}
+                      className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400"
+                    >
+                      Neues Profil merken
+                    </button>
+                    <select
+                      value={selectedTarget}
+                      onChange={(event) =>
+                        setProfileTargets({
+                          ...profileTargets,
+                          [id]: event.target.value,
+                        })
+                      }
+                      disabled={!sessionId || profiles.length === 0}
+                      aria-label={`${id} bestehendem Profil zuordnen`}
+                      className="px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none disabled:bg-gray-100"
+                    >
+                      <option value="">Gespeichertes Profil auswählen...</option>
+                      {profiles.map((profile) => (
+                        <option key={profile.profile_id} value={profile.profile_id}>
+                          {profile.display_name}
                         </option>
                       ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => handleAssignExistingProfile(id, suggestion)}
+                      disabled={!sessionId || !selectedTarget || isBusy}
+                      className="px-3 py-1.5 text-sm bg-gray-900 text-white rounded hover:bg-gray-700 disabled:bg-gray-200 disabled:text-gray-400"
+                    >
+                      Bestehendem Profil zuordnen
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSessionOnly(id, suggestion)}
+                      disabled={isBusy}
+                      className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+                    >
+                      Nur in dieser Sitzung benennen
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          {sessionId && (
+            <div className="border-t border-gray-200 pt-4">
+              <h3 className="text-sm font-medium text-gray-900 mb-2">
+                Gespeicherte Profile verwalten
+              </h3>
+              {profiles.length === 0 ? (
+                <p className="text-sm text-gray-500">
+                  Noch keine gespeicherten Sprecherprofile vorhanden.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-2 items-center">
+                  <select
+                    value={selectedProfileId}
+                    onChange={(event) => handleProfileSelection(event.target.value)}
+                    aria-label="Gespeichertes Profil auswählen"
+                    className="px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                  >
+                    {profiles.map((profile) => (
+                      <option key={profile.profile_id} value={profile.profile_id}>
+                        {profile.display_name}
+                      </option>
+                    ))}
                   </select>
+                  <input
+                    type="text"
+                    value={profileNameDraft}
+                    onChange={(event) => setProfileNameDraft(event.target.value)}
+                    aria-label="Profil umbenennen"
+                    className="px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                  />
                   <button
                     type="button"
-                    onClick={() => handleMergeSpeaker(id)}
-                    disabled={!mergeTargets[id]}
-                    className="px-3 py-1.5 text-sm bg-gray-900 text-white rounded hover:bg-gray-700 disabled:bg-gray-200 disabled:text-gray-400"
+                    onClick={handleRenameProfile}
+                    disabled={!selectedProfile || !profileNameDraft.trim()}
+                    className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
                   >
-                    Mergen
+                    Profil umbenennen
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleArchiveProfile}
+                    disabled={!selectedProfile}
+                    className="px-3 py-1.5 text-sm bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100 disabled:opacity-50"
+                  >
+                    Profil archivieren
                   </button>
                 </div>
               )}
             </div>
-          ))}
+          )}
         </div>
       )}
     </div>

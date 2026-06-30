@@ -39,6 +39,7 @@ export default function AssignmentStep({
   audioUrl,
   speakerNames,
   setSpeakerNames,
+  sessionId,
 }: AssignmentStepProps) {
   const [selectedTop, setSelectedTop] = useState(0);
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
@@ -388,6 +389,7 @@ export default function AssignmentStep({
         setTranscript={setTranscript}
         speakerNames={speakerNames}
         setSpeakerNames={setSpeakerNames}
+        sessionId={sessionId}
       />
 
       {/* Suggestions */}

@@ -821,6 +821,7 @@ export default function App() {
           audioUrl={audioUrl ?? undefined}
           speakerNames={speakerNames}
           setSpeakerNames={setSpeakerNames}
+          sessionId={sessionId}
         />
       ) : (
         <SummaryStep

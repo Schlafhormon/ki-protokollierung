@@ -1,10 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  archiveSpeakerProfile,
+  confirmSpeakerObservation,
+  createManualSpeakerObservation,
+  createSpeakerProfile,
   exportProtocol,
+  listSpeakerObservations,
+  listSpeakerProfiles,
   loadSession,
   reportSessionComplete,
   saveSession,
   startTranscription,
+  updateSpeakerProfile,
 } from './api';
 
 describe('api session client', () => {
@@ -202,5 +209,146 @@ describe('api session client', () => {
     });
     expect(body).not.toHaveProperty('system_prompt');
     expect(JSON.stringify(body)).not.toContain('Transkriptinhalt');
+  });
+
+  it('uses speaker profile and observation endpoints', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            {
+              profile_id: 'alice',
+              display_name: 'Alice Global',
+              scope: null,
+              created_at: 1,
+              updated_at: 1,
+              archived: false,
+            },
+          ]),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            profile_id: 'alice',
+            display_name: 'Alice Lokal',
+            scope: null,
+            created_at: 1,
+            updated_at: 2,
+            archived: false,
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            profile_id: 'alice',
+            display_name: 'Alice Lokal',
+            scope: null,
+            created_at: 1,
+            updated_at: 3,
+            archived: true,
+            archived_at: 3,
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            profile_id: 'bob',
+            display_name: 'Bob Global',
+            scope: 'committee-1',
+            created_at: 1,
+            updated_at: 1,
+            archived: false,
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            {
+              observation_id: 7,
+              job_id: 'job-1',
+              session_id: 'session-1',
+              local_speaker_id: 'SPEAKER_00',
+              local_display_name: 'SPEAKER_00',
+              profile_id: 'alice',
+              profile_display_name: 'Alice Lokal',
+              confidence: 0.82,
+              status: 'suggested',
+              display_name: 'Alice Lokal',
+              created_at: 1,
+              updated_at: 1,
+            },
+          ]),
+      })
+      .mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            observation_id: 7,
+            job_id: 'job-1',
+            session_id: 'session-1',
+            local_speaker_id: 'SPEAKER_00',
+            local_display_name: 'SPEAKER_00',
+            profile_id: 'alice',
+            profile_display_name: 'Alice Lokal',
+            confidence: 1,
+            status: 'manual',
+            display_name: 'Alice Lokal',
+            created_at: 1,
+            updated_at: 4,
+          }),
+      });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await listSpeakerProfiles({ includeArchived: true });
+    await updateSpeakerProfile('alice', { displayName: 'Alice Lokal' });
+    await archiveSpeakerProfile('alice');
+    await createSpeakerProfile({ displayName: 'Bob Global', scope: 'committee-1' });
+    await listSpeakerObservations('session-1');
+    await confirmSpeakerObservation('session-1', 7, { profileId: 'alice' });
+    await createManualSpeakerObservation('session-1', {
+      localSpeakerId: 'SPEAKER_00',
+      profileId: 'alice',
+      observationId: 7,
+    });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      '/api/speaker-profiles?include_archived=true'
+    );
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/speaker-profiles/alice');
+    expect(fetchMock.mock.calls[1]![1]!.method).toBe('PUT');
+    expect(JSON.parse(fetchMock.mock.calls[1]![1]!.body as string)).toEqual({
+      display_name: 'Alice Lokal',
+    });
+    expect(fetchMock.mock.calls[2]![0]).toBe('/api/speaker-profiles/alice');
+    expect(fetchMock.mock.calls[2]![1]!.method).toBe('DELETE');
+    expect(fetchMock.mock.calls[3]![0]).toBe('/api/speaker-profiles');
+    expect(fetchMock.mock.calls[3]![1]!.method).toBe('POST');
+    expect(JSON.parse(fetchMock.mock.calls[3]![1]!.body as string)).toMatchObject({
+      display_name: 'Bob Global',
+      scope: 'committee-1',
+    });
+    expect(fetchMock.mock.calls[4]![0]).toBe(
+      '/api/sessions/session-1/speaker-observations'
+    );
+    expect(fetchMock.mock.calls[5]![0]).toBe(
+      '/api/sessions/session-1/speaker-observations/7/confirm'
+    );
+    expect(JSON.parse(fetchMock.mock.calls[5]![1]!.body as string)).toMatchObject({
+      profile_id: 'alice',
+    });
+    expect(fetchMock.mock.calls[6]![0]).toBe(
+      '/api/sessions/session-1/speaker-observations/manual'
+    );
+    expect(JSON.parse(fetchMock.mock.calls[6]![1]!.body as string)).toMatchObject({
+      local_speaker_id: 'SPEAKER_00',
+      profile_id: 'alice',
+      observation_id: 7,
+    });
   });
 });

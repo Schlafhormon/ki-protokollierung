@@ -8,6 +8,8 @@ import type {
   ExportMetadata,
   SessionResponse,
   SessionSavePayload,
+  SpeakerObservation,
+  SpeakerProfile,
   SummaryReviewWarning,
   SummarySourceLink,
   StructuredSummary,
@@ -16,6 +18,15 @@ import type {
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
+
+async function readApiError(response: Response, fallback: string): Promise<Error> {
+  try {
+    const error = await response.json();
+    return new Error(error.detail || fallback);
+  } catch {
+    return new Error(fallback);
+  }
+}
 
 /**
  * Start a transcription job by uploading an audio file.
@@ -229,6 +240,200 @@ export async function generateAssignmentSuggestions(
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.detail || "Fehler beim Erzeugen der Zuordnungsvorschläge");
+  }
+
+  return response.json();
+}
+
+export interface ListSpeakerProfilesOptions {
+  scope?: string | null;
+  includeArchived?: boolean;
+}
+
+export interface SpeakerProfilePayload {
+  displayName: string;
+  scope?: string | null;
+}
+
+export async function listSpeakerProfiles(
+  options: ListSpeakerProfilesOptions = {}
+): Promise<SpeakerProfile[]> {
+  const params = new URLSearchParams();
+  if (options.scope) {
+    params.set("scope", options.scope);
+  }
+  if (options.includeArchived) {
+    params.set("include_archived", "true");
+  }
+
+  const query = params.toString();
+  const response = await fetch(
+    `${API_BASE}/api/speaker-profiles${query ? `?${query}` : ""}`
+  );
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Laden der Sprecherprofile");
+  }
+
+  return response.json();
+}
+
+export async function createSpeakerProfile(
+  payload: SpeakerProfilePayload
+): Promise<SpeakerProfile> {
+  const response = await fetch(`${API_BASE}/api/speaker-profiles`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      display_name: payload.displayName,
+      scope: payload.scope,
+    }),
+  });
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Anlegen des Sprecherprofils");
+  }
+
+  return response.json();
+}
+
+export async function updateSpeakerProfile(
+  profileId: string,
+  payload: Partial<SpeakerProfilePayload>
+): Promise<SpeakerProfile> {
+  const body: Record<string, string | null> = {};
+  if (payload.displayName !== undefined) {
+    body.display_name = payload.displayName;
+  }
+  if (payload.scope !== undefined) {
+    body.scope = payload.scope;
+  }
+
+  const response = await fetch(`${API_BASE}/api/speaker-profiles/${profileId}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Aktualisieren des Sprecherprofils");
+  }
+
+  return response.json();
+}
+
+export async function archiveSpeakerProfile(profileId: string): Promise<SpeakerProfile> {
+  const response = await fetch(`${API_BASE}/api/speaker-profiles/${profileId}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Archivieren des Sprecherprofils");
+  }
+
+  return response.json();
+}
+
+export async function listSpeakerObservations(
+  sessionId: string
+): Promise<SpeakerObservation[]> {
+  const response = await fetch(
+    `${API_BASE}/api/sessions/${sessionId}/speaker-observations`
+  );
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Laden der Sprecher-Erkennungen");
+  }
+
+  return response.json();
+}
+
+export interface ConfirmSpeakerObservationOptions {
+  profileId?: string | null;
+  confidence?: number | null;
+}
+
+export async function confirmSpeakerObservation(
+  sessionId: string,
+  observationId: number,
+  options: ConfirmSpeakerObservationOptions = {}
+): Promise<SpeakerObservation> {
+  const response = await fetch(
+    `${API_BASE}/api/sessions/${sessionId}/speaker-observations/${observationId}/confirm`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        profile_id: options.profileId,
+        confidence: options.confidence,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Bestätigen der Sprecher-Erkennung");
+  }
+
+  return response.json();
+}
+
+export async function rejectSpeakerObservation(
+  sessionId: string,
+  observationId: number
+): Promise<SpeakerObservation> {
+  const response = await fetch(
+    `${API_BASE}/api/sessions/${sessionId}/speaker-observations/${observationId}/reject`,
+    {
+      method: "POST",
+    }
+  );
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Ablehnen der Sprecher-Erkennung");
+  }
+
+  return response.json();
+}
+
+export interface ManualSpeakerObservationPayload {
+  localSpeakerId: string;
+  profileId?: string | null;
+  displayName?: string | null;
+  scope?: string | null;
+  confidence?: number | null;
+  observationId?: number | null;
+}
+
+export async function createManualSpeakerObservation(
+  sessionId: string,
+  payload: ManualSpeakerObservationPayload
+): Promise<SpeakerObservation> {
+  const response = await fetch(
+    `${API_BASE}/api/sessions/${sessionId}/speaker-observations/manual`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        local_speaker_id: payload.localSpeakerId,
+        profile_id: payload.profileId,
+        display_name: payload.displayName,
+        scope: payload.scope,
+        confidence: payload.confidence,
+        observation_id: payload.observationId,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Speichern der Sprecher-Zuordnung");
   }
 
   return response.json();

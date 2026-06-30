@@ -16,12 +16,48 @@ export interface AudioMetadata {
   size_bytes?: number | null;
 }
 
+export interface SpeakerProfile {
+  profile_id: string;
+  display_name: string;
+  scope?: string | null;
+  created_at: number;
+  updated_at: number;
+  archived_at?: number | null;
+  archived: boolean;
+}
+
+export interface SpeakerObservation {
+  observation_id: number;
+  job_id: string;
+  session_id: string;
+  local_speaker_id: string;
+  local_display_name: string;
+  profile_id?: string | null;
+  profile_display_name?: string | null;
+  profile?: SpeakerProfile | null;
+  confidence?: number | null;
+  status: 'suggested' | 'confirmed' | 'rejected' | 'manual' | string;
+  display_name: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SpeakerSuggestion {
+  observation_id: number;
+  local_speaker_id: string;
+  profile_id: string;
+  profile_display_name: string;
+  confidence: number;
+  status: string;
+}
+
 export interface TranscriptionJob {
   job_id: string;
   status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
   progress: number;
   message: string;
   transcript?: TranscriptLine[];
+  speaker_suggestions?: SpeakerSuggestion[];
   audio_url?: string;  // URL to stream audio for playback
   audio_metadata?: AudioMetadata | null;
   error?: string;
@@ -180,6 +216,7 @@ export interface AssignmentStepProps {
   audioUrl?: string;  // URL to stream audio for playback
   speakerNames: Record<string, string>;
   setSpeakerNames: (names: Record<string, string>) => void;
+  sessionId?: string | null;
 }
 
 export interface SummaryStepProps {
