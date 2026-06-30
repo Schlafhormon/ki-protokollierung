@@ -6,6 +6,8 @@ import type {
   AssignmentSuggestionsResponse,
   SessionResponse,
   SessionSavePayload,
+  SummaryReviewWarning,
+  SummarySourceLink,
   StructuredSummary,
   TranscriptLine,
   TranscriptionJob,
@@ -160,6 +162,8 @@ export interface SummarizeResult {
   summary: string;
   durationSeconds: number;
   structured?: StructuredSummary | null;
+  sourceLinks: SummarySourceLink[];
+  reviewWarnings: SummaryReviewWarning[];
   fallbackUsed: boolean;
   chunksProcessed: number;
 }
@@ -195,6 +199,8 @@ export async function generateSummary(
     summary: data.summary,
     durationSeconds: data.duration_seconds,
     structured: data.structured ?? null,
+    sourceLinks: data.source_links ?? [],
+    reviewWarnings: data.review_warnings ?? [],
     fallbackUsed: Boolean(data.fallback_used),
     chunksProcessed: data.chunks_processed ?? 1,
   };

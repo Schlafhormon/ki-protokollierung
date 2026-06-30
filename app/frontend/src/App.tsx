@@ -18,7 +18,12 @@ import {
   saveSession,
   loadSession,
 } from "./api";
-import type { SessionResponse, SessionSavePayload, TranscriptLine } from "./types";
+import type {
+  SessionResponse,
+  SessionSavePayload,
+  SummaryReview,
+  TranscriptLine,
+} from "./types";
 
 // LocalStorage key for LLM settings
 const LLM_SETTINGS_KEY = "llm-settings";
@@ -77,6 +82,28 @@ function normalizeSummaries(
   return normalized;
 }
 
+function normalizeSummaryReviews(
+  reviews:
+    | Record<number, SummaryReview>
+    | Record<string, SummaryReview>
+    | undefined
+): Record<number, SummaryReview> {
+  const normalized: Record<number, SummaryReview> = {};
+  Object.entries(reviews ?? {}).forEach(([key, value]) => {
+    const index = Number(key);
+    if (Number.isFinite(index) && value) {
+      normalized[index] = {
+        structured: value.structured ?? null,
+        source_links: value.source_links ?? [],
+        review_warnings: value.review_warnings ?? [],
+        fallback_used: value.fallback_used,
+        chunks_processed: value.chunks_processed,
+      };
+    }
+  });
+  return normalized;
+}
+
 export default function App() {
   // Current step in wizard
   const [currentStep, setCurrentStep] = useState(1);
@@ -96,6 +123,7 @@ export default function App() {
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [assignments, setAssignments] = useState<(number | null)[]>([]);
   const [summaries, setSummaries] = useState<Record<number, string>>({});
+  const [summaryReviews, setSummaryReviews] = useState<Record<number, SummaryReview>>({});
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
@@ -146,6 +174,7 @@ export default function App() {
       assignments: overrides.assignments ?? assignments,
       speaker_names: overrides.speaker_names ?? speakerNames,
       summaries: overrides.summaries ?? summaries,
+      summary_reviews: overrides.summary_reviews ?? summaryReviews,
       skipped_assignment: overrides.skipped_assignment ?? skippedAssignment,
     }),
     [
@@ -155,6 +184,7 @@ export default function App() {
       sessionId,
       skippedAssignment,
       speakerNames,
+      summaryReviews,
       summaries,
       tops,
       transcript,
@@ -170,6 +200,7 @@ export default function App() {
     setAssignments(session.assignments ?? []);
     setSpeakerNames(session.speaker_names ?? {});
     setSummaries(normalizeSummaries(session.summaries));
+    setSummaryReviews(normalizeSummaryReviews(session.summary_reviews));
     setSkippedAssignment(Boolean(session.skipped_assignment));
     setAudioUrl(withApiBase(session.audio_url));
     setAudioFile(null);
@@ -192,6 +223,7 @@ export default function App() {
     setTranscript([]);
     setAssignments([]);
     setSummaries({});
+    setSummaryReviews({});
     setAudioUrl(null);
     setSpeakerNames({});
     setSkippedAssignment(false);
@@ -309,6 +341,7 @@ export default function App() {
           transcript: [],
           assignments: [],
           summaries: {},
+          summary_reviews: {},
         })
       );
       const activeSessionId = preparedSession.session_id;
@@ -337,6 +370,7 @@ export default function App() {
       // Set transcript and audio URL
       const transcriptResult = completedJob.transcript ?? [];
       setTranscript(transcriptResult);
+      setSummaryReviews({});
 
       // Set audio URL for playback (use relative URL to go through nginx proxy)
       if (completedJob.audio_url) {
@@ -390,6 +424,7 @@ export default function App() {
             assignments: restored.assignments,
             speaker_names: restored.speaker_names,
             summaries: normalizeSummaries(restored.summaries),
+            summary_reviews: normalizeSummaryReviews(restored.summary_reviews),
             skipped_assignment: restored.skipped_assignment,
           })
         );
@@ -423,6 +458,7 @@ export default function App() {
   ) => {
     setIsGeneratingSummary(true);
     setSummaries({ 0: "Zusammenfassung wird generiert..." });
+    setSummaryReviews({});
 
     try {
       const result = await generateSummary(
@@ -434,6 +470,15 @@ export default function App() {
         }
       );
       setSummaries({ 0: result.summary });
+      setSummaryReviews({
+        0: {
+          structured: result.structured ?? null,
+          source_links: result.sourceLinks,
+          review_warnings: result.reviewWarnings,
+          fallback_used: result.fallbackUsed,
+          chunks_processed: result.chunksProcessed,
+        },
+      });
 
       // Send telemetry
       if (currentJobId) {
@@ -450,6 +495,7 @@ export default function App() {
       const errorMessage =
         error instanceof Error ? error.message : "Unbekannter Fehler";
       setSummaries({ 0: `Fehler: ${errorMessage}` });
+      setSummaryReviews({});
     } finally {
       setIsGeneratingSummary(false);
     }
@@ -474,6 +520,7 @@ export default function App() {
     // Generate summaries for each TOP with assigned lines
     const validTops = tops.filter((t) => t.trim() !== "");
     const newSummaries: Record<number, string> = {};
+    const newSummaryReviews: Record<number, SummaryReview> = {};
 
     console.log(`[Summary] Starting generation for ${validTops.length} TOPs`);
 
@@ -487,6 +534,7 @@ export default function App() {
         // Set placeholder while generating
         newSummaries[index] = "Zusammenfassung wird generiert...";
         setSummaries({ ...newSummaries });
+        setSummaryReviews({ ...newSummaryReviews });
 
         try {
           console.log(`[Summary] Generating summary for TOP ${index + 1}...`);
@@ -504,14 +552,24 @@ export default function App() {
             }, duration: ${result.durationSeconds}s`
           );
           newSummaries[index] = result.summary;
+          newSummaryReviews[index] = {
+            structured: result.structured ?? null,
+            source_links: result.sourceLinks,
+            review_warnings: result.reviewWarnings,
+            fallback_used: result.fallbackUsed,
+            chunks_processed: result.chunksProcessed,
+          };
           totalDuration += result.durationSeconds;
           setSummaries({ ...newSummaries });
+          setSummaryReviews({ ...newSummaryReviews });
         } catch (error) {
           console.error(`[Summary] TOP ${index + 1} failed:`, error);
           const errorMessage =
             error instanceof Error ? error.message : "Unbekannter Fehler";
           newSummaries[index] = `Fehler: ${errorMessage}`;
+          delete newSummaryReviews[index];
           setSummaries({ ...newSummaries });
+          setSummaryReviews({ ...newSummaryReviews });
         }
       } else {
         console.log(`[Summary] TOP ${index + 1}: skipped (no lines)`);
@@ -556,6 +614,7 @@ export default function App() {
       setTranscript([]);
       setAssignments([]);
       setSummaries({});
+      setSummaryReviews({});
       setAudioUrl(null);
       setSkippedAssignment(false);
       setIsGeneratingSummary(false);
@@ -583,6 +642,16 @@ export default function App() {
         }
       );
       setSummaries((prev) => ({ ...prev, [topIndex]: result.summary }));
+      setSummaryReviews((prev) => ({
+        ...prev,
+        [topIndex]: {
+          structured: result.structured ?? null,
+          source_links: result.sourceLinks,
+          review_warnings: result.reviewWarnings,
+          fallback_used: result.fallbackUsed,
+          chunks_processed: result.chunksProcessed,
+        },
+      }));
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Unbekannter Fehler";
@@ -590,6 +659,11 @@ export default function App() {
         ...prev,
         [topIndex]: `Fehler: ${errorMessage}`,
       }));
+      setSummaryReviews((prev) => {
+        const next = { ...prev };
+        delete next[topIndex];
+        return next;
+      });
     }
 
     setIsGeneratingSummary(false);
@@ -702,6 +776,7 @@ export default function App() {
           assignments={assignments}
           summaries={summaries}
           setSummaries={setSummaries}
+          summaryReviews={summaryReviews}
           onRegenerateSummary={handleRegenerateSummary}
           isGenerating={isGeneratingSummary}
           audioUrl={audioUrl ?? undefined}

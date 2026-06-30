@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type ChangeEvent } from 'react';
-import type { SummaryStepProps, TranscriptLine } from '../types';
+import type { StructuredSummary, SummaryStepProps, TranscriptLine } from '../types';
 import AudioPlayer from './AudioPlayer';
 import { useAudioSync } from '../hooks/useAudioSync';
 
@@ -9,6 +9,19 @@ function formatTime(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
+const SUMMARY_SECTIONS: Array<{
+  key: keyof StructuredSummary;
+  label: string;
+  important?: boolean;
+}> = [
+  { key: 'discussion', label: 'Diskussion' },
+  { key: 'decisions', label: 'Beschluss', important: true },
+  { key: 'votes', label: 'Abstimmung', important: true },
+  { key: 'action_items', label: 'Maßnahmen', important: true },
+  { key: 'open_points', label: 'Offene Punkte' },
+  { key: 'uncertainties', label: 'Unsicherheiten' },
+];
+
 export default function SummaryStep({
   onBack,
   tops,
@@ -16,6 +29,7 @@ export default function SummaryStep({
   assignments,
   summaries,
   setSummaries,
+  summaryReviews = {},
   onRegenerateSummary,
   isGenerating,
   audioUrl,
@@ -25,7 +39,9 @@ export default function SummaryStep({
   const [editingTop, setEditingTop] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
   const [copied, setCopied] = useState(false);
+  const [activeSourceLine, setActiveSourceLine] = useState<number | null>(null);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
+  const transcriptLineRefs = useRef<Array<HTMLDivElement | null>>([]);
 
   // Audio sync hook (uses full transcript for seeking)
   const {
@@ -39,6 +55,11 @@ export default function SummaryStep({
   const getTranscriptForTop = useCallback((topIndex: number) => {
     return transcript.filter((_, i) => assignments[i] === topIndex);
   }, [assignments, transcript]);
+
+  useEffect(() => {
+    setActiveSourceLine(null);
+    transcriptLineRefs.current = [];
+  }, [selectedTop]);
 
   // Auto-scroll to current line during playback (within filtered transcript)
   useEffect(() => {
@@ -62,6 +83,25 @@ export default function SummaryStep({
   const getDisplayName = (speakerId: string) => speakerNames[speakerId] || speakerId;
 
   const handleLineDoubleClick = (line: TranscriptLine) => {
+    if (audioUrl) {
+      const originalIndex = transcript.indexOf(line);
+      if (originalIndex >= 0) {
+        seekToLine(originalIndex, line);
+      }
+    }
+  };
+
+  const jumpToTranscriptLine = (localLineIndex: number | null | undefined) => {
+    if (localLineIndex === null || localLineIndex === undefined) return;
+    const line = topLines[localLineIndex];
+    if (!line) return;
+
+    setActiveSourceLine(localLineIndex);
+    transcriptLineRefs.current[localLineIndex]?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center',
+    });
+
     if (audioUrl) {
       const originalIndex = transcript.indexOf(line);
       if (originalIndex >= 0) {
@@ -122,6 +162,20 @@ export default function SummaryStep({
   };
 
   const topLines = getTranscriptForTop(selectedTop);
+  const selectedReview = summaryReviews[selectedTop];
+  const selectedWarnings = selectedReview?.review_warnings ?? [];
+  const structured = selectedReview?.structured ?? null;
+
+  const getSourceLink = (section: keyof StructuredSummary, itemIndex: number) => {
+    return selectedReview?.source_links.find(
+      (link) => link.section === section && link.item_index === itemIndex
+    );
+  };
+
+  const hasStructuredItems = Boolean(
+    structured &&
+      SUMMARY_SECTIONS.some((section) => structured[section.key]?.length)
+  );
 
   return (
     <div className="space-y-6">
@@ -243,8 +297,94 @@ export default function SummaryStep({
                   Zusammenfassung wird generiert...
                 </div>
               ) : summaries[selectedTop] ? (
-                <div className="prose max-w-none text-gray-700 whitespace-pre-wrap">
-                  {summaries[selectedTop]}
+                <div className="space-y-3">
+                  {selectedWarnings.length > 0 && (
+                    <div className="rounded-md border border-yellow-200 bg-yellow-50 px-3 py-2 text-sm text-yellow-900">
+                      <div className="font-medium">Prüfhinweise</div>
+                      <div className="mt-1 space-y-1">
+                        {selectedWarnings.slice(0, 3).map((warning, index) => (
+                          <button
+                            key={`${warning.kind}-${warning.keyword ?? ''}-${index}`}
+                            type="button"
+                            onClick={() => jumpToTranscriptLine(warning.line_indices?.[0])}
+                            className="block w-full text-left hover:underline disabled:no-underline"
+                            disabled={!warning.line_indices?.length}
+                            title={warning.excerpt || warning.message}
+                          >
+                            {warning.message}
+                          </button>
+                        ))}
+                        {selectedWarnings.length > 3 && (
+                          <div className="text-yellow-800">
+                            +{selectedWarnings.length - 3} weitere Hinweise
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {hasStructuredItems && structured ? (
+                    <div className="space-y-3">
+                      {SUMMARY_SECTIONS.map((section) => {
+                        const items = structured[section.key] ?? [];
+                        if (items.length === 0) return null;
+
+                        return (
+                          <section
+                            key={section.key}
+                            className={`border-l-4 pl-3 ${
+                              section.important
+                                ? 'border-blue-500'
+                                : section.key === 'uncertainties'
+                                  ? 'border-yellow-400'
+                                  : 'border-gray-200'
+                            }`}
+                          >
+                            <h4
+                              className={`mb-2 text-sm font-semibold ${
+                                section.important ? 'text-blue-900' : 'text-gray-800'
+                              }`}
+                            >
+                              {section.label}
+                            </h4>
+                            <ul className="space-y-2">
+                              {items.map((item, itemIndex) => {
+                                const source = getSourceLink(section.key, itemIndex);
+                                return (
+                                  <li
+                                    key={`${section.key}-${itemIndex}`}
+                                    className="text-sm text-gray-700"
+                                  >
+                                    <div>{item}</div>
+                                    <div className="mt-1 flex flex-wrap gap-2">
+                                      {source?.missing_source ? (
+                                        <span className="rounded border border-yellow-300 bg-yellow-50 px-2 py-0.5 text-xs font-medium text-yellow-800">
+                                          Quelle fehlt
+                                        </span>
+                                      ) : source?.line_indices?.length ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => jumpToTranscriptLine(source.line_indices[0])}
+                                          className="rounded border border-blue-200 bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                                          title={source.excerpt || 'Transkriptstelle anzeigen'}
+                                        >
+                                          Beleg {source.start != null ? formatTime(source.start) : ''}
+                                        </button>
+                                      ) : null}
+                                    </div>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </section>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="prose max-w-none text-gray-700 whitespace-pre-wrap">
+                      {summaries[selectedTop]}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="flex items-center justify-center h-full text-gray-400">
@@ -281,9 +421,14 @@ export default function SummaryStep({
                   return (
                     <div
                       key={index}
+                      ref={(element) => {
+                        transcriptLineRefs.current[index] = element;
+                      }}
                       onDoubleClick={() => handleLineDoubleClick(line)}
                       className={`mb-1 px-2 py-1 rounded cursor-pointer hover:bg-gray-100 ${
-                        isCurrentLine ? 'ring-2 ring-blue-500 ring-offset-1 bg-blue-50' : ''
+                        isCurrentLine || activeSourceLine === index
+                          ? 'ring-2 ring-blue-500 ring-offset-1 bg-blue-50'
+                          : ''
                       }`}
                     >
                       <span className="font-medium text-gray-500">

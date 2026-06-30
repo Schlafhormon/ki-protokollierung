@@ -113,6 +113,16 @@ def init_db(db_path: Path | None = None) -> None:
                 UNIQUE (session_id, top_index)
             );
 
+            CREATE TABLE IF NOT EXISTS summary_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                top_index INTEGER NOT NULL,
+                review_json TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE CASCADE,
+                UNIQUE (session_id, top_index)
+            );
+
             CREATE TABLE IF NOT EXISTS session_transcript_lines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -403,6 +413,18 @@ def save_session(
             ],
         )
 
+        db.execute("DELETE FROM summary_reviews WHERE session_id = ?", (session_id,))
+        db.executemany(
+            """
+            INSERT INTO summary_reviews (session_id, top_index, review_json)
+            VALUES (?, ?, ?)
+            """,
+            [
+                (session_id, int(top_index), _to_json(review) or "{}")
+                for top_index, review in (state.get("summary_reviews") or {}).items()
+            ],
+        )
+
         if state.get("transcript") is not None:
             db.execute(
                 "DELETE FROM session_transcript_lines WHERE session_id = ?",
@@ -474,6 +496,14 @@ def load_session(
             """,
             (session_id,),
         ).fetchall()
+        summary_reviews = db.execute(
+            """
+            SELECT top_index, review_json FROM summary_reviews
+            WHERE session_id = ?
+            ORDER BY top_index
+            """,
+            (session_id,),
+        ).fetchall()
         transcript = db.execute(
             """
             SELECT speaker, text, start, end
@@ -493,6 +523,10 @@ def load_session(
     }
     session["summaries"] = {
         int(item["top_index"]): item["summary"] for item in summaries
+    }
+    session["summary_reviews"] = {
+        int(item["top_index"]): _from_json(item["review_json"]) or {}
+        for item in summary_reviews
     }
     session["transcript"] = [dict(line) for line in transcript] if transcript else None
     return session

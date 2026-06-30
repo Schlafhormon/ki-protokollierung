@@ -29,6 +29,7 @@ export interface SessionSavePayload {
   assignments: (number | null)[];
   speaker_names: Record<string, string>;
   summaries: Record<number, string>;
+  summary_reviews?: Record<number, SummaryReview>;
   skipped_assignment: boolean;
 }
 
@@ -52,10 +53,45 @@ export interface StructuredSummary {
   uncertainties: string[];
 }
 
+export interface SummarySourceLink {
+  section: keyof StructuredSummary | string;
+  item_index: number;
+  item_text: string;
+  line_indices: number[];
+  start?: number | null;
+  end?: number | null;
+  excerpt: string;
+  confidence: number;
+  missing_source: boolean;
+}
+
+export interface SummaryReviewWarning {
+  kind: 'missing_source' | 'missing_decision_signal' | string;
+  message: string;
+  severity: 'info' | 'warning' | 'error' | string;
+  keyword?: string | null;
+  section?: keyof StructuredSummary | string | null;
+  item_index?: number | null;
+  line_indices: number[];
+  start?: number | null;
+  end?: number | null;
+  excerpt: string;
+}
+
+export interface SummaryReview {
+  structured?: StructuredSummary | null;
+  source_links: SummarySourceLink[];
+  review_warnings: SummaryReviewWarning[];
+  fallback_used?: boolean;
+  chunks_processed?: number;
+}
+
 export interface SummarizeResponse {
   summary: string;
   duration_seconds?: number;
   structured?: StructuredSummary | null;
+  source_links?: SummarySourceLink[];
+  review_warnings?: SummaryReviewWarning[];
   fallback_used?: boolean;
   chunks_processed?: number;
 }
@@ -129,6 +165,7 @@ export interface SummaryStepProps {
   assignments: (number | null)[];
   summaries: Record<number, string>;
   setSummaries: (summaries: Record<number, string>) => void;
+  summaryReviews?: Record<number, SummaryReview>;
   onRegenerateSummary: (topIndex: number) => Promise<void>;
   isGenerating: boolean;
   audioUrl?: string;  // URL to stream audio for playback

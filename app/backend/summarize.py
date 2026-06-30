@@ -61,6 +61,57 @@ class SummarizationResult:
 
 
 @dataclass
+class SummarySourceLink:
+    """Reviewable link from one structured summary item to transcript evidence."""
+
+    section: str
+    item_index: int
+    item_text: str
+    line_indices: list[int] = field(default_factory=list)
+    start: float | None = None
+    end: float | None = None
+    excerpt: str = ""
+    confidence: float = 0.0
+    missing_source: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class SummaryReviewWarning:
+    """Warning shown when a summary item or transcript signal needs review."""
+
+    kind: str
+    message: str
+    severity: str = "warning"
+    keyword: str | None = None
+    section: str | None = None
+    item_index: int | None = None
+    line_indices: list[int] = field(default_factory=list)
+    start: float | None = None
+    end: float | None = None
+    excerpt: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class SummaryReview:
+    """Source links and warning signals for a generated summary."""
+
+    source_links: list[SummarySourceLink] = field(default_factory=list)
+    warnings: list[SummaryReviewWarning] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_links": [link.to_dict() for link in self.source_links],
+            "warnings": [warning.to_dict() for warning in self.warnings],
+        }
+
+
+@dataclass
 class LLMErrorInfo:
     """Classified LLM error metadata for retries and API diagnostics."""
 
@@ -154,6 +205,74 @@ KEY_ALIASES = {
     "maßnahmen": "action_items",
     "offene_punkte": "open_points",
     "unsicherheiten": "uncertainties",
+}
+
+
+SECTION_ITEM_ACCESSORS = {
+    "discussion": lambda structured: structured.discussion,
+    "decisions": lambda structured: structured.decisions,
+    "votes": lambda structured: structured.votes,
+    "action_items": lambda structured: structured.action_items,
+    "open_points": lambda structured: structured.open_points,
+    "uncertainties": lambda structured: structured.uncertainties,
+}
+
+SOURCE_STOPWORDS = {
+    "aber",
+    "alle",
+    "als",
+    "auch",
+    "auf",
+    "aus",
+    "bei",
+    "das",
+    "dem",
+    "den",
+    "der",
+    "des",
+    "die",
+    "ein",
+    "eine",
+    "einem",
+    "einen",
+    "einer",
+    "es",
+    "fuer",
+    "für",
+    "hat",
+    "im",
+    "in",
+    "ist",
+    "mit",
+    "nicht",
+    "oder",
+    "sich",
+    "sie",
+    "und",
+    "von",
+    "wird",
+    "wurde",
+    "zu",
+    "zum",
+    "zur",
+}
+
+DECISION_SIGNAL_TERMS = {
+    "beschlossen",
+    "beschluss",
+    "beschließen",
+    "beschliessen",
+    "einstimmig",
+    "enthaltung",
+    "enthaltungen",
+    "abgelehnt",
+}
+
+SECTION_KEYWORD_BOOSTS = {
+    "decisions": {"beschluss", "beschlossen", "beschließen", "beschliessen"},
+    "votes": {"abstimmung", "einstimmig", "stimmen", "enthaltung", "enthaltungen"},
+    "action_items": {"auftrag", "prüfen", "pruefen", "maßnahme", "massnahme"},
+    "open_points": {"offen", "vertagt", "nachreichen", "klären", "klaeren"},
 }
 
 
@@ -327,6 +446,213 @@ def render_structured_summary(structured: StructuredSummary) -> str:
             continue
         rendered_sections.append(f"{title}:\n" + "\n".join(clean_items))
     return "\n\n".join(rendered_sections).strip()
+
+
+def _line_value(line: Any, key: str, default: Any = None) -> Any:
+    if isinstance(line, dict):
+        return line.get(key, default)
+    return getattr(line, key, default)
+
+
+def _normalize_for_review(text: str) -> str:
+    normalized = text.lower()
+    normalized = normalized.replace("ß", "ss")
+    normalized = normalized.replace("ä", "ae")
+    normalized = normalized.replace("ö", "oe")
+    normalized = normalized.replace("ü", "ue")
+    return normalized
+
+
+def _review_tokens(text: str) -> set[str]:
+    normalized = _normalize_for_review(text)
+    tokens = set(re.findall(r"[a-z0-9_]{4,}", normalized))
+    return {token for token in tokens if token not in SOURCE_STOPWORDS}
+
+
+def _line_text(line: Any) -> str:
+    speaker = str(_line_value(line, "speaker", "") or "").strip()
+    text = str(_line_value(line, "text", "") or "").strip()
+    return f"{speaker}: {text}" if speaker else text
+
+
+def _line_time(line: Any, key: str) -> float | None:
+    value = _line_value(line, key)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _match_summary_item_to_lines(
+    item_text: str,
+    lines: list[Any],
+    *,
+    section: str,
+) -> tuple[list[int], float]:
+    item_tokens = _review_tokens(item_text)
+    if not item_tokens or not lines:
+        return [], 0.0
+
+    boosts = SECTION_KEYWORD_BOOSTS.get(section, set())
+    scored_lines: list[tuple[float, int]] = []
+    for index, line in enumerate(lines):
+        line_tokens = _review_tokens(_line_text(line))
+        if not line_tokens:
+            continue
+
+        overlap = item_tokens & line_tokens
+        if not overlap:
+            score = 0.0
+        else:
+            score = len(overlap) / max(len(item_tokens), 1)
+
+        boost_overlap = boosts & line_tokens
+        if boost_overlap:
+            score += min(0.25, 0.08 * len(boost_overlap))
+
+        if score > 0:
+            scored_lines.append((score, index))
+
+    scored_lines.sort(reverse=True)
+    if not scored_lines:
+        return [], 0.0
+
+    best_score, best_index = scored_lines[0]
+    selected = [best_index]
+
+    # Add a neighboring line when it is likely part of the same utterance/evidence.
+    for neighbor in (best_index - 1, best_index + 1):
+        if 0 <= neighbor < len(lines):
+            neighbor_tokens = _review_tokens(_line_text(lines[neighbor]))
+            if item_tokens & neighbor_tokens:
+                selected.append(neighbor)
+
+    selected = sorted(set(selected))
+    confidence = min(1.0, best_score)
+    if confidence < 0.12:
+        return [], confidence
+    return selected, confidence
+
+
+def _source_excerpt(lines: list[Any], line_indices: list[int]) -> str:
+    parts = []
+    for index in line_indices[:3]:
+        if 0 <= index < len(lines):
+            parts.append(_line_text(lines[index]))
+    excerpt = " ".join(parts).strip()
+    return excerpt[:320]
+
+
+def _source_time_range(
+    lines: list[Any],
+    line_indices: list[int],
+) -> tuple[float | None, float | None]:
+    starts = [
+        start
+        for index in line_indices
+        if 0 <= index < len(lines)
+        if (start := _line_time(lines[index], "start")) is not None
+    ]
+    ends = [
+        end
+        for index in line_indices
+        if 0 <= index < len(lines)
+        if (end := _line_time(lines[index], "end")) is not None
+    ]
+    return (min(starts) if starts else None, max(ends) if ends else None)
+
+
+def _keyword_present(text: str, keyword: str) -> bool:
+    normalized_text = _normalize_for_review(text)
+    normalized_keyword = _normalize_for_review(keyword)
+    return re.search(rf"\b{re.escape(normalized_keyword)}\w*\b", normalized_text) is not None
+
+
+def build_summary_review(
+    *,
+    structured: StructuredSummary | None,
+    summary: str,
+    lines: list[Any],
+) -> SummaryReview:
+    """Build review metadata for source navigation and omission warnings."""
+
+    review = SummaryReview()
+
+    if structured is not None:
+        for section, accessor in SECTION_ITEM_ACCESSORS.items():
+            for item_index, item_text in enumerate(accessor(structured)):
+                line_indices, confidence = _match_summary_item_to_lines(
+                    item_text,
+                    lines,
+                    section=section,
+                )
+                start, end = _source_time_range(lines, line_indices)
+                missing_source = not line_indices
+                link = SummarySourceLink(
+                    section=section,
+                    item_index=item_index,
+                    item_text=item_text,
+                    line_indices=line_indices,
+                    start=start,
+                    end=end,
+                    excerpt=_source_excerpt(lines, line_indices),
+                    confidence=confidence,
+                    missing_source=missing_source,
+                )
+                review.source_links.append(link)
+
+                if missing_source and section != "uncertainties":
+                    review.warnings.append(
+                        SummaryReviewWarning(
+                            kind="missing_source",
+                            severity="warning",
+                            section=section,
+                            item_index=item_index,
+                            message=(
+                                "Für einen Zusammenfassungspunkt wurde keine "
+                                "klare Transkriptstelle gefunden."
+                            ),
+                        )
+                    )
+
+    transcript_text = "\n".join(_line_text(line) for line in lines)
+    combined_summary_text = summary
+    if structured is not None:
+        combined_summary_text += "\n" + "\n".join(
+            item
+            for accessor in SECTION_ITEM_ACCESSORS.values()
+            for item in accessor(structured)
+        )
+
+    for keyword in sorted(DECISION_SIGNAL_TERMS):
+        if not _keyword_present(transcript_text, keyword):
+            continue
+        if _keyword_present(combined_summary_text, keyword):
+            continue
+
+        matching_indices = [
+            index
+            for index, line in enumerate(lines)
+            if _keyword_present(_line_text(line), keyword)
+        ]
+        start, end = _source_time_range(lines, matching_indices)
+        review.warnings.append(
+            SummaryReviewWarning(
+                kind="missing_decision_signal",
+                severity="warning",
+                keyword=keyword,
+                line_indices=matching_indices[:3],
+                start=start,
+                end=end,
+                excerpt=_source_excerpt(lines, matching_indices),
+                message=(
+                    f'Im Transkript kommt "{keyword}" vor, in der '
+                    "Zusammenfassung aber nicht."
+                ),
+            )
+        )
+
+    return review
 
 
 def split_transcript_into_chunks(

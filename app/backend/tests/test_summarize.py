@@ -143,3 +143,78 @@ def test_summarize_segment_retries_transient_llm_errors(
     assert result.fallback_used is False
     assert "Die Beratung wurde fortgesetzt." in result.summary
     assert len(fake_openai_module.instances[0].calls) == 2
+
+
+def test_summary_review_links_structured_items_to_transcript_lines():
+    structured = summarize.StructuredSummary(
+        discussion=["Die Vorlage zum Haushalt wurde beraten."],
+        decisions=["Der Ausschuss beschloss die Vorlage zum Haushalt."],
+        votes=["Die Abstimmung erfolgte einstimmig."],
+    )
+    lines = [
+        {
+            "speaker": "SPEAKER_00",
+            "text": "Wir beraten die Vorlage zum Haushalt.",
+            "start": 5,
+            "end": 9,
+        },
+        {
+            "speaker": "SPEAKER_01",
+            "text": "Der Ausschuss beschloss die Vorlage einstimmig.",
+            "start": 10,
+            "end": 14,
+        },
+    ]
+
+    review = summarize.build_summary_review(
+        structured=structured,
+        summary=summarize.render_structured_summary(structured),
+        lines=lines,
+    )
+
+    decision_link = next(
+        link
+        for link in review.source_links
+        if link.section == "decisions" and link.item_index == 0
+    )
+    vote_link = next(
+        link
+        for link in review.source_links
+        if link.section == "votes" and link.item_index == 0
+    )
+
+    assert decision_link.missing_source is False
+    assert 1 in decision_link.line_indices
+    assert decision_link.start == 5
+    assert "beschloss" in decision_link.excerpt
+    assert vote_link.missing_source is False
+    assert 1 in vote_link.line_indices
+
+
+def test_summary_review_warns_when_decision_keyword_is_missing_from_summary():
+    lines = [
+        {
+            "speaker": "SPEAKER_00",
+            "text": "Der Antrag wurde abgelehnt.",
+            "start": 20,
+            "end": 24,
+        }
+    ]
+
+    review = summarize.build_summary_review(
+        structured=summarize.StructuredSummary(
+            discussion=["Der Antrag wurde diskutiert."]
+        ),
+        summary="Der Antrag wurde diskutiert.",
+        lines=lines,
+    )
+
+    warning = next(
+        warning
+        for warning in review.warnings
+        if warning.kind == "missing_decision_signal"
+    )
+    assert warning.keyword == "abgelehnt"
+    assert warning.line_indices == [0]
+    assert warning.start == 20
+    assert "abgelehnt" in warning.message

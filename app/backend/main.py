@@ -37,7 +37,12 @@ from transcribe import (
     WHISPER_MODEL,
     WHISPER_BATCH_SIZE,
 )
-from summarize import LLMCallError, StructuredOutputError, summarize_segment
+from summarize import (
+    LLMCallError,
+    StructuredOutputError,
+    build_summary_review,
+    summarize_segment,
+)
 from extract_tops import extract_tops_from_pdf
 from assignment_suggestions import TranscriptUtterance, suggest_assignments
 from telemetry import TelemetryCollector
@@ -611,6 +616,7 @@ class SessionSaveRequest(BaseModel):
     assignments: List[Optional[int]] = Field(default_factory=list)
     speaker_names: Dict[str, str] = Field(default_factory=dict)
     summaries: Dict[int, str] = Field(default_factory=dict)
+    summary_reviews: Dict[int, Any] = Field(default_factory=dict)
     skipped_assignment: bool = False
 
 
@@ -622,6 +628,7 @@ class SessionResponse(BaseModel):
     assignments: List[Optional[int]] = Field(default_factory=list)
     speaker_names: Dict[str, str] = Field(default_factory=dict)
     summaries: Dict[int, str] = Field(default_factory=dict)
+    summary_reviews: Dict[int, Any] = Field(default_factory=dict)
     skipped_assignment: bool = False
     transcript: Optional[List[TranscriptLine]] = None
     audio_url: Optional[str] = None
@@ -645,10 +652,37 @@ class StructuredSummaryResponse(BaseModel):
     uncertainties: List[str] = Field(default_factory=list)
 
 
+class SummarySourceLinkResponse(BaseModel):
+    section: str
+    item_index: int
+    item_text: str
+    line_indices: List[int] = Field(default_factory=list)
+    start: Optional[float] = None
+    end: Optional[float] = None
+    excerpt: str = ""
+    confidence: float = 0.0
+    missing_source: bool = False
+
+
+class SummaryReviewWarningResponse(BaseModel):
+    kind: str
+    message: str
+    severity: str = "warning"
+    keyword: Optional[str] = None
+    section: Optional[str] = None
+    item_index: Optional[int] = None
+    line_indices: List[int] = Field(default_factory=list)
+    start: Optional[float] = None
+    end: Optional[float] = None
+    excerpt: str = ""
+
+
 class SummarizeResponse(BaseModel):
     summary: str
     duration_seconds: float
     structured: Optional[StructuredSummaryResponse] = None
+    source_links: List[SummarySourceLinkResponse] = Field(default_factory=list)
+    review_warnings: List[SummaryReviewWarningResponse] = Field(default_factory=list)
     fallback_used: bool = False
     chunks_processed: int = 1
 
@@ -744,6 +778,7 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
         assignments=session.get("assignments") or [],
         speaker_names=session.get("speaker_names") or {},
         summaries=session.get("summaries") or {},
+        summary_reviews=session.get("summary_reviews") or {},
         skipped_assignment=bool(session.get("skipped_assignment")),
         transcript=transcript,
         audio_url=job_response.audio_url if job_response else None,
@@ -996,6 +1031,11 @@ async def generate_summary(request: SummarizeRequest):
             model=request.model,
             system_prompt=request.system_prompt,
         )
+        review = build_summary_review(
+            structured=result.structured,
+            summary=result.summary,
+            lines=request.lines,
+        )
         return SummarizeResponse(
             summary=result.summary,
             duration_seconds=result.duration_seconds,
@@ -1004,6 +1044,14 @@ async def generate_summary(request: SummarizeRequest):
                 if result.structured
                 else None
             ),
+            source_links=[
+                SummarySourceLinkResponse(**link.to_dict())
+                for link in review.source_links
+            ],
+            review_warnings=[
+                SummaryReviewWarningResponse(**warning.to_dict())
+                for warning in review.warnings
+            ],
             fallback_used=result.fallback_used,
             chunks_processed=result.chunks_processed,
         )

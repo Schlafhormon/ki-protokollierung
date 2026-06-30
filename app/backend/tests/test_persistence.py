@@ -28,6 +28,7 @@ def test_persistence_initializes_expected_tables(tmp_path, monkeypatch):
         "assignments",
         "speaker_names",
         "summaries",
+        "summary_reviews",
         "session_transcript_lines",
     }.issubset(tables)
 
@@ -162,6 +163,32 @@ def test_session_state_is_saved_and_loaded_with_linked_job(tmp_path, monkeypatch
                 "0": "Begrüßung wurde abgeschlossen.",
                 "1": "Haushalt wurde beschlossen.",
             },
+            "summary_reviews": {
+                "1": {
+                    "structured": {
+                        "discussion": [],
+                        "decisions": ["Haushalt wurde beschlossen."],
+                        "votes": [],
+                        "action_items": [],
+                        "open_points": [],
+                        "uncertainties": [],
+                    },
+                    "source_links": [
+                        {
+                            "section": "decisions",
+                            "item_index": 0,
+                            "item_text": "Haushalt wurde beschlossen.",
+                            "line_indices": [1],
+                            "start": 2.0,
+                            "end": 4.0,
+                            "excerpt": "Beschluss zu TOP 2",
+                            "confidence": 0.9,
+                            "missing_source": False,
+                        }
+                    ],
+                    "review_warnings": [],
+                }
+            },
             "skipped_assignment": False,
         },
     )
@@ -186,6 +213,7 @@ def test_session_state_is_saved_and_loaded_with_linked_job(tmp_path, monkeypatch
         "0": "Begrüßung wurde abgeschlossen.",
         "1": "Haushalt wurde beschlossen.",
     }
+    assert body["summary_reviews"]["1"]["source_links"][0]["line_indices"] == [1]
     assert body["transcript"][0]["text"] == "Korrigierter Bericht zu TOP 1"
     assert body["transcript"][1]["text"] == "Korrigierter Beschluss zu TOP 2"
     assert body["audio_url"] == "/api/audio/job-2"
