@@ -172,14 +172,17 @@ def build_protocol_document(
     protocol_tops: list[ProtocolTop] = []
 
     for index, title in enumerate(agenda):
+        editable_summary = summaries.get(index)
         structured = (summary_reviews.get(index) or {}).get("structured")
-        if structured:
+        if editable_summary and editable_summary.strip():
+            sections = parse_summary_sections(editable_summary)
+        elif structured:
             sections = {
                 key: [str(item).strip() for item in structured.get(key, []) if str(item).strip()]
                 for key in STRUCTURED_KEYS
             }
         else:
-            sections = parse_summary_sections(summaries.get(index))
+            sections = parse_summary_sections(editable_summary)
 
         protocol_tops.append(
             ProtocolTop(

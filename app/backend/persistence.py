@@ -1017,6 +1017,23 @@ def mark_interrupted_jobs(db_path: Path | None = None) -> None:
         )
 
 
+def mark_interrupted_pipeline_jobs(db_path: Path | None = None) -> None:
+    now = time.time()
+    message = "Pipeline wurde durch Backend-Neustart unterbrochen"
+    with connect(db_path) as db:
+        db.execute(
+            """
+            UPDATE pipeline_jobs
+            SET status = 'failed',
+                progress = CASE WHEN progress >= 100 THEN progress ELSE 0 END,
+                error = ?,
+                updated_at = ?
+            WHERE status IN ('pending', 'processing')
+            """,
+            (message, now),
+        )
+
+
 def save_session(
     session_id: str,
     state: dict[str, Any],

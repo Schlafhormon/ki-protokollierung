@@ -1,3 +1,4 @@
+import json
 import time
 import threading
 from pathlib import Path
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 
 import main
 import persistence
+import summarize
 from conftest import FakeTranscriptionResult
 from speaker_recognition import LocalSpeakerEmbedding
 
@@ -375,6 +377,289 @@ def test_agenda_detection_endpoint_detects_tops_without_pdf_or_manual_list():
     assert data["assignments"] == [0, 0, 1]
     assert data["segments"][0]["evidence_text"] == "Kommen wir zu TOP 1 Haushalt."
     assert data["strategy"] == "heuristic_transcript_fallback"
+
+
+def test_pipeline_runs_to_reviewable_result_and_persists_status_after_cache_clear(
+    tmp_path, monkeypatch
+):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+
+    def fake_transcribe(file_path, models, progress_callback=None):
+        if progress_callback:
+            progress_callback(40, "Transkription läuft")
+        return FakeTranscriptionResult(
+            transcript=[
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Ich eröffne TOP 1 Haushalt.",
+                    "start": 0.0,
+                    "end": 2.0,
+                },
+                {
+                    "speaker": "SPEAKER_01",
+                    "text": "Der Haushalt wird beraten.",
+                    "start": 2.0,
+                    "end": 5.0,
+                },
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Kommen wir zu TOP 2 Schulbau.",
+                    "start": 5.0,
+                    "end": 7.0,
+                },
+            ],
+            audio_duration_seconds=7.0,
+        )
+
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None):
+        structured = summarize.StructuredSummary(
+            discussion=[f"{top_title} wurde beraten."]
+        )
+        return summarize.SummarizationResult(
+            summary=f"Zusammenfassung {top_title}",
+            duration_seconds=0.01,
+            structured=structured,
+        )
+
+    monkeypatch.setattr(main, "transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(main, "summarize_segment", fake_summarize_segment)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/pipeline/start",
+            data={
+                "session_id": "pipeline-session",
+                "tops": json.dumps(["TOP 1 Haushalt", "TOP 2 Schulbau"]),
+                "options": json.dumps({"model": "fake-llm"}),
+            },
+            files={"audio": ("meeting.mp3", b"audio", "audio/mpeg")},
+        )
+
+        assert response.status_code == 200
+        pipeline_id = response.json()["pipeline_id"]
+
+        assert wait_until(
+            lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["stage"]
+            == "ready_for_review"
+        )
+        status = client.get(f"/api/pipeline/{pipeline_id}").json()
+        assert status["status"] == "completed"
+        assert status["progress"] == 100
+
+        main.jobs.clear()
+        restored_status = client.get(f"/api/pipeline/{pipeline_id}").json()
+        assert restored_status["stage"] == "ready_for_review"
+
+        result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
+        session = result["session"]
+        assert session["session_id"] == "pipeline-session"
+        assert session["job"]["status"] == "completed"
+        assert session["tops"] == ["TOP 1 Haushalt", "TOP 2 Schulbau"]
+        assert session["assignments"] == [0, 0, 1]
+        assert session["summaries"]["0"] == "Zusammenfassung TOP 1 Haushalt"
+        assert session["summary_reviews"]["0"]["structured"]["discussion"]
+        assert session["audio_url"].startswith("/api/audio/")
+
+        session["summaries"]["0"] = "Manuell korrigierte Zusammenfassung."
+        save_response = client.put(
+            "/api/sessions/pipeline-session",
+            json={
+                "job_id": session["job_id"],
+                "current_step": session["current_step"],
+                "tops": session["tops"],
+                "transcript": session["transcript"],
+                "assignments": session["assignments"],
+                "speaker_names": session["speaker_names"],
+                "summaries": session["summaries"],
+                "summary_reviews": session["summary_reviews"],
+                "export_metadata": {
+                    "committee": "Hauptausschuss",
+                    "date": "2026-07-01",
+                    "location": "Rathaus",
+                    "title": "Pipeline-Protokoll",
+                    "participants": [],
+                },
+                "skipped_assignment": False,
+            },
+        )
+        assert save_response.status_code == 200
+
+        export_response = client.post(
+            "/api/export",
+            json={
+                "format": "txt",
+                "metadata": {
+                    "committee": "Hauptausschuss",
+                    "date": "2026-07-01",
+                    "location": "Rathaus",
+                    "title": "Pipeline-Protokoll",
+                    "participants": [],
+                },
+                "appendix": {
+                    "include_speaker_list": True,
+                    "include_transcript_excerpt": False,
+                    "include_generation_note": True,
+                },
+                "tops": session["tops"],
+                "transcript": session["transcript"],
+                "assignments": session["assignments"],
+                "speaker_names": session["speaker_names"],
+                "summaries": session["summaries"],
+                "summary_reviews": session["summary_reviews"],
+            },
+        )
+        assert export_response.status_code == 200
+        assert "Manuell korrigierte Zusammenfassung." in export_response.text
+
+
+def test_pipeline_falls_back_to_full_conversation_when_agenda_detection_fails(
+    tmp_path, monkeypatch
+):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+
+    monkeypatch.setattr(
+        main,
+        "transcribe_audio",
+        lambda file_path, models, progress_callback=None: FakeTranscriptionResult(
+            transcript=[
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Wir beraten ohne erkennbare Tagesordnung.",
+                    "start": 0.0,
+                    "end": 3.0,
+                }
+            ],
+            audio_duration_seconds=3.0,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "detect_agenda_from_transcript",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("agenda kaputt")),
+    )
+    monkeypatch.setattr(
+        main,
+        "summarize_segment",
+        lambda *args, **kwargs: summarize.SummarizationResult(
+            summary="Gesamtes Gespräch wurde zusammengefasst.",
+            duration_seconds=0.01,
+            structured=None,
+            fallback_used=True,
+        ),
+    )
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/pipeline/start",
+            files={"audio": ("meeting.mp3", b"audio", "audio/mpeg")},
+        )
+        pipeline_id = response.json()["pipeline_id"]
+
+        assert wait_until(
+            lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["stage"]
+            == "ready_for_review"
+        )
+        result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
+
+    assert result["session"]["tops"] == ["Gesamtes Gespräch"]
+    assert result["session"]["assignments"] == [0]
+    assert result["warnings"]
+
+
+def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
+    tmp_path, monkeypatch
+):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+
+    monkeypatch.setattr(
+        main,
+        "transcribe_audio",
+        lambda file_path, models, progress_callback=None: FakeTranscriptionResult(
+            transcript=[
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "TOP 1 Haushalt wird beraten.",
+                    "start": 0.0,
+                    "end": 2.0,
+                },
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "TOP 2 Fehler wird beraten.",
+                    "start": 2.0,
+                    "end": 4.0,
+                },
+            ],
+            audio_duration_seconds=4.0,
+        ),
+    )
+
+    def maybe_fail_summary(top_title, transcript_text, model=None, system_prompt=None):
+        if "Fehler" in top_title:
+            raise RuntimeError("LLM nicht verfügbar")
+        return summarize.SummarizationResult(
+            summary="Haushalt wurde zusammengefasst.",
+            duration_seconds=0.01,
+            structured=None,
+        )
+
+    monkeypatch.setattr(main, "summarize_segment", maybe_fail_summary)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/pipeline/start",
+            data={"tops": json.dumps(["TOP 1 Haushalt", "TOP 2 Fehler"])},
+            files={"audio": ("meeting.mp3", b"audio", "audio/mpeg")},
+        )
+        pipeline_id = response.json()["pipeline_id"]
+
+        assert wait_until(
+            lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["stage"]
+            == "ready_for_review"
+        )
+        result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
+
+    assert result["pipeline"]["status"] == "completed"
+    assert result["session"]["summaries"]["0"] == "Haushalt wurde zusammengefasst."
+    assert result["session"]["summaries"]["1"] == ""
+    assert result["session"]["summary_reviews"]["1"]["review_warnings"][0]["severity"] == "error"
+    assert result["warnings"]
+
+
+def test_pipeline_cancel_endpoint_marks_pending_pipeline_cancelled(tmp_path, monkeypatch):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+    audio_path = tmp_path / "pending.mp3"
+    audio_path.write_bytes(b"audio")
+
+    with TestClient(main.app) as client:
+        persistence.save_job(
+            "cancel-transcription",
+            {
+                "session_id": "cancel-session",
+                "status": "pending",
+                "progress": 0,
+                "message": "wartet",
+                "file_path": str(audio_path),
+                "audio_path": str(audio_path),
+            },
+        )
+        persistence.save_pipeline_job(
+            "cancel-pipeline",
+            {
+                "session_id": "cancel-session",
+                "transcription_job_id": "cancel-transcription",
+                "status": "pending",
+                "stage": "upload",
+                "progress": 5,
+                "result_refs": {"audio_path": str(audio_path), "warnings": []},
+            },
+        )
+        response = client.post("/api/pipeline/cancel-pipeline/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert persistence.load_pipeline_job("cancel-pipeline")["result_refs"][
+        "cancel_requested"
+    ]
 
 
 def test_cleanup_old_jobs_removes_expired_jobs_and_upload_files(tmp_path, monkeypatch):

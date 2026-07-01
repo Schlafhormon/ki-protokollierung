@@ -4,6 +4,7 @@ FastAPI Backend for Meeting Minutes Generator
 
 import os
 import re
+import json
 import uuid
 import time
 import logging
@@ -69,7 +70,10 @@ from persistence import (
     load_speaker_profile,
     load_speaker_profiles,
     mark_interrupted_jobs,
+    mark_interrupted_pipeline_jobs,
     reject_speaker_observation,
+    load_pipeline_job,
+    save_pipeline_job,
     save_job,
     save_job_speaker_embedding,
     save_session,
@@ -108,6 +112,7 @@ async def lifespan(app: FastAPI):
     try:
         init_db()
         mark_interrupted_jobs()
+        mark_interrupted_pipeline_jobs()
         jobs.clear()
         jobs.update(load_jobs())
         logger.info(f"Loaded {len(jobs)} persisted jobs")
@@ -131,11 +136,18 @@ async def lifespan(app: FastAPI):
         concurrency_limit=TRANSCRIPTION_CONCURRENCY,
     )
     await app.state.job_manager.start()
+    app.state.pipeline_manager = PipelineJobManager(
+        models_provider=lambda: getattr(app.state, "models", None),
+        concurrency_limit=PIPELINE_CONCURRENCY,
+    )
+    await app.state.pipeline_manager.start()
 
     yield  # Server is running
 
     # Cleanup on shutdown - properly release GPU resources
     logger.info("Server shutting down - cleaning up...")
+    if hasattr(app.state, "pipeline_manager"):
+        await app.state.pipeline_manager.stop()
     if hasattr(app.state, "job_manager"):
         await app.state.job_manager.stop()
     mark_active_jobs_failed("Transkription wurde durch Backend-Shutdown unterbrochen")
@@ -177,6 +189,7 @@ DELETE_UPLOADS_ON_JOB_CLEANUP = (
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))
 UPLOAD_CHUNK_SIZE = int(os.environ.get("UPLOAD_CHUNK_SIZE", str(1024 * 1024)))
 TRANSCRIPTION_CONCURRENCY = int(os.environ.get("TRANSCRIPTION_CONCURRENCY", "1"))
+PIPELINE_CONCURRENCY = int(os.environ.get("PIPELINE_CONCURRENCY", "1"))
 DELETE_UPLOADS_ON_CANCEL_OR_FAILURE = (
     os.environ.get("DELETE_UPLOADS_ON_CANCEL_OR_FAILURE", "true").lower() == "true"
 )
@@ -191,6 +204,22 @@ TERMINAL_JOB_STATUSES = {
     JOB_STATUS_FAILED,
     JOB_STATUS_CANCELLED,
 }
+PIPELINE_STATUS_PENDING = "pending"
+PIPELINE_STATUS_PROCESSING = "processing"
+PIPELINE_STATUS_COMPLETED = "completed"
+PIPELINE_STATUS_FAILED = "failed"
+PIPELINE_STATUS_CANCELLED = "cancelled"
+TERMINAL_PIPELINE_STATUSES = {
+    PIPELINE_STATUS_COMPLETED,
+    PIPELINE_STATUS_FAILED,
+    PIPELINE_STATUS_CANCELLED,
+}
+PIPELINE_STAGE_UPLOAD = "upload"
+PIPELINE_STAGE_TRANSCRIBE = "transcribe"
+PIPELINE_STAGE_SPEAKER_MATCH = "speaker_match"
+PIPELINE_STAGE_AGENDA_DETECT = "agenda_detect"
+PIPELINE_STAGE_SUMMARIZE = "summarize"
+PIPELINE_STAGE_READY_FOR_REVIEW = "ready_for_review"
 
 # In-memory cache for jobs. SQLite remains the durable source for polling after
 # restarts; the lock keeps the cache coherent across API and worker threads.
@@ -510,6 +539,148 @@ async def get_or_create_job_manager() -> TranscriptionJobManager:
     return manager
 
 
+def _pipeline_refs(job: dict[str, Any] | None) -> dict[str, Any]:
+    return dict((job or {}).get("result_refs") or {})
+
+
+def save_pipeline_state(pipeline_id: str, **changes: Any) -> dict[str, Any] | None:
+    job = load_pipeline_job(pipeline_id)
+    if job is None:
+        return None
+    result_refs = _pipeline_refs(job)
+    if "result_refs" in changes:
+        result_refs.update(changes.pop("result_refs") or {})
+    job.update(changes)
+    job["result_refs"] = result_refs
+    job["updated_at"] = time.time()
+    return save_pipeline_job(pipeline_id, job)
+
+
+def append_pipeline_warning(pipeline_id: str, message: str) -> None:
+    job = load_pipeline_job(pipeline_id)
+    if job is None:
+        return
+    refs = _pipeline_refs(job)
+    warnings = list(refs.get("warnings") or [])
+    warnings.append(message)
+    save_pipeline_state(pipeline_id, result_refs={"warnings": warnings})
+
+
+def is_pipeline_cancelled(pipeline_id: str) -> bool:
+    job = load_pipeline_job(pipeline_id)
+    if job is None:
+        return True
+    refs = _pipeline_refs(job)
+    return bool(refs.get("cancel_requested")) or job.get("status") == PIPELINE_STATUS_CANCELLED
+
+
+def ensure_pipeline_not_cancelled(pipeline_id: str) -> None:
+    if is_pipeline_cancelled(pipeline_id):
+        raise CancellationRequested()
+
+
+class PipelineJobManager:
+    """Runs backend-controlled end-to-end protocol generation pipelines."""
+
+    def __init__(
+        self,
+        *,
+        models_provider: Callable[[], TranscriptionModels | None],
+        concurrency_limit: int,
+    ) -> None:
+        self.models_provider = models_provider
+        self.concurrency_limit = max(1, concurrency_limit)
+        self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self.executor = ThreadPoolExecutor(
+            max_workers=self.concurrency_limit,
+            thread_name_prefix="pipeline-worker",
+        )
+        self.workers: list[asyncio.Task] = []
+        self.started = False
+
+    async def start(self) -> None:
+        if self.started:
+            return
+        self.started = True
+        self.workers = [
+            asyncio.create_task(self._worker(index))
+            for index in range(self.concurrency_limit)
+        ]
+        logger.info(
+            "Pipeline job manager started with concurrency=%s",
+            self.concurrency_limit,
+        )
+
+    async def stop(self) -> None:
+        if not self.started:
+            return
+        self.started = False
+        for worker in self.workers:
+            worker.cancel()
+        await asyncio.gather(*self.workers, return_exceptions=True)
+        self.workers = []
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
+    async def enqueue(self, pipeline_id: str) -> None:
+        if not self.started:
+            await self.start()
+        await self.queue.put(pipeline_id)
+
+    async def _worker(self, worker_index: int) -> None:
+        while True:
+            pipeline_id = await self.queue.get()
+            try:
+                job = load_pipeline_job(pipeline_id)
+                if not job or job.get("status") in TERMINAL_PIPELINE_STATUSES:
+                    continue
+                models = self.models_provider()
+                if models is None:
+                    save_pipeline_state(
+                        pipeline_id,
+                        status=PIPELINE_STATUS_FAILED,
+                        error="Modelle sind nicht geladen",
+                        progress=0,
+                    )
+                    continue
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    self.executor,
+                    run_pipeline_job,
+                    pipeline_id,
+                    models,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(
+                    "[Pipeline worker %s] Unhandled error for pipeline %s: %s",
+                    worker_index,
+                    pipeline_id,
+                    e,
+                    exc_info=True,
+                )
+                save_pipeline_state(
+                    pipeline_id,
+                    status=PIPELINE_STATUS_FAILED,
+                    error=str(e),
+                )
+            finally:
+                self.queue.task_done()
+
+
+async def get_or_create_pipeline_manager() -> PipelineJobManager:
+    manager = getattr(app.state, "pipeline_manager", None)
+    if manager is None:
+        manager = PipelineJobManager(
+            models_provider=lambda: getattr(app.state, "models", None),
+            concurrency_limit=PIPELINE_CONCURRENCY,
+        )
+        app.state.pipeline_manager = manager
+    if not manager.started:
+        await manager.start()
+    return manager
+
+
 def request_job_cancellation(job_id: str) -> dict[str, Any] | None:
     job = get_job_from_cache_or_db(job_id)
     if job is None:
@@ -645,6 +816,29 @@ class TranscriptionJob(BaseModel):
     error: Optional[str] = None
 
 
+class PipelineStartResponse(BaseModel):
+    pipeline_id: str
+    session_id: str
+    transcription_job_id: str
+    status: str
+    stage: str
+    progress: int
+    warnings: List[str] = Field(default_factory=list)
+
+
+class PipelineStatusResponse(BaseModel):
+    pipeline_id: str
+    session_id: Optional[str] = None
+    transcription_job_id: Optional[str] = None
+    status: str
+    stage: str
+    progress: int
+    warnings: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
+    created_at: Optional[float] = None
+    updated_at: Optional[float] = None
+
+
 class SessionSaveRequest(BaseModel):
     session_id: Optional[str] = None
     job_id: Optional[str] = None
@@ -710,6 +904,15 @@ class SpeakerObservationResponse(BaseModel):
     display_name: str
     created_at: float
     updated_at: float
+
+
+class PipelineResultResponse(BaseModel):
+    pipeline: PipelineStatusResponse
+    session: SessionResponse
+    job: Optional[TranscriptionJob] = None
+    speaker_observations: List[SpeakerObservationResponse] = Field(default_factory=list)
+    summary_reviews: Dict[int, Any] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
 
 
 class SpeakerObservationConfirmRequest(BaseModel):
@@ -1217,6 +1420,484 @@ def model_to_dict(model: BaseModel) -> dict[str, Any]:
     return model.dict()
 
 
+def parse_pipeline_tops(raw_tops: str | None) -> list[str]:
+    if not raw_tops:
+        return []
+    text = raw_tops.strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+    except json.JSONDecodeError:
+        pass
+    separators = "\n" if "\n" in text else ","
+    return [item.strip() for item in text.split(separators) if item.strip()]
+
+
+def parse_pipeline_options(raw_options: str | None) -> dict[str, Any]:
+    if not raw_options or not raw_options.strip():
+        return {}
+    try:
+        parsed = json.loads(raw_options)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Optionen müssen valides JSON sein: {exc}",
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="Optionen müssen ein JSON-Objekt sein")
+    return parsed
+
+
+def build_pipeline_status_response(job: dict[str, Any]) -> PipelineStatusResponse:
+    refs = _pipeline_refs(job)
+    return PipelineStatusResponse(
+        pipeline_id=job["pipeline_job_id"],
+        session_id=job.get("session_id"),
+        transcription_job_id=job.get("transcription_job_id"),
+        status=job["status"],
+        stage=job["stage"],
+        progress=job["progress"],
+        warnings=list(refs.get("warnings") or []),
+        error=job.get("error"),
+        created_at=job.get("created_at"),
+        updated_at=job.get("updated_at"),
+    )
+
+
+def line_to_dict(line: Any) -> dict[str, Any]:
+    if isinstance(line, dict):
+        return {
+            "speaker": str(line.get("speaker", "")),
+            "text": str(line.get("text", "")),
+            "start": float(line.get("start", 0)),
+            "end": float(line.get("end", 0)),
+        }
+    return {
+        "speaker": str(getattr(line, "speaker", "")),
+        "text": str(getattr(line, "text", "")),
+        "start": float(getattr(line, "start", 0)),
+        "end": float(getattr(line, "end", 0)),
+    }
+
+
+def transcript_utterances(transcript: list[dict[str, Any]]) -> list[TranscriptUtterance]:
+    return [
+        TranscriptUtterance(speaker=line.get("speaker", ""), text=line.get("text", ""))
+        for line in transcript
+    ]
+
+
+def save_pipeline_session(
+    session_id: str,
+    *,
+    job_id: str | None = None,
+    transcript: list[dict[str, Any]] | None = None,
+    tops: list[str] | None = None,
+    assignments: list[int | None] | None = None,
+    summaries: dict[int, str] | None = None,
+    summary_reviews: dict[int, Any] | None = None,
+    current_step: int | None = None,
+) -> dict[str, Any]:
+    session = load_session(session_id) or {"session_id": session_id}
+    state = dict(session)
+    if job_id is not None:
+        state["job_id"] = job_id
+    if transcript is not None:
+        state["transcript"] = transcript
+        speaker_names = dict(state.get("speaker_names") or {})
+        for line in transcript:
+            speaker = str(line.get("speaker", "")).strip()
+            if speaker:
+                speaker_names.setdefault(speaker, speaker)
+        state["speaker_names"] = speaker_names
+    if tops is not None:
+        state["tops"] = tops
+    if assignments is not None:
+        state["assignments"] = assignments
+    if summaries is not None:
+        state["summaries"] = summaries
+    if summary_reviews is not None:
+        state["summary_reviews"] = summary_reviews
+    if current_step is not None:
+        state["current_step"] = current_step
+    state.setdefault("speaker_names", {})
+    state.setdefault("tops", [])
+    state.setdefault("assignments", [])
+    state.setdefault("summaries", {})
+    state.setdefault("summary_reviews", {})
+    state.setdefault("export_metadata", {})
+    state.setdefault("skipped_assignment", False)
+    return save_session(session_id, state)
+
+
+def fallback_agenda(
+    transcript: list[dict[str, Any]],
+    known_tops: list[str] | None = None,
+) -> tuple[list[str], list[int | None], dict[str, Any]]:
+    tops = [top.strip() for top in known_tops or [] if top.strip()]
+    if not tops:
+        tops = ["Gesamtes Gespräch"]
+        return tops, [0 for _ in transcript], {
+            "strategy": "pipeline_fallback_full_conversation",
+            "segments": [],
+            "uncertain_count": 1 if transcript else 0,
+        }
+
+    try:
+        result = suggest_assignments(transcript_utterances(transcript), tops)
+        assignments = result.suggested_assignments
+        if not assignments or all(assignment is None for assignment in assignments):
+            assignments = [0 if tops else None for _ in transcript]
+        return tops, assignments, {
+            "strategy": f"{result.strategy}_pipeline_fallback",
+            "segments": [segment.__dict__ for segment in result.segments],
+            "uncertain_count": result.uncertain_count,
+        }
+    except Exception:
+        return tops, [0 if tops else None for _ in transcript], {
+            "strategy": "pipeline_fallback_known_tops",
+            "segments": [],
+            "uncertain_count": len(tops),
+        }
+
+
+def detect_pipeline_agenda(
+    pipeline_id: str,
+    transcript: list[dict[str, Any]],
+    *,
+    known_tops: list[str],
+    pdf_path: str | None,
+    options: dict[str, Any],
+) -> tuple[list[str], list[int | None], dict[str, Any]]:
+    agenda_tops = [top.strip() for top in known_tops if top.strip()]
+    model = options.get("agenda_model") or options.get("model")
+    system_prompt = options.get("agenda_system_prompt") or options.get("system_prompt")
+
+    if pdf_path:
+        try:
+            extracted_tops = extract_tops_from_pdf(
+                pdf_path,
+                model=model,
+                system_prompt=system_prompt,
+            )
+            if extracted_tops:
+                agenda_tops = [top.strip() for top in extracted_tops if top.strip()]
+        except Exception as exc:
+            append_pipeline_warning(
+                pipeline_id,
+                f"TOP-Erkennung aus PDF fehlgeschlagen, nutze Fallback: {exc}",
+            )
+
+    try:
+        utterances = transcript_utterances(transcript)
+        if agenda_tops:
+            result = segment_known_agenda(
+                utterances,
+                agenda_tops,
+                model=model,
+                system_prompt=system_prompt,
+            )
+        else:
+            result = detect_agenda_from_transcript(
+                utterances,
+                model=model,
+                system_prompt=system_prompt,
+            )
+        if result.tops and result.assignments:
+            return result.tops, result.assignments, {
+                "strategy": result.strategy,
+                "segments": [segment.__dict__ for segment in result.segments],
+                "uncertain_count": result.uncertain_count,
+            }
+        append_pipeline_warning(
+            pipeline_id,
+            "Agenda Detection ergab keine belastbaren TOPs, nutze Fallback.",
+        )
+    except Exception as exc:
+        append_pipeline_warning(
+            pipeline_id,
+            f"Agenda Detection fehlgeschlagen, nutze Fallback: {exc}",
+        )
+
+    return fallback_agenda(transcript, agenda_tops)
+
+
+def summarize_pipeline_segments(
+    pipeline_id: str,
+    *,
+    transcript: list[dict[str, Any]],
+    tops: list[str],
+    assignments: list[int | None],
+    options: dict[str, Any],
+) -> tuple[dict[int, str], dict[int, Any]]:
+    summaries: dict[int, str] = {}
+    summary_reviews: dict[int, Any] = {}
+    model = options.get("summary_model") or options.get("model")
+    system_prompt = options.get("summary_system_prompt") or options.get("system_prompt")
+
+    for top_index, top_title in enumerate(tops):
+        lines = [
+            line
+            for line_index, line in enumerate(transcript)
+            if line_index < len(assignments) and assignments[line_index] == top_index
+        ]
+        if not lines:
+            summaries[top_index] = ""
+            summary_reviews[top_index] = {
+                "structured": None,
+                "source_links": [],
+                "review_warnings": [
+                    {
+                        "kind": "empty_top_segment",
+                        "message": "Für diesen TOP wurden keine Transkriptzeilen zugeordnet.",
+                        "severity": "warning",
+                        "line_indices": [],
+                        "excerpt": "",
+                    }
+                ],
+            }
+            continue
+
+        transcript_text = "\n".join(
+            f"{line.get('speaker', '')}: {line.get('text', '')}" for line in lines
+        )
+        try:
+            result = summarize_segment(
+                top_title,
+                transcript_text,
+                model=model,
+                system_prompt=system_prompt,
+            )
+            review = build_summary_review(
+                structured=result.structured,
+                summary=result.summary,
+                lines=lines,
+            )
+            summaries[top_index] = result.summary
+            summary_reviews[top_index] = {
+                "structured": (
+                    result.structured.to_dict() if result.structured is not None else None
+                ),
+                "source_links": [link.to_dict() for link in review.source_links],
+                "review_warnings": [warning.to_dict() for warning in review.warnings],
+                "fallback_used": result.fallback_used,
+                "chunks_processed": result.chunks_processed,
+                "duration_seconds": result.duration_seconds,
+            }
+        except Exception as exc:
+            message = f"Zusammenfassung für TOP {top_index + 1} fehlgeschlagen: {exc}"
+            append_pipeline_warning(pipeline_id, message)
+            summaries[top_index] = ""
+            summary_reviews[top_index] = {
+                "structured": None,
+                "source_links": [],
+                "review_warnings": [
+                    {
+                        "kind": "summary_failed",
+                        "message": message,
+                        "severity": "error",
+                        "line_indices": [],
+                        "excerpt": "",
+                    }
+                ],
+                "error": str(exc),
+            }
+
+    return summaries, summary_reviews
+
+
+def run_pipeline_job(
+    pipeline_id: str,
+    models: TranscriptionModels,
+) -> None:
+    job = load_pipeline_job(pipeline_id)
+    if job is None:
+        return
+    refs = _pipeline_refs(job)
+    session_id = job.get("session_id")
+    transcription_job_id = job.get("transcription_job_id")
+    audio_path = refs.get("audio_path")
+    pdf_path = refs.get("pdf_path")
+    options = dict(refs.get("options") or {})
+    known_tops = list(refs.get("known_tops") or [])
+
+    if not session_id or not transcription_job_id:
+        save_pipeline_state(
+            pipeline_id,
+            status=PIPELINE_STATUS_FAILED,
+            error="Pipeline ist unvollständig initialisiert",
+            progress=0,
+        )
+        return
+
+    try:
+        ensure_pipeline_not_cancelled(pipeline_id)
+        save_pipeline_state(
+            pipeline_id,
+            status=PIPELINE_STATUS_PROCESSING,
+            stage=PIPELINE_STAGE_TRANSCRIBE,
+            progress=15,
+            error=None,
+        )
+        run_transcription(transcription_job_id, audio_path, models)
+        ensure_pipeline_not_cancelled(pipeline_id)
+
+        transcription_job = load_job(transcription_job_id)
+        if transcription_job is None or transcription_job.get("status") != JOB_STATUS_COMPLETED:
+            error = (
+                transcription_job.get("error")
+                if transcription_job
+                else "Transkriptionsjob nicht gefunden"
+            )
+            raise RuntimeError(error or "Transkription fehlgeschlagen")
+
+        transcript = [
+            line_to_dict(line) for line in (transcription_job.get("transcript") or [])
+        ]
+        save_pipeline_session(
+            session_id,
+            job_id=transcription_job_id,
+            transcript=transcript,
+            current_step=1,
+        )
+        save_pipeline_state(
+            pipeline_id,
+            stage=PIPELINE_STAGE_SPEAKER_MATCH,
+            progress=62,
+            result_refs={"transcript_line_count": len(transcript)},
+        )
+
+        try:
+            suggestions = build_speaker_suggestion_responses(
+                transcription_job_id,
+                session_id,
+            )
+            save_pipeline_state(
+                pipeline_id,
+                result_refs={"speaker_suggestion_count": len(suggestions or [])},
+            )
+        except Exception as exc:
+            append_pipeline_warning(
+                pipeline_id,
+                f"Sprecher-Matching konnte nicht ausgewertet werden: {exc}",
+            )
+
+        ensure_pipeline_not_cancelled(pipeline_id)
+        save_pipeline_state(
+            pipeline_id,
+            stage=PIPELINE_STAGE_AGENDA_DETECT,
+            progress=72,
+        )
+        tops, assignments, agenda_info = detect_pipeline_agenda(
+            pipeline_id,
+            transcript,
+            known_tops=known_tops,
+            pdf_path=pdf_path,
+            options=options,
+        )
+        save_pipeline_session(
+            session_id,
+            job_id=transcription_job_id,
+            transcript=transcript,
+            tops=tops,
+            assignments=assignments,
+            current_step=2,
+        )
+        save_pipeline_state(
+            pipeline_id,
+            result_refs={"agenda": agenda_info, "top_count": len(tops)},
+        )
+
+        ensure_pipeline_not_cancelled(pipeline_id)
+        save_pipeline_state(
+            pipeline_id,
+            stage=PIPELINE_STAGE_SUMMARIZE,
+            progress=82,
+        )
+        summaries, summary_reviews = summarize_pipeline_segments(
+            pipeline_id,
+            transcript=transcript,
+            tops=tops,
+            assignments=assignments,
+            options=options,
+        )
+        save_pipeline_session(
+            session_id,
+            job_id=transcription_job_id,
+            transcript=transcript,
+            tops=tops,
+            assignments=assignments,
+            summaries=summaries,
+            summary_reviews=summary_reviews,
+            current_step=3,
+        )
+
+        ensure_pipeline_not_cancelled(pipeline_id)
+        save_pipeline_state(
+            pipeline_id,
+            status=PIPELINE_STATUS_COMPLETED,
+            stage=PIPELINE_STAGE_READY_FOR_REVIEW,
+            progress=100,
+            error=None,
+            result_refs={"ready_for_review": True},
+        )
+    except CancellationRequested:
+        save_pipeline_state(
+            pipeline_id,
+            status=PIPELINE_STATUS_CANCELLED,
+            error=None,
+            result_refs={"cancel_requested": True},
+        )
+    except Exception as exc:
+        logger.error("[Pipeline %s] failed: %s", pipeline_id, exc, exc_info=True)
+        save_pipeline_state(
+            pipeline_id,
+            status=PIPELINE_STATUS_FAILED,
+            error=str(exc),
+        )
+    finally:
+        if pdf_path:
+            remove_upload_file(pdf_path)
+
+
+def request_pipeline_cancellation(pipeline_id: str) -> dict[str, Any] | None:
+    job = load_pipeline_job(pipeline_id)
+    if job is None:
+        return None
+    if job.get("status") == PIPELINE_STATUS_CANCELLED:
+        return job
+    if job.get("status") in {PIPELINE_STATUS_COMPLETED, PIPELINE_STATUS_FAILED}:
+        raise HTTPException(
+            status_code=409,
+            detail="Pipeline kann in diesem Status nicht abgebrochen werden",
+        )
+
+    refs = _pipeline_refs(job)
+    refs["cancel_requested"] = True
+    updated = save_pipeline_state(
+        pipeline_id,
+        status=PIPELINE_STATUS_CANCELLED,
+        result_refs=refs,
+        error=None,
+    )
+
+    transcription_job_id = job.get("transcription_job_id")
+    if transcription_job_id:
+        try:
+            request_job_cancellation(transcription_job_id)
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+
+    if refs.get("pdf_path"):
+        remove_upload_file(refs.get("pdf_path"))
+
+    return updated
+
+
 # ----- Endpoints -----
 
 
@@ -1236,6 +1917,175 @@ async def health_check():
             status_code=503, detail="Models not loaded yet - server starting up"
         )
     return {"status": "healthy", "models_loaded": True, "version": "0.1.0"}
+
+
+@app.post("/api/pipeline/start", response_model=PipelineStartResponse)
+async def start_pipeline(
+    audio: UploadFile = File(...),
+    pdf: Optional[UploadFile] = File(None),
+    session_id: Optional[str] = Form(None),
+    tops: Optional[str] = Form(None),
+    options: Optional[str] = Form(None),
+    model: Optional[str] = Form(None),
+    system_prompt: Optional[str] = Form(None),
+):
+    """Start an unattended upload-to-review pipeline job."""
+    if (
+        not getattr(app.state, "models_loaded", False)
+        or getattr(app.state, "models", None) is None
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Server startet noch - Modelle werden geladen. Bitte warten.",
+        )
+    if not is_allowed_audio_file(audio.filename, audio.content_type):
+        raise HTTPException(
+            status_code=400,
+            detail="Ungültiger Dateityp. Erlaubt: MP3, WAV, M4A",
+        )
+    if pdf is not None and pdf.filename:
+        if not is_allowed_pdf_file(pdf.filename, pdf.content_type):
+            raise HTTPException(status_code=400, detail="Nur PDF-Dateien sind erlaubt")
+
+    pipeline_id = str(uuid.uuid4())
+    transcription_job_id = str(uuid.uuid4())
+    effective_session_id = session_id or str(uuid.uuid4())
+    parsed_options = parse_pipeline_options(options)
+    if model:
+        parsed_options["model"] = model
+    if system_prompt:
+        parsed_options["system_prompt"] = system_prompt
+    known_tops = parse_pipeline_tops(tops)
+
+    safe_audio_filename = normalize_upload_filename(
+        audio.filename,
+        default_stem="audio",
+        allowed_extensions=ALLOWED_AUDIO_EXTENSIONS,
+        content_type=audio.content_type,
+    )
+    audio_path = upload_path_for(transcription_job_id, safe_audio_filename)
+    audio_size_bytes = await save_upload_with_size_limit(audio, audio_path)
+
+    pdf_path: str | None = None
+    if pdf is not None and pdf.filename:
+        safe_pdf_filename = normalize_upload_filename(
+            pdf.filename,
+            default_stem="agenda",
+            allowed_extensions=(".pdf",),
+            content_type=pdf.content_type,
+        )
+        pdf_destination = UPLOAD_DIR / f"{pipeline_id}-{safe_pdf_filename}"
+        await save_upload_with_size_limit(pdf, pdf_destination)
+        pdf_path = str(pdf_destination)
+
+    now = time.time()
+    with JOB_LOCK:
+        jobs[transcription_job_id] = {
+            "created_at": now,
+            "updated_at": now,
+            "session_id": effective_session_id,
+            "status": JOB_STATUS_PENDING,
+            "progress": 0,
+            "message": "Audio hochgeladen, Pipeline wartet auf Verarbeitung",
+            "file_path": str(audio_path),
+            "audio_path": str(audio_path),
+            "audio_filename": safe_audio_filename,
+            "audio_content_type": audio.content_type,
+            "audio_size_bytes": audio_size_bytes,
+            "transcript": None,
+            "error": None,
+            "cancellation_requested": False,
+        }
+    persist_job_state(transcription_job_id)
+    save_pipeline_session(
+        effective_session_id,
+        job_id=transcription_job_id,
+        tops=known_tops,
+        current_step=0,
+    )
+
+    pipeline_job = save_pipeline_job(
+        pipeline_id,
+        {
+            "session_id": effective_session_id,
+            "transcription_job_id": transcription_job_id,
+            "status": PIPELINE_STATUS_PENDING,
+            "stage": PIPELINE_STAGE_UPLOAD,
+            "progress": 5,
+            "error": None,
+            "created_at": now,
+            "updated_at": now,
+            "result_refs": {
+                "audio_path": str(audio_path),
+                "pdf_path": pdf_path,
+                "known_tops": known_tops,
+                "options": parsed_options,
+                "warnings": [],
+            },
+        },
+    )
+
+    manager = await get_or_create_pipeline_manager()
+    await manager.enqueue(pipeline_id)
+    return PipelineStartResponse(
+        pipeline_id=pipeline_id,
+        session_id=effective_session_id,
+        transcription_job_id=transcription_job_id,
+        status=pipeline_job["status"],
+        stage=pipeline_job["stage"],
+        progress=pipeline_job["progress"],
+        warnings=[],
+    )
+
+
+@app.get("/api/pipeline/{pipeline_id}", response_model=PipelineStatusResponse)
+async def get_pipeline_status(pipeline_id: str):
+    job = load_pipeline_job(pipeline_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Pipeline nicht gefunden")
+    return build_pipeline_status_response(job)
+
+
+@app.post("/api/pipeline/{pipeline_id}/cancel", response_model=PipelineStatusResponse)
+async def cancel_pipeline(pipeline_id: str):
+    job = request_pipeline_cancellation(pipeline_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Pipeline nicht gefunden")
+    return build_pipeline_status_response(job)
+
+
+@app.get("/api/pipeline/{pipeline_id}/result", response_model=PipelineResultResponse)
+async def get_pipeline_result(pipeline_id: str):
+    pipeline_job = load_pipeline_job(pipeline_id)
+    if pipeline_job is None:
+        raise HTTPException(status_code=404, detail="Pipeline nicht gefunden")
+    if (
+        pipeline_job.get("status") != PIPELINE_STATUS_COMPLETED
+        or pipeline_job.get("stage") != PIPELINE_STAGE_READY_FOR_REVIEW
+    ):
+        raise HTTPException(status_code=409, detail="Pipeline ist noch nicht reviewbar")
+
+    session_id = pipeline_job.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=404, detail="Pipeline hat keine Session")
+    session = load_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session nicht gefunden")
+
+    session_response = build_session_response(session)
+    observations = [
+        build_speaker_observation_response(observation, session)
+        for observation in load_speaker_observations(session_id=session_id)
+    ]
+    status = build_pipeline_status_response(pipeline_job)
+    return PipelineResultResponse(
+        pipeline=status,
+        session=session_response,
+        job=session_response.job,
+        speaker_observations=observations,
+        summary_reviews=session_response.summary_reviews,
+        warnings=status.warnings,
+    )
 
 
 @app.post("/api/sessions", response_model=SessionResponse)
