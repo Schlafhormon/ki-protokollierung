@@ -13,6 +13,8 @@ const defaultProps: UploadStepProps = {
   onNext: vi.fn(),
   audioFile: null,
   setAudioFile: vi.fn(),
+  pdfFile: null,
+  setPdfFile: vi.fn(),
   tops: [''],
   setTops: vi.fn(),
   llmSettings: { model: 'qwen3:8b', systemPrompt: '' },
@@ -36,7 +38,7 @@ describe('UploadStep', () => {
     const setAudioFile = vi.fn();
     const { container, rerender } = renderUploadStep({ onNext, setAudioFile });
 
-    const nextButton = screen.getByRole('button', { name: /transkription starten/i });
+    const nextButton = screen.getByRole('button', { name: /automatisch verarbeiten/i });
     expect(nextButton).toBeDisabled();
 
     const input = container.querySelector<HTMLInputElement>('input[type="file"][accept="audio/*"]');
@@ -51,19 +53,22 @@ describe('UploadStep', () => {
         onNext={onNext}
         audioFile={audioFile}
         setAudioFile={setAudioFile}
+        pdfFile={null}
+        setPdfFile={vi.fn()}
         telemetryOptIn={false}
         setTelemetryOptIn={vi.fn()}
       />,
     );
 
-    await user.click(screen.getByRole('button', { name: /transkription starten/i }));
+    await user.click(screen.getByRole('button', { name: /automatisch verarbeiten/i }));
     expect(onNext).toHaveBeenCalledTimes(1);
   });
 
   it('extracts TOPs from a PDF and replaces the TOP list', async () => {
     vi.mocked(extractTOPsFromPDF).mockResolvedValue(['Begruessung', 'Haushalt']);
     const setTops = vi.fn();
-    const { container } = renderUploadStep({ setTops });
+    const setPdfFile = vi.fn();
+    const { container } = renderUploadStep({ setTops, setPdfFile });
 
     const input = container.querySelector<HTMLInputElement>('input[accept=".pdf,application/pdf"]');
     expect(input).not.toBeNull();
@@ -74,6 +79,7 @@ describe('UploadStep', () => {
     await waitFor(() => {
       expect(extractTOPsFromPDF).toHaveBeenCalledWith(pdf, { model: 'qwen3:8b' });
       expect(setTops).toHaveBeenCalledWith(['Begruessung', 'Haushalt']);
+      expect(setPdfFile).toHaveBeenCalledWith(pdf);
     });
     expect(await screen.findByText(/2 TOPs erfolgreich extrahiert/i)).toBeInTheDocument();
   });

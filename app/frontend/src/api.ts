@@ -8,6 +8,9 @@ import type {
   AssignmentSuggestionsResponse,
   ExportFormat,
   ExportMetadata,
+  PipelineJob,
+  PipelineResultResponse,
+  PipelineStartOptions,
   SessionResponse,
   SessionSavePayload,
   SpeakerObservation,
@@ -28,6 +31,13 @@ async function readApiError(response: Response, fallback: string): Promise<Error
   } catch {
     return new Error(fallback);
   }
+}
+
+function normalizePipelineJob(data: PipelineJob): PipelineJob {
+  return {
+    ...data,
+    warnings: data.warnings ?? [],
+  };
 }
 
 /**
@@ -54,6 +64,121 @@ export async function startTranscription(
   }
 
   return response.json();
+}
+
+/**
+ * Start the backend-controlled end-to-end pipeline.
+ */
+export async function startPipeline(
+  audioFile: File,
+  options: PipelineStartOptions = {}
+): Promise<PipelineJob> {
+  const formData = new FormData();
+  formData.append("audio", audioFile);
+  if (options.pdfFile) {
+    formData.append("pdf", options.pdfFile);
+  }
+  if (options.sessionId) {
+    formData.append("session_id", options.sessionId);
+  }
+
+  const knownTops = (options.tops ?? []).map((top) => top.trim()).filter(Boolean);
+  if (knownTops.length > 0) {
+    formData.append("tops", JSON.stringify(knownTops));
+  }
+  if (options.model) {
+    formData.append("model", options.model);
+  }
+  if (options.systemPrompt) {
+    formData.append("system_prompt", options.systemPrompt);
+  }
+
+  const response = await fetch(`${API_BASE}/api/pipeline/start`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Starten der Pipeline");
+  }
+
+  return normalizePipelineJob(await response.json());
+}
+
+/**
+ * Get the current status of an end-to-end pipeline job.
+ */
+export async function getPipelineStatus(pipelineId: string): Promise<PipelineJob> {
+  const response = await fetch(`${API_BASE}/api/pipeline/${pipelineId}`);
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Abrufen des Pipeline-Status");
+  }
+
+  return normalizePipelineJob(await response.json());
+}
+
+/**
+ * Cancel a pending or running pipeline job.
+ */
+export async function cancelPipeline(pipelineId: string): Promise<PipelineJob> {
+  const response = await fetch(`${API_BASE}/api/pipeline/${pipelineId}/cancel`, {
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Abbrechen der Pipeline");
+  }
+
+  return normalizePipelineJob(await response.json());
+}
+
+/**
+ * Load the reviewable pipeline result once the pipeline has completed.
+ */
+export async function getPipelineResult(
+  pipelineId: string
+): Promise<PipelineResultResponse> {
+  const response = await fetch(`${API_BASE}/api/pipeline/${pipelineId}/result`);
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Laden des Pipeline-Ergebnisses");
+  }
+
+  const result = await response.json();
+  return {
+    ...result,
+    pipeline: normalizePipelineJob(result.pipeline),
+    warnings: result.warnings ?? [],
+  };
+}
+
+/**
+ * Poll for pipeline completion.
+ */
+export async function pollPipeline(
+  pipelineId: string,
+  onStatus?: (status: PipelineJob) => void,
+  intervalMs = 1000
+): Promise<PipelineJob> {
+  while (true) {
+    const status = await getPipelineStatus(pipelineId);
+    onStatus?.(status);
+
+    if (status.status === "completed") {
+      return status;
+    }
+
+    if (status.status === "failed") {
+      throw new Error(status.error || "Pipeline fehlgeschlagen");
+    }
+
+    if (status.status === "cancelled") {
+      throw new Error("Pipeline abgebrochen");
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }
 
 /**

@@ -12,6 +12,11 @@ import LLMSettingsPanel, {
 import {
   startTranscription as apiStartTranscription,
   pollTranscription,
+  startPipeline as apiStartPipeline,
+  pollPipeline,
+  getPipelineStatus,
+  getPipelineResult,
+  cancelPipeline,
   generateSummary,
   detectAgenda,
   checkBackendHealth,
@@ -22,6 +27,8 @@ import {
 import type {
   AgendaDetectionResponse,
   ExportMetadata,
+  PipelineJob,
+  PipelineResultResponse,
   SessionResponse,
   SessionSavePayload,
   SummaryReview,
@@ -31,6 +38,7 @@ import type {
 // LocalStorage key for LLM settings
 const LLM_SETTINGS_KEY = "llm-settings";
 const ACTIVE_SESSION_KEY = "active-session-id";
+const ACTIVE_PIPELINE_KEY = "active-pipeline-id";
 const SESSION_DRAFT_KEY = "active-session-draft";
 const TELEMETRY_OPT_IN_KEY = "telemetry-opt-in";
 
@@ -74,6 +82,7 @@ FORMAT:
 
 interface SessionDraft extends SessionSavePayload {
   audio_url?: string | null;
+  pipeline_id?: string | null;
 }
 
 function withApiBase(url?: string | null): string | null {
@@ -127,6 +136,44 @@ function normalizeSummaryReviews(
   return normalized;
 }
 
+function hasReviewUncertainty(
+  session: SessionResponse,
+  warnings: string[] = []
+): boolean {
+  const transcriptLength = session.transcript?.length ?? 0;
+  const assignments = session.assignments ?? [];
+  if (transcriptLength > 0) {
+    if (assignments.length !== transcriptLength) {
+      return true;
+    }
+    if (assignments.some((assignment) => assignment === null || assignment === undefined)) {
+      return true;
+    }
+  }
+
+  if (warnings.length > 0) {
+    return true;
+  }
+
+  const reviews = normalizeSummaryReviews(session.summary_reviews);
+  return Object.values(reviews).some((review) => {
+    const warningsForTop = review.review_warnings ?? [];
+    const hasBlockingWarning = warningsForTop.some((warning) =>
+      ["warning", "error"].includes(String(warning.severity ?? "").toLowerCase())
+    );
+    const hasStructuredUncertainty = Boolean(
+      review.structured?.uncertainties?.some((item) => item.trim())
+    );
+    return hasBlockingWarning || hasStructuredUncertainty;
+  });
+}
+
+function hasAnySummary(session: SessionResponse | SessionDraft): boolean {
+  return Object.values(session.summaries ?? {}).some(
+    (summary) => typeof summary === "string" && summary.trim() !== ""
+  );
+}
+
 export default function App() {
   // Current step in wizard
   const [currentStep, setCurrentStep] = useState(1);
@@ -142,6 +189,7 @@ export default function App() {
 
   // Data state
   const [audioFile, setAudioFile] = useState<File | null>(null);
+  const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [tops, setTops] = useState<string[]>(EMPTY_TOPS);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [assignments, setAssignments] = useState<(number | null)[]>([]);
@@ -155,8 +203,13 @@ export default function App() {
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [skippedAssignment, setSkippedAssignment] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [pipelineId, setPipelineId] = useState<string | null>(null);
+  const [pipelineJob, setPipelineJob] = useState<PipelineJob | null>(null);
+  const [pipelineNotice, setPipelineNotice] = useState<string | null>(null);
+  const [directProtocolAvailable, setDirectProtocolAvailable] = useState(false);
   const [restoreCandidate, setRestoreCandidate] = useState<{
     sessionId: string | null;
+    pipelineId: string | null;
     draft: SessionDraft | null;
   } | null>(null);
   const [isRestoringSession, setIsRestoringSession] = useState(false);
@@ -245,11 +298,47 @@ export default function App() {
     setSkippedAssignment(Boolean(session.skipped_assignment));
     setAudioUrl(withApiBase(session.audio_url));
     setAudioFile(null);
+    setPdfFile(null);
+    setPipelineId((session as SessionDraft).pipeline_id ?? null);
+    setPipelineJob(null);
+    setPipelineNotice(null);
+    setDirectProtocolAvailable(false);
     setIsProcessing(false);
     setProcessingError(null);
     setProcessingStatus("");
     setProcessingProgress(0);
   }, []);
+
+  const applyPipelineResult = useCallback((result: PipelineResultResponse) => {
+    applySession(result.session);
+    const completedPipeline = result.pipeline;
+    const warnings = result.warnings ?? completedPipeline.warnings ?? [];
+    const needsReview = hasReviewUncertainty(result.session, warnings);
+
+    setPipelineJob(completedPipeline);
+    setPipelineId(null);
+    setJobId(result.session.job_id ?? result.job?.job_id ?? completedPipeline.transcription_job_id ?? null);
+    setSummaryReviews(
+      normalizeSummaryReviews(result.summary_reviews ?? result.session.summary_reviews)
+    );
+    setIsProcessing(false);
+    setProcessingProgress(100);
+    setProcessingStatus("Pipeline abgeschlossen");
+    setProcessingError(null);
+    setDirectProtocolAvailable(!needsReview);
+    setPipelineNotice(
+      needsReview
+        ? "Automatische Verarbeitung abgeschlossen. Bitte prüfen Sie unsichere Zuordnungen vor dem Protokoll."
+        : "Automatische Verarbeitung abgeschlossen. Sie können direkt zum Protokoll wechseln oder die Zuordnung prüfen."
+    );
+    setCurrentStep(2);
+
+    try {
+      localStorage.removeItem(ACTIVE_PIPELINE_KEY);
+    } catch (e) {
+      console.error("Failed to clear active pipeline id:", e);
+    }
+  }, [applySession]);
 
   const resetSession = useCallback(() => {
     if (saveTimerRef.current !== null) {
@@ -258,8 +347,13 @@ export default function App() {
     }
     setSessionId(null);
     setJobId(null);
+    setPipelineId(null);
+    setPipelineJob(null);
+    setPipelineNotice(null);
+    setDirectProtocolAvailable(false);
     setCurrentStep(1);
     setAudioFile(null);
+    setPdfFile(null);
     setTops(EMPTY_TOPS);
     setTranscript([]);
     setAssignments([]);
@@ -281,6 +375,7 @@ export default function App() {
     lastSavedPayloadRef.current = null;
     try {
       localStorage.removeItem(ACTIVE_SESSION_KEY);
+      localStorage.removeItem(ACTIVE_PIPELINE_KEY);
       localStorage.removeItem(SESSION_DRAFT_KEY);
     } catch (e) {
       console.error("Failed to clear session draft:", e);
@@ -296,12 +391,14 @@ export default function App() {
   useEffect(() => {
     try {
       const storedSessionId = localStorage.getItem(ACTIVE_SESSION_KEY);
+      const storedPipelineId = localStorage.getItem(ACTIVE_PIPELINE_KEY);
       const storedDraft = localStorage.getItem(SESSION_DRAFT_KEY);
       const draft = storedDraft ? (JSON.parse(storedDraft) as SessionDraft) : null;
 
-      if (storedSessionId || draft?.session_id) {
+      if (storedSessionId || storedPipelineId || draft?.session_id || draft?.pipeline_id) {
         setRestoreCandidate({
           sessionId: storedSessionId || draft?.session_id || null,
+          pipelineId: storedPipelineId || draft?.pipeline_id || null,
           draft,
         });
       }
@@ -341,10 +438,16 @@ export default function App() {
       ...payload,
       session_id: sessionId,
       audio_url: audioUrl,
+      pipeline_id: pipelineId,
     };
 
     try {
       localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
+      if (pipelineId) {
+        localStorage.setItem(ACTIVE_PIPELINE_KEY, pipelineId);
+      } else {
+        localStorage.removeItem(ACTIVE_PIPELINE_KEY);
+      }
       localStorage.setItem(SESSION_DRAFT_KEY, JSON.stringify(draft));
     } catch (e) {
       console.error("Failed to save local session draft:", e);
@@ -375,16 +478,52 @@ export default function App() {
         window.clearTimeout(saveTimerRef.current);
       }
     };
-  }, [audioUrl, buildSessionPayload, sessionId]);
+  }, [audioUrl, buildSessionPayload, pipelineId, sessionId]);
 
-  // Start transcription via backend API
-  const startTranscription = async () => {
+  const updatePipelineProcessingState = (status: PipelineJob) => {
+    setPipelineJob(status);
+    setPipelineId(status.pipeline_id);
+    setJobId(status.transcription_job_id ?? null);
+    if (status.session_id) {
+      setSessionId(status.session_id);
+    }
+    setProcessingProgress(status.progress);
+    setProcessingStatus("");
+  };
+
+  const pollPipelineToResult = async (
+    activePipelineId: string,
+    initialStatus?: PipelineJob
+  ) => {
+    setIsProcessing(true);
+    setProcessingError(null);
+    if (initialStatus) {
+      updatePipelineProcessingState(initialStatus);
+    }
+
+    const completedStatus =
+      initialStatus?.status === "completed"
+        ? initialStatus
+        : await pollPipeline(activePipelineId, updatePipelineProcessingState);
+    updatePipelineProcessingState(completedStatus);
+    const result = await getPipelineResult(activePipelineId);
+    applyPipelineResult(result);
+  };
+
+  // Legacy transcription flow used as a fallback when the pipeline endpoint fails.
+  const startLegacyTranscription = async (fallbackReason?: string) => {
     if (!audioFile) return;
 
     setIsProcessing(true);
     setProcessingProgress(0);
-    setProcessingStatus("Audio wird hochgeladen...");
+    setProcessingStatus(
+      fallbackReason
+        ? `Pipeline nicht verfügbar (${fallbackReason}). Klassischer Workflow wird gestartet...`
+        : "Audio wird hochgeladen..."
+    );
     setProcessingError(null);
+    setPipelineId(null);
+    setPipelineJob(null);
 
     try {
       const preparedSession = await saveSession(
@@ -506,9 +645,45 @@ export default function App() {
     setSessionMessage(null);
 
     try {
-      if (restoreCandidate.sessionId) {
+      if (restoreCandidate.pipelineId) {
+        const status = await getPipelineStatus(restoreCandidate.pipelineId);
+        setRestoreCandidate(null);
+        if (status.session_id) {
+          setSessionId(status.session_id);
+          localStorage.setItem(ACTIVE_SESSION_KEY, status.session_id);
+        }
+        setPipelineId(status.pipeline_id);
+        setPipelineJob(status);
+        if (status.status === "completed") {
+          const result = await getPipelineResult(status.pipeline_id);
+          applyPipelineResult(result);
+        } else if (status.status === "failed" || status.status === "cancelled") {
+          setProcessingError(status.error || "Pipeline ist nicht mehr aktiv");
+          setSessionMessage(status.error || "Pipeline ist nicht mehr aktiv");
+          if (restoreCandidate.draft) {
+            applySession(restoreCandidate.draft);
+          }
+        } else {
+          void pollPipelineToResult(status.pipeline_id, status).catch((error) => {
+            const message =
+              error instanceof Error ? error.message : "Pipeline konnte nicht fortgesetzt werden";
+            setProcessingError(message);
+            setProcessingStatus(`Fehler: ${message}`);
+            setIsProcessing(true);
+          });
+        }
+      } else if (restoreCandidate.sessionId) {
         const restored = await loadSession(restoreCandidate.sessionId);
         applySession(restored);
+        if ((restored.current_step ?? 1) === 2 && hasAnySummary(restored)) {
+          const canGoDirect = !hasReviewUncertainty(restored);
+          setDirectProtocolAvailable(canGoDirect);
+          setPipelineNotice(
+            canGoDirect
+              ? "Automatische Verarbeitung abgeschlossen. Sie können direkt zum Protokoll wechseln oder die Zuordnung prüfen."
+              : "Automatische Verarbeitung abgeschlossen. Bitte prüfen Sie unsichere Zuordnungen vor dem Protokoll."
+          );
+        }
         lastSavedPayloadRef.current = JSON.stringify(
           buildSessionPayload({
             session_id: restored.session_id,
@@ -525,6 +700,16 @@ export default function App() {
         );
       } else if (restoreCandidate.draft) {
         applySession(restoreCandidate.draft);
+        if ((restoreCandidate.draft.current_step ?? 1) === 2 && hasAnySummary(restoreCandidate.draft)) {
+          const draftSession = restoreCandidate.draft as SessionResponse;
+          const canGoDirect = !hasReviewUncertainty(draftSession);
+          setDirectProtocolAvailable(canGoDirect);
+          setPipelineNotice(
+            canGoDirect
+              ? "Automatische Verarbeitung abgeschlossen. Sie können direkt zum Protokoll wechseln oder die Zuordnung prüfen."
+              : "Automatische Verarbeitung abgeschlossen. Bitte prüfen Sie unsichere Zuordnungen vor dem Protokoll."
+          );
+        }
       }
       setRestoreCandidate(null);
     } catch (error) {
@@ -539,6 +724,60 @@ export default function App() {
       }
     } finally {
       setIsRestoringSession(false);
+    }
+  };
+
+  // Start end-to-end pipeline via backend API
+  const startPipeline = async () => {
+    if (!audioFile) return;
+
+    setIsProcessing(true);
+    setProcessingProgress(0);
+    setProcessingStatus("Audio wird hochgeladen und Pipeline gestartet...");
+    setProcessingError(null);
+    setPipelineNotice(null);
+    setDirectProtocolAvailable(false);
+
+    try {
+      const preparedSession = await saveSession(
+        buildSessionPayload({
+          current_step: 1,
+          transcript: [],
+          assignments: [],
+          tops,
+          summaries: {},
+          summary_reviews: {},
+        })
+      );
+      const activeSessionId = preparedSession.session_id;
+      setSessionId(activeSessionId);
+      localStorage.setItem(ACTIVE_SESSION_KEY, activeSessionId);
+
+      const pipeline = await apiStartPipeline(audioFile, {
+        sessionId: activeSessionId,
+        tops,
+        pdfFile,
+        model: llmSettings.model,
+        systemPrompt: llmSettings.systemPrompt,
+      });
+      updatePipelineProcessingState(pipeline);
+      localStorage.setItem(ACTIVE_PIPELINE_KEY, pipeline.pipeline_id);
+      await pollPipelineToResult(pipeline.pipeline_id, pipeline);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Unbekannter Fehler";
+      console.warn("Pipeline failed, falling back to legacy flow:", error);
+      try {
+        localStorage.removeItem(ACTIVE_PIPELINE_KEY);
+      } catch (storageError) {
+        console.error("Failed to clear active pipeline id:", storageError);
+      }
+      if (/abgebrochen|cancel/i.test(errorMessage)) {
+        setProcessingError(errorMessage);
+        setProcessingStatus(`Fehler: ${errorMessage}`);
+        return;
+      }
+      await startLegacyTranscription(errorMessage);
     }
   };
 
@@ -607,7 +846,7 @@ export default function App() {
       alert("Backend nicht erreichbar.");
       return;
     }
-    startTranscription();
+    startPipeline();
   };
 
   const handleStep2Next = async () => {
@@ -618,6 +857,17 @@ export default function App() {
 
     // Generate summaries for each TOP with assigned lines
     const validTops = tops.filter((t) => t.trim() !== "");
+    const hasServerSummaries = validTops.some((_, index) => {
+      const summary = summaries[index];
+      return typeof summary === "string" && summary.trim() !== "";
+    });
+
+    if (hasServerSummaries) {
+      setDirectProtocolAvailable(false);
+      setPipelineNotice(null);
+      return;
+    }
+
     const newSummaries: Record<number, string> = {};
     const newSummaryReviews: Record<number, SummaryReview> = {};
 
@@ -702,6 +952,8 @@ export default function App() {
   };
 
   const handleStep2Back = () => {
+    setDirectProtocolAvailable(false);
+    setPipelineNotice(null);
     setCurrentStep(1);
     setTranscript([]);
     setAssignments([]);
@@ -712,6 +964,7 @@ export default function App() {
   };
 
   const handleStep3Back = () => {
+    setDirectProtocolAvailable(false);
     if (skippedAssignment) {
       // Go back to upload step, reset auto-created TOP
       setCurrentStep(1);
@@ -781,6 +1034,32 @@ export default function App() {
     setIsProcessing(false);
   };
 
+  const handleDirectProtocol = () => {
+    setCurrentStep(3);
+    setDirectProtocolAvailable(false);
+    setPipelineNotice(null);
+  };
+
+  const handleCancelPipeline = async () => {
+    if (!pipelineId) return;
+
+    try {
+      const cancelled = await cancelPipeline(pipelineId);
+      setPipelineJob(cancelled);
+      setProcessingProgress(cancelled.progress);
+      setProcessingStatus("Pipeline abgebrochen");
+      setProcessingError("Pipeline abgebrochen");
+      setIsProcessing(false);
+      setPipelineId(null);
+      localStorage.removeItem(ACTIVE_PIPELINE_KEY);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Pipeline konnte nicht abgebrochen werden";
+      setProcessingError(message);
+      setProcessingStatus(`Fehler: ${message}`);
+    }
+  };
+
   // Filter out empty TOPs for display
   const validTops = tops.filter((t) => t.trim() !== "");
 
@@ -835,11 +1114,31 @@ export default function App() {
 
       {!isProcessing && <StepIndicator currentStep={currentStep} />}
 
+      {!isProcessing && pipelineNotice && (
+        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>{pipelineNotice}</span>
+            {directProtocolAvailable && (
+              <button
+                type="button"
+                onClick={handleDirectProtocol}
+                className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700"
+              >
+                Direkt zum Protokoll
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {isProcessing ? (
         <div>
           <ProcessingStep
             progress={processingProgress}
             status={processingStatus}
+            pipeline={pipelineJob}
+            canCancel={Boolean(pipelineId)}
+            onCancel={handleCancelPipeline}
           />
           {processingError && (
             <div className="mt-4 text-center">
@@ -858,6 +1157,8 @@ export default function App() {
           onNext={handleStep1Next}
           audioFile={audioFile}
           setAudioFile={setAudioFile}
+          pdfFile={pdfFile}
+          setPdfFile={setPdfFile}
           tops={tops}
           setTops={setTops}
           llmSettings={llmSettings}
@@ -880,6 +1181,7 @@ export default function App() {
           speakerNames={speakerNames}
           setSpeakerNames={setSpeakerNames}
           sessionId={sessionId}
+          hasSummaries={hasAnySummary(buildSessionPayload())}
         />
       ) : (
         <SummaryStep

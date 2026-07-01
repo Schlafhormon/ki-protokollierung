@@ -6,16 +6,26 @@ import {
   checkBackendHealth,
   detectAgenda,
   generateSummary,
+  getPipelineResult,
+  getPipelineStatus,
   loadSession,
+  pollPipeline,
   pollTranscription,
   saveSession,
+  startPipeline,
   startTranscription,
 } from './api';
+import type { PipelineJob, PipelineResultResponse } from './types';
 
 vi.mock('./api', () => ({
   checkBackendHealth: vi.fn(),
   loadSession: vi.fn(),
   saveSession: vi.fn(),
+  startPipeline: vi.fn(),
+  pollPipeline: vi.fn(),
+  getPipelineStatus: vi.fn(),
+  getPipelineResult: vi.fn(),
+  cancelPipeline: vi.fn(),
   startTranscription: vi.fn(),
   pollTranscription: vi.fn(),
   detectAgenda: vi.fn(),
@@ -25,38 +35,120 @@ vi.mock('./api', () => ({
   exportProtocol: vi.fn(),
 }));
 
-describe('App session restore', () => {
+const startedPipeline: PipelineJob = {
+  pipeline_id: 'pipeline-1',
+  session_id: 'session-1',
+  transcription_job_id: 'job-1',
+  status: 'pending',
+  stage: 'upload',
+  progress: 5,
+  warnings: [],
+};
+
+const completedPipeline: PipelineJob = {
+  ...startedPipeline,
+  status: 'completed',
+  stage: 'ready_for_review',
+  progress: 100,
+};
+
+function pipelineResult(
+  overrides: Partial<PipelineResultResponse['session']> = {},
+  pipeline: PipelineJob = completedPipeline,
+  warnings: string[] = []
+): PipelineResultResponse {
+  return {
+    pipeline,
+    session: {
+      session_id: 'session-1',
+      job_id: 'job-1',
+      current_step: 3,
+      tops: ['Haushalt'],
+      transcript: [
+        { speaker: 'SPEAKER_00', text: 'Der Haushalt wird beraten.', start: 0, end: 2 },
+      ],
+      assignments: [0],
+      speaker_names: { SPEAKER_00: 'SPEAKER_00' },
+      summaries: { 0: 'Der Haushalt wurde serverseitig zusammengefasst.' },
+      summary_reviews: {},
+      skipped_assignment: false,
+      audio_url: '/api/audio/job-1',
+      ...overrides,
+    },
+    job: {
+      job_id: 'job-1',
+      status: 'completed',
+      progress: 100,
+      message: 'Fertig',
+      transcript: [
+        { speaker: 'SPEAKER_00', text: 'Der Haushalt wird beraten.', start: 0, end: 2 },
+      ],
+      audio_url: '/api/audio/job-1',
+    },
+    speaker_observations: [],
+    summary_reviews: overrides.summary_reviews ?? {},
+    warnings,
+  };
+}
+
+async function uploadAndStart(user = userEvent.setup()) {
+  const { container } = render(<App />);
+  const input = container.querySelector<HTMLInputElement>('input[type="file"][accept="audio/*"]');
+  await user.upload(input!, new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
+  await user.click(screen.getByRole('button', { name: /automatisch verarbeiten/i }));
+  return { container };
+}
+
+describe('App pipeline flow', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
     vi.mocked(checkBackendHealth).mockResolvedValue(true);
     vi.mocked(saveSession).mockResolvedValue({
       session_id: 'session-1',
-      tops: ['Begruessung'],
+      tops: ['Haushalt'],
       transcript: [],
       assignments: [],
       speaker_names: {},
       summaries: {},
       skipped_assignment: false,
     });
+    vi.mocked(startPipeline).mockResolvedValue(startedPipeline);
+    vi.mocked(pollPipeline).mockImplementation(async (_pipelineId, onStatus) => {
+      onStatus?.({
+        ...startedPipeline,
+        status: 'processing',
+        stage: 'transcribe',
+        progress: 25,
+      });
+      onStatus?.({
+        ...startedPipeline,
+        status: 'processing',
+        stage: 'summarize',
+        progress: 82,
+      });
+      return completedPipeline;
+    });
+    vi.mocked(getPipelineResult).mockResolvedValue(pipelineResult());
+    vi.mocked(loadSession).mockResolvedValue(pipelineResult().session);
     vi.mocked(startTranscription).mockResolvedValue({
-      job_id: 'job-1',
+      job_id: 'legacy-job',
       status: 'pending',
       progress: 0,
       message: 'Gestartet',
     });
     vi.mocked(pollTranscription).mockResolvedValue({
-      job_id: 'job-1',
+      job_id: 'legacy-job',
       status: 'completed',
       progress: 100,
       message: 'Fertig',
       transcript: [
-        { speaker: 'SPEAKER_00', text: 'Kommen wir zu TOP 1 Haushalt.', start: 0, end: 2 },
-        { speaker: 'SPEAKER_01', text: 'Der Haushalt wird beraten.', start: 3, end: 5 },
+        { speaker: 'SPEAKER_00', text: 'Klassischer Fallback.', start: 0, end: 1 },
       ],
     });
+    vi.mocked(detectAgenda).mockRejectedValue(new Error('Agenda nicht verfügbar'));
     vi.mocked(generateSummary).mockResolvedValue({
-      summary: 'Gesamtes Gespräch zusammengefasst.',
+      summary: 'Fallback-Zusammenfassung.',
       durationSeconds: 1,
       structured: null,
       sourceLinks: [],
@@ -66,160 +158,92 @@ describe('App session restore', () => {
     });
   });
 
-  it('loads the last backend session from the restore action', async () => {
+  it('starts the end-to-end pipeline from the upload UI', async () => {
+    await uploadAndStart();
+
+    await waitFor(() => {
+      expect(startPipeline).toHaveBeenCalledWith(
+        expect.any(File),
+        expect.objectContaining({
+          sessionId: 'session-1',
+          tops: ['', '', ''],
+          pdfFile: null,
+          model: expect.any(String),
+        })
+      );
+    });
+  });
+
+  it('polls status and offers the direct protocol path for safe results', async () => {
+    await uploadAndStart();
+
+    await waitFor(() => {
+      expect(pollPipeline).toHaveBeenCalledWith('pipeline-1', expect.any(Function));
+    });
+    expect(await screen.findByRole('button', { name: /direkt zum protokoll/i })).toBeInTheDocument();
+  });
+
+  it('loads the completed result into app state without regenerating summaries', async () => {
     const user = userEvent.setup();
-    localStorage.setItem('active-session-id', 'session-1');
-    vi.mocked(loadSession).mockResolvedValue({
-      session_id: 'session-1',
-      job_id: 'job-1',
-      current_step: 3,
-      tops: ['Begruessung'],
-      transcript: [
-        {
-          speaker: 'SPEAKER_00',
-          text: 'Korrigierter Willkommenstext',
-          start: 0,
-          end: 2,
+    await uploadAndStart(user);
+
+    await user.click(await screen.findByRole('button', { name: /direkt zum protokoll/i }));
+
+    expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
+    expect(generateSummary).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the legacy flow when the pipeline fails', async () => {
+    vi.mocked(startPipeline).mockRejectedValue(new Error('Pipeline nicht erreichbar'));
+
+    await uploadAndStart();
+
+    expect(await screen.findByText('Fallback-Zusammenfassung.')).toBeInTheDocument();
+    expect(startTranscription).toHaveBeenCalledWith(expect.any(File), 'session-1');
+  });
+
+  it('keeps the review step when automatic generation has uncertain assignments', async () => {
+    vi.mocked(getPipelineResult).mockResolvedValue(
+      pipelineResult({
+        tops: ['Haushalt', 'Schulbau'],
+        transcript: [
+          { speaker: 'SPEAKER_00', text: 'Haushalt.', start: 0, end: 1 },
+          { speaker: 'SPEAKER_01', text: 'Vielleicht Schulbau.', start: 2, end: 3 },
+        ],
+        assignments: [0, null],
+        summaries: {
+          0: 'Haushalt wurde zusammengefasst.',
+          1: 'Schulbau wurde zusammengefasst.',
         },
-      ],
-      assignments: [0],
-      speaker_names: { SPEAKER_00: 'Alice' },
-      summaries: { 0: 'Die Sitzung wurde fortgesetzt.' },
-      skipped_assignment: false,
-      audio_url: '/api/audio/job-1',
+      })
+    );
+
+    await uploadAndStart();
+
+    expect(await screen.findByText('Automatisch erkannte Segmente')).toBeInTheDocument();
+    expect(screen.getByText('1 von 2 Zeilen zugeordnet')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /direkt zum protokoll/i })).not.toBeInTheDocument();
+  });
+
+  it('resumes an active pipeline after reload and applies the finished result', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('active-pipeline-id', 'pipeline-1');
+    vi.mocked(getPipelineStatus).mockResolvedValue({
+      ...startedPipeline,
+      status: 'processing',
+      stage: 'agenda_detect',
+      progress: 72,
     });
 
     render(<App />);
-
     await user.click(
       await screen.findByRole('button', { name: /letzte sitzung fortsetzen/i })
     );
 
     await waitFor(() => {
-      expect(loadSession).toHaveBeenCalledWith('session-1');
+      expect(getPipelineStatus).toHaveBeenCalledWith('pipeline-1');
+      expect(pollPipeline).toHaveBeenCalledWith('pipeline-1', expect.any(Function));
     });
-    expect(await screen.findByText('Die Sitzung wurde fortgesetzt.')).toBeInTheDocument();
-    expect(screen.getByText(/Korrigierter Willkommenstext/)).toBeInTheDocument();
-    expect(screen.getByText('Sitzung aktiv')).toBeInTheDocument();
-  });
-
-  it('starts without initial TOPs and shows detected agenda assignments for review', async () => {
-    const user = userEvent.setup();
-    vi.mocked(detectAgenda).mockResolvedValue({
-      tops: ['Haushalt', 'Schulbau'],
-      assignments: [0, 1],
-      strategy: 'heuristic_transcript_fallback',
-      uncertain_count: 1,
-      segments: [
-        {
-          top_index: 0,
-          top_title: 'Haushalt',
-          start_index: 0,
-          end_index: 0,
-          confidence: 0.88,
-          uncertain: false,
-          transition_type: 'explicit',
-          reason: 'Explizite TOP-Ankündigung im Transkript.',
-          evidence_index: 0,
-          evidence_text: 'Kommen wir zu TOP 1 Haushalt.',
-        },
-        {
-          top_index: 1,
-          top_title: 'Schulbau',
-          start_index: 1,
-          end_index: 1,
-          confidence: 0.5,
-          uncertain: true,
-          transition_type: 'inferred',
-          reason: 'Grenze wurde geschätzt.',
-          evidence_index: 1,
-          evidence_text: 'Der Haushalt wird beraten.',
-        },
-      ],
-    });
-
-    const { container } = render(<App />);
-    const input = container.querySelector<HTMLInputElement>('input[type="file"][accept="audio/*"]');
-    await user.upload(input!, new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
-    await user.click(screen.getByRole('button', { name: /transkription starten/i }));
-
-    expect(await screen.findByText('Automatisch erkannte Segmente')).toBeInTheDocument();
-    expect(screen.getByText(/TOP 1: Haushalt/i)).toBeInTheDocument();
-    expect(screen.getAllByText(/unsicher/i).length).toBeGreaterThan(0);
-    expect(detectAgenda).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tops: [],
-        transcript: expect.any(Array),
-      })
-    );
-  });
-
-  it('runs agenda detection with known TOPs and auto-applies assignments for review', async () => {
-    const user = userEvent.setup();
-    vi.mocked(detectAgenda).mockResolvedValue({
-      tops: ['Begruessung', 'Haushalt'],
-      assignments: [0, 1],
-      strategy: 'known_agenda_heuristic',
-      uncertain_count: 0,
-      segments: [
-        {
-          top_index: 0,
-          top_title: 'Begruessung',
-          start_index: 0,
-          end_index: 0,
-          confidence: 0.72,
-          uncertain: false,
-          transition_type: 'inferred',
-          reason: 'Beginn des Transkripts.',
-          evidence_index: 0,
-          evidence_text: 'Kommen wir zu TOP 1 Haushalt.',
-        },
-        {
-          top_index: 1,
-          top_title: 'Haushalt',
-          start_index: 1,
-          end_index: 1,
-          confidence: 0.91,
-          uncertain: false,
-          transition_type: 'keyword',
-          reason: 'TOP-Begriff erkannt.',
-          evidence_index: 1,
-          evidence_text: 'Der Haushalt wird beraten.',
-        },
-      ],
-    });
-
-    const { container } = render(<App />);
-    await user.type(screen.getByPlaceholderText('TOP 1 eingeben...'), 'Begruessung');
-    await user.type(screen.getByPlaceholderText('TOP 2 eingeben...'), 'Haushalt');
-    const input = container.querySelector<HTMLInputElement>('input[type="file"][accept="audio/*"]');
-    await user.upload(input!, new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
-    await user.click(screen.getByRole('button', { name: /transkription starten/i }));
-
-    expect(await screen.findByText('Automatisch erkannte Segmente')).toBeInTheDocument();
-    expect(screen.getByText('2 von 2 Zeilen zugeordnet')).toBeInTheDocument();
-    expect(detectAgenda).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tops: ['Begruessung', 'Haushalt'],
-        transcript: expect.any(Array),
-      })
-    );
-  });
-
-  it('falls back to the full conversation flow when agenda detection fails without TOPs', async () => {
-    const user = userEvent.setup();
-    vi.mocked(detectAgenda).mockRejectedValue(new Error('Dienst nicht verfügbar'));
-
-    const { container } = render(<App />);
-    const input = container.querySelector<HTMLInputElement>('input[type="file"][accept="audio/*"]');
-    await user.upload(input!, new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
-    await user.click(screen.getByRole('button', { name: /transkription starten/i }));
-
-    expect(await screen.findByText('Gesamtes Gespräch zusammengefasst.')).toBeInTheDocument();
-    expect(generateSummary).toHaveBeenCalledWith(
-      'Gesamtes Gespräch',
-      expect.any(Array),
-      expect.any(Object)
-    );
+    expect(await screen.findByRole('button', { name: /direkt zum protokoll/i })).toBeInTheDocument();
   });
 });

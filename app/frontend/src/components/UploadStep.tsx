@@ -6,6 +6,8 @@ export default function UploadStep({
   onNext,
   audioFile,
   setAudioFile,
+  pdfFile,
+  setPdfFile,
   tops,
   setTops,
   llmSettings,
@@ -69,6 +71,7 @@ export default function UploadStep({
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const file = e.dataTransfer.files[0];
       if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+        setPdfFile(file);
         await extractTopsFromFile(file);
       }
     }
@@ -76,7 +79,9 @@ export default function UploadStep({
 
   const handlePdfFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      await extractTopsFromFile(e.target.files[0]);
+      const file = e.target.files[0];
+      setPdfFile(file);
+      await extractTopsFromFile(file);
     }
     // Reset the input so the same file can be selected again
     e.target.value = '';
@@ -281,6 +286,25 @@ export default function UploadStep({
             )}
           </div>
 
+          {pdfFile && !isExtractingTops && (
+            <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
+              <span className="truncate text-gray-700">
+                PDF für die automatische Verarbeitung: {pdfFile.name}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setPdfFile(null);
+                  setExtractionError(null);
+                  setExtractedCount(null);
+                }}
+                className="shrink-0 text-gray-500 hover:text-red-600"
+              >
+                Entfernen
+              </button>
+            </div>
+          )}
+
           {/* Extraction feedback */}
           {extractionError && (
             <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
@@ -312,6 +336,9 @@ export default function UploadStep({
             <span className="text-gray-400 text-sm">oder manuell eingeben</span>
             <div className="flex-1 h-px bg-gray-200"></div>
           </div>
+          <p className="mt-3 text-sm text-gray-500">
+            TOPs können auch automatisch aus dem Transkript erkannt werden.
+          </p>
         </div>
 
         {/* TOPs List */}
@@ -386,7 +413,7 @@ export default function UploadStep({
               : 'bg-gray-200 text-gray-400 cursor-not-allowed'
           }`}
         >
-          Transkription starten
+          Automatisch verarbeiten
           <span>→</span>
         </button>
       </div>

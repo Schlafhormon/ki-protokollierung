@@ -41,6 +41,7 @@ export default function AssignmentStep({
   speakerNames,
   setSpeakerNames,
   sessionId,
+  hasSummaries = false,
 }: AssignmentStepProps) {
   const [selectedTop, setSelectedTop] = useState(0);
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
@@ -822,7 +823,7 @@ export default function AssignmentStep({
               : 'bg-gray-200 text-gray-400 cursor-not-allowed'
           }`}
         >
-          Zusammenfassungen erstellen
+          {hasSummaries ? 'Zum Protokoll' : 'Zusammenfassungen erstellen'}
           <span>→</span>
         </button>
       </div>

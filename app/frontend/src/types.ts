@@ -63,6 +63,47 @@ export interface TranscriptionJob {
   error?: string;
 }
 
+export type PipelineStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
+
+export type PipelineStage =
+  | 'upload'
+  | 'transcribe'
+  | 'speaker_match'
+  | 'agenda_detect'
+  | 'summarize'
+  | 'ready_for_review'
+  | string;
+
+export interface PipelineJob {
+  pipeline_id: string;
+  session_id?: string | null;
+  transcription_job_id?: string | null;
+  status: PipelineStatus;
+  stage: PipelineStage;
+  progress: number;
+  warnings: string[];
+  error?: string | null;
+  created_at?: number | null;
+  updated_at?: number | null;
+}
+
+export interface PipelineStartOptions {
+  sessionId?: string | null;
+  tops?: string[];
+  pdfFile?: File | null;
+  model?: string;
+  systemPrompt?: string;
+}
+
+export interface PipelineResultResponse {
+  pipeline: PipelineJob;
+  session: SessionResponse;
+  job?: TranscriptionJob | null;
+  speaker_observations?: SpeakerObservation[];
+  summary_reviews?: Record<number, SummaryReview> | Record<string, SummaryReview>;
+  warnings: string[];
+}
+
 export interface SessionSavePayload {
   session_id?: string | null;
   job_id?: string | null;
@@ -208,6 +249,8 @@ export interface UploadStepProps {
   onNext: () => void;
   audioFile: File | null;
   setAudioFile: (file: File | null) => void;
+  pdfFile: File | null;
+  setPdfFile: (file: File | null) => void;
   tops: string[];
   setTops: (tops: string[]) => void;
   llmSettings?: LLMSettings;
@@ -218,6 +261,9 @@ export interface UploadStepProps {
 export interface ProcessingStepProps {
   progress: number;
   status: string;
+  pipeline?: PipelineJob | null;
+  canCancel?: boolean;
+  onCancel?: () => void;
 }
 
 export interface AssignmentStepProps {
@@ -235,6 +281,7 @@ export interface AssignmentStepProps {
   speakerNames: Record<string, string>;
   setSpeakerNames: (names: Record<string, string>) => void;
   sessionId?: string | null;
+  hasSummaries?: boolean;
 }
 
 export interface SummaryStepProps {

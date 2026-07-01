@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   archiveSpeakerProfile,
+  getPipelineResult,
+  pollPipeline,
   confirmSpeakerObservation,
   createManualSpeakerObservation,
   createSpeakerProfile,
@@ -11,6 +13,7 @@ import {
   loadSession,
   reportSessionComplete,
   saveSession,
+  startPipeline,
   startTranscription,
   updateSpeakerProfile,
 } from './api';
@@ -21,6 +24,7 @@ describe('api session client', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -48,6 +52,118 @@ describe('api session client', () => {
       body,
     });
     expect(body.get('session_id')).toBe('session-1');
+  });
+
+  it('starts a pipeline with audio, optional PDF, known TOPs and model settings', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          pipeline_id: 'pipeline-1',
+          session_id: 'session-1',
+          transcription_job_id: 'job-1',
+          status: 'pending',
+          stage: 'upload',
+          progress: 5,
+          warnings: [],
+        }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await startPipeline(new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }), {
+      sessionId: 'session-1',
+      pdfFile: new File(['pdf'], 'agenda.pdf', { type: 'application/pdf' }),
+      tops: ['Begruessung', 'Haushalt'],
+      model: 'qwen3:8b',
+      systemPrompt: 'Prompt',
+    });
+
+    const body = fetchMock.mock.calls[0]![1]!.body as FormData;
+    expect(fetchMock).toHaveBeenCalledWith('/api/pipeline/start', {
+      method: 'POST',
+      body,
+    });
+    expect(body.get('session_id')).toBe('session-1');
+    expect(body.get('tops')).toBe(JSON.stringify(['Begruessung', 'Haushalt']));
+    expect(body.get('model')).toBe('qwen3:8b');
+    expect(body.get('system_prompt')).toBe('Prompt');
+    expect(body.get('audio')).toBeInstanceOf(File);
+    expect(body.get('pdf')).toBeInstanceOf(File);
+  });
+
+  it('polls pipeline status until completion', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            pipeline_id: 'pipeline-1',
+            status: 'processing',
+            stage: 'transcribe',
+            progress: 25,
+            warnings: [],
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            pipeline_id: 'pipeline-1',
+            status: 'completed',
+            stage: 'ready_for_review',
+            progress: 100,
+            warnings: [],
+          }),
+      });
+    vi.stubGlobal('fetch', fetchMock);
+    const updates: string[] = [];
+
+    const promise = pollPipeline('pipeline-1', (status) => updates.push(status.stage));
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await promise;
+
+    expect(result.status).toBe('completed');
+    expect(updates).toEqual(['transcribe', 'ready_for_review']);
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      '/api/pipeline/pipeline-1',
+      '/api/pipeline/pipeline-1',
+    ]);
+    vi.useRealTimers();
+  });
+
+  it('loads a completed pipeline result', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          pipeline: {
+            pipeline_id: 'pipeline-1',
+            status: 'completed',
+            stage: 'ready_for_review',
+            progress: 100,
+          },
+          session: {
+            session_id: 'session-1',
+            tops: ['Haushalt'],
+            transcript: [{ speaker: 'SPEAKER_00', text: 'Hallo', start: 0, end: 1 }],
+            assignments: [0],
+            speaker_names: {},
+            summaries: { 0: 'Zusammenfassung' },
+            skipped_assignment: false,
+          },
+          warnings: ['Hinweis'],
+        }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await getPipelineResult('pipeline-1');
+
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/pipeline/pipeline-1/result');
+    expect(result.pipeline.warnings).toEqual([]);
+    expect(result.warnings).toEqual(['Hinweis']);
+    expect(result.session.summaries[0]).toBe('Zusammenfassung');
   });
 
   it('saves and loads persisted session state', async () => {
