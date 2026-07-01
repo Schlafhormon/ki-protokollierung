@@ -6,6 +6,7 @@ import {
   confirmSpeakerObservation,
   createManualSpeakerObservation,
   createSpeakerProfile,
+  deleteSpeakerProfileEmbeddings,
   detectAgenda,
   exportProtocol,
   listSpeakerObservations,
@@ -52,6 +53,7 @@ describe('api session client', () => {
       body,
     });
     expect(body.get('session_id')).toBe('session-1');
+    expect(body.get('remember_speakers')).toBe('false');
   });
 
   it('starts a pipeline with audio, optional PDF, known TOPs and model settings', async () => {
@@ -76,6 +78,7 @@ describe('api session client', () => {
       tops: ['Begruessung', 'Haushalt'],
       model: 'qwen3:8b',
       systemPrompt: 'Prompt',
+      rememberSpeakers: true,
     });
 
     const body = fetchMock.mock.calls[0]![1]!.body as FormData;
@@ -87,6 +90,7 @@ describe('api session client', () => {
     expect(body.get('tops')).toBe(JSON.stringify(['Begruessung', 'Haushalt']));
     expect(body.get('model')).toBe('qwen3:8b');
     expect(body.get('system_prompt')).toBe('Prompt');
+    expect(body.get('remember_speakers')).toBe('true');
     expect(body.get('audio')).toBeInstanceOf(File);
     expect(body.get('pdf')).toBeInstanceOf(File);
   });
@@ -409,6 +413,14 @@ describe('api session client', () => {
         ok: true,
         json: () =>
           Promise.resolve({
+            profile_id: 'alice',
+            deleted_count: 2,
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
             profile_id: 'bob',
             display_name: 'Bob Global',
             scope: 'committee-1',
@@ -460,6 +472,7 @@ describe('api session client', () => {
     await listSpeakerProfiles({ includeArchived: true });
     await updateSpeakerProfile('alice', { displayName: 'Alice Lokal' });
     await archiveSpeakerProfile('alice');
+    await deleteSpeakerProfileEmbeddings('alice');
     await createSpeakerProfile({ displayName: 'Bob Global', scope: 'committee-1' });
     await listSpeakerObservations('session-1');
     await confirmSpeakerObservation('session-1', 7, { profileId: 'alice' });
@@ -479,25 +492,27 @@ describe('api session client', () => {
     });
     expect(fetchMock.mock.calls[2]![0]).toBe('/api/speaker-profiles/alice');
     expect(fetchMock.mock.calls[2]![1]!.method).toBe('DELETE');
-    expect(fetchMock.mock.calls[3]![0]).toBe('/api/speaker-profiles');
-    expect(fetchMock.mock.calls[3]![1]!.method).toBe('POST');
-    expect(JSON.parse(fetchMock.mock.calls[3]![1]!.body as string)).toMatchObject({
+    expect(fetchMock.mock.calls[3]![0]).toBe('/api/speaker-profiles/alice/embeddings');
+    expect(fetchMock.mock.calls[3]![1]!.method).toBe('DELETE');
+    expect(fetchMock.mock.calls[4]![0]).toBe('/api/speaker-profiles');
+    expect(fetchMock.mock.calls[4]![1]!.method).toBe('POST');
+    expect(JSON.parse(fetchMock.mock.calls[4]![1]!.body as string)).toMatchObject({
       display_name: 'Bob Global',
       scope: 'committee-1',
     });
-    expect(fetchMock.mock.calls[4]![0]).toBe(
+    expect(fetchMock.mock.calls[5]![0]).toBe(
       '/api/sessions/session-1/speaker-observations'
     );
-    expect(fetchMock.mock.calls[5]![0]).toBe(
+    expect(fetchMock.mock.calls[6]![0]).toBe(
       '/api/sessions/session-1/speaker-observations/7/confirm'
     );
-    expect(JSON.parse(fetchMock.mock.calls[5]![1]!.body as string)).toMatchObject({
+    expect(JSON.parse(fetchMock.mock.calls[6]![1]!.body as string)).toMatchObject({
       profile_id: 'alice',
     });
-    expect(fetchMock.mock.calls[6]![0]).toBe(
+    expect(fetchMock.mock.calls[7]![0]).toBe(
       '/api/sessions/session-1/speaker-observations/manual'
     );
-    expect(JSON.parse(fetchMock.mock.calls[6]![1]!.body as string)).toMatchObject({
+    expect(JSON.parse(fetchMock.mock.calls[7]![1]!.body as string)).toMatchObject({
       local_speaker_id: 'SPEAKER_00',
       profile_id: 'alice',
       observation_id: 7,

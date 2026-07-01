@@ -134,6 +134,33 @@ Runtime state is stored in local bind mounts:
 - `./uploads` for retained audio playback after session restore
 - `./data` for the SQLite session database and optional telemetry backups
 
+### Lokale Datenschutzdaten / Local Privacy Data
+
+Die Anwendung verarbeitet Audio, Transkripte und Sprecherinformationen lokal in
+der Docker-Umgebung. In `./data/sessions.sqlite3` können gespeichert werden:
+
+- Sitzungszustand, TOPs, Zuordnungen, Zusammenfassungen und Export-Metadaten
+- lokale Sprecherbenennungen pro Sitzung
+- lokale Job-Sprecher-Embeddings für Review-Funktionen einer Sitzung
+- globale Sprecherprofile und globale Sprecher-Embeddings nur nach Opt-in
+  "Sprecher dauerhaft merken" oder nach einer ausdrücklichen Aktion wie
+  "Vorschlag übernehmen", "Neues Profil merken" oder "Bestehendem Profil
+  zuordnen"
+
+Das Opt-in "Sprecher dauerhaft merken" ist standardmäßig aus. Ohne diese
+Auswahl werden bei der automatischen Verarbeitung keine gespeicherten
+Sprecherprofile vorgeschlagen. Lokale Sprecher können trotzdem in der aktuellen
+Sitzung benannt werden.
+
+Gespeicherte Sprecherprofile lassen sich in der Sprecherprüfung verwalten:
+
+- "Profil archivieren" entfernt das Profil aus künftigen Vorschlägen und löst
+  gespeicherte Observations vom Profilnamen.
+- "Embeddings löschen" entfernt die global gespeicherten biometrischen
+  Referenz-Embeddings eines Profils.
+- Archivierte Profile werden standardmäßig nicht mehr in der Profilliste und
+  nicht mehr als automatische Sprecher-Vorschläge verwendet.
+
 ---
 
 ### Step 4: Wait for Download
@@ -263,6 +290,8 @@ the container image.
 - Audio-Dateien, Audiodaten oder Dateinamen / audio files, audio data or filenames
 - Inhalte von Transkripten, TOPs oder Protokollen / transcript, agenda item or protocol content
 - Namen, Sprecherzuordnungen oder andere Personenangaben / names, speaker mappings or other personal data
+- Sprecherprofile oder Sprecher-Embeddings / speaker profiles or speaker embeddings
+- TOP-Titel / agenda item titles
 - System-Prompt-Inhalte oder Prompt-Auszüge / system prompt content or prompt excerpts
 
 ### Lokale Backups / Local Backups
@@ -488,6 +517,10 @@ BACKEND_GPU_IMAGE=ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:v
 | `/api/summarize`                 | POST   | Generate summary for a TOP segment   |
 | `/api/extract-tops`              | POST   | Extract TOPs from PDF                |
 | `/api/export`                    | POST   | Export minutes as TXT, DOCX or PDF   |
+| `/api/speaker-profiles`          | GET/POST | List or create speaker profiles after explicit action |
+| `/api/speaker-profiles/{profile_id}` | PUT/DELETE | Rename or archive a speaker profile |
+| `/api/speaker-profiles/{profile_id}/embeddings` | DELETE | Delete persisted global speaker embeddings |
+| `/api/sessions/{session_id}/speaker-observations` | GET | List reviewable speaker observations |
 | `/api/telemetry/session-complete`| POST   | Report opt-in aggregate telemetry    |
 
 ### Technology Stack

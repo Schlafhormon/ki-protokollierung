@@ -13,6 +13,8 @@ export default function UploadStep({
   llmSettings,
   telemetryOptIn,
   setTelemetryOptIn,
+  rememberSpeakers,
+  setRememberSpeakers,
 }: UploadStepProps) {
   const audioInputRef = useRef<HTMLInputElement>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
@@ -371,6 +373,34 @@ export default function UploadStep({
           <span className="text-lg">+</span>
           TOP hinzufügen
         </button>
+      </div>
+
+      {/* Speaker Memory Opt-in */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={rememberSpeakers}
+            onChange={(event) => setRememberSpeakers(event.target.checked)}
+            className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+          <span>
+            <span className="block text-sm font-medium text-gray-900">
+              Sprecher dauerhaft merken
+            </span>
+            <span className="block text-sm text-gray-600 mt-1">
+              Aus, bis Sie diese Option aktivieren. Wenn aktiv, vergleicht die
+              automatische Verarbeitung lokale Sprecher mit gespeicherten
+              Profilen und zeigt überprüfbare Vorschläge an.
+            </span>
+            <span className="block text-sm text-gray-600 mt-2">
+              Lokale Sprecher können auch ohne diese Option in der aktuellen
+              Sitzung benannt werden. Dauerhafte Profile und Embeddings werden
+              nur nach dieser Auswahl oder nach einer ausdrücklichen
+              Sprecheraktion gespeichert.
+            </span>
+          </span>
+        </label>
       </div>
 
       {/* Telemetry Opt-in */}

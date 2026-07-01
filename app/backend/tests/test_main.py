@@ -196,7 +196,10 @@ def test_transcription_creates_reviewable_speaker_suggestions(
     with TestClient(main.app) as client:
         response = client.post(
             "/api/transcribe",
-            data={"session_id": "session-speaker-match"},
+            data={
+                "session_id": "session-speaker-match",
+                "remember_speakers": "true",
+            },
             files={"audio": ("meeting.mp3", b"audio", "audio/mpeg")},
         )
         assert response.status_code == 200
@@ -224,6 +227,124 @@ def test_transcription_creates_reviewable_speaker_suggestions(
         session_id="session-speaker-match",
     )
     assert observations[0]["status"] == "suggested"
+
+
+def test_transcription_does_not_suggest_global_speakers_without_opt_in(
+    tmp_path, monkeypatch
+):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+    monkeypatch.setenv("SPEAKER_EMBEDDING_MODEL", "test-embedding")
+    profile = persistence.create_speaker_profile("Alice Global", profile_id="alice")
+    persistence.save_speaker_embedding(
+        profile["profile_id"],
+        [1.0, 0.0],
+        model_name="test-embedding",
+        quality=1.0,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "transcribe_audio",
+        lambda file_path, models, progress_callback=None: SimpleNamespace(
+            transcript=[
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Hallo",
+                    "start": 0.0,
+                    "end": 1.0,
+                }
+            ],
+            audio_duration_seconds=1.0,
+            speaker_embeddings=[
+                LocalSpeakerEmbedding(
+                    local_speaker_id="SPEAKER_00",
+                    embedding=[1.0, 0.0],
+                    model_name="test-embedding",
+                    quality=0.9,
+                )
+            ],
+        ),
+    )
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/transcribe",
+            data={"session_id": "session-speaker-match"},
+            files={"audio": ("meeting.mp3", b"audio", "audio/mpeg")},
+        )
+        job_id = response.json()["job_id"]
+
+        assert wait_until(
+            lambda: client.get(f"/api/transcribe/{job_id}").json()["status"]
+            == "completed"
+        )
+        body = client.get(f"/api/transcribe/{job_id}").json()
+
+    assert body["speaker_suggestions"] in (None, [])
+    assert persistence.load_speaker_observations(
+        job_id=job_id,
+        session_id="session-speaker-match",
+    ) == []
+
+
+def test_archived_speaker_profiles_are_not_suggested(tmp_path, monkeypatch):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+    monkeypatch.setenv("SPEAKER_EMBEDDING_MODEL", "test-embedding")
+    profile = persistence.create_speaker_profile("Alice Global", profile_id="alice")
+    persistence.save_speaker_embedding(
+        profile["profile_id"],
+        [1.0, 0.0],
+        model_name="test-embedding",
+        quality=1.0,
+    )
+    persistence.archive_speaker_profile(profile["profile_id"])
+
+    monkeypatch.setattr(
+        main,
+        "transcribe_audio",
+        lambda file_path, models, progress_callback=None: SimpleNamespace(
+            transcript=[
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Hallo",
+                    "start": 0.0,
+                    "end": 1.0,
+                }
+            ],
+            audio_duration_seconds=1.0,
+            speaker_embeddings=[
+                LocalSpeakerEmbedding(
+                    local_speaker_id="SPEAKER_00",
+                    embedding=[1.0, 0.0],
+                    model_name="test-embedding",
+                    quality=0.9,
+                )
+            ],
+        ),
+    )
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/transcribe",
+            data={
+                "session_id": "session-speaker-match",
+                "remember_speakers": "true",
+            },
+            files={"audio": ("meeting.mp3", b"audio", "audio/mpeg")},
+        )
+        job_id = response.json()["job_id"]
+
+        assert wait_until(
+            lambda: client.get(f"/api/transcribe/{job_id}").json()["status"]
+            == "completed"
+        )
+        body = client.get(f"/api/transcribe/{job_id}").json()
+
+    assert body["speaker_suggestions"] in (None, [])
+    assert persistence.load_speaker_observations(
+        job_id=job_id,
+        session_id="session-speaker-match",
+    ) == []
 
 
 def test_cancel_pending_job_marks_cancelled_and_cleans_upload(tmp_path, monkeypatch):

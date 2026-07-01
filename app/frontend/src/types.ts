@@ -93,6 +93,7 @@ export interface PipelineStartOptions {
   pdfFile?: File | null;
   model?: string;
   systemPrompt?: string;
+  rememberSpeakers?: boolean;
 }
 
 export interface PipelineResultResponse {
@@ -256,6 +257,8 @@ export interface UploadStepProps {
   llmSettings?: LLMSettings;
   telemetryOptIn: boolean;
   setTelemetryOptIn: (enabled: boolean) => void;
+  rememberSpeakers: boolean;
+  setRememberSpeakers: (enabled: boolean) => void;
 }
 
 export interface ProcessingStepProps {
@@ -282,6 +285,7 @@ export interface AssignmentStepProps {
   setSpeakerNames: (names: Record<string, string>) => void;
   sessionId?: string | null;
   hasSummaries?: boolean;
+  rememberSpeakers?: boolean;
 }
 
 export interface SummaryStepProps {

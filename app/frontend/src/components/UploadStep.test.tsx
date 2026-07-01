@@ -20,6 +20,8 @@ const defaultProps: UploadStepProps = {
   llmSettings: { model: 'qwen3:8b', systemPrompt: '' },
   telemetryOptIn: false,
   setTelemetryOptIn: vi.fn(),
+  rememberSpeakers: false,
+  setRememberSpeakers: vi.fn(),
 };
 
 function renderUploadStep(overrides: Partial<UploadStepProps> = {}) {
@@ -57,6 +59,8 @@ describe('UploadStep', () => {
         setPdfFile={vi.fn()}
         telemetryOptIn={false}
         setTelemetryOptIn={vi.fn()}
+        rememberSpeakers={false}
+        setRememberSpeakers={vi.fn()}
       />,
     );
 
@@ -98,5 +102,21 @@ describe('UploadStep', () => {
     }));
 
     expect(setTelemetryOptIn).toHaveBeenCalledWith(true);
+  });
+
+  it('keeps persistent speaker memory off until the user opts in', async () => {
+    const user = userEvent.setup();
+    const setRememberSpeakers = vi.fn();
+    renderUploadStep({ setRememberSpeakers });
+
+    const checkbox = screen.getByRole('checkbox', {
+      name: /Sprecher dauerhaft merken/i,
+    });
+    expect(checkbox).not.toBeChecked();
+    expect(screen.getByText(/Dauerhafte Profile und Embeddings/i)).toBeInTheDocument();
+
+    await user.click(checkbox);
+
+    expect(setRememberSpeakers).toHaveBeenCalledWith(true);
   });
 });

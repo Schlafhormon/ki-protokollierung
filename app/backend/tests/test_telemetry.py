@@ -135,6 +135,23 @@ def test_session_complete_sends_only_aggregate_payload_after_opt_in(monkeypatch)
         "summarization_duration_seconds": 3.5,
         "protocol_char_count": 120,
     }
+    sent_payload = {
+        **(collector.whisper_config or {}),
+        **(collector.transcription_metrics or {}),
+        **(collector.summarization_metrics or {}),
+    }
+    forbidden_fields = {
+        "speaker_names",
+        "speaker_profiles",
+        "speaker_embeddings",
+        "embeddings",
+        "transcript",
+        "protocol",
+        "top_titles",
+        "tops",
+        "system_prompt",
+    }
+    assert forbidden_fields.isdisjoint(sent_payload)
 
 
 def test_telemetry_event_excludes_prompt_content_and_free_form_error_text():

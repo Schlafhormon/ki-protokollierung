@@ -3,6 +3,7 @@ import {
   archiveSpeakerProfile,
   confirmSpeakerObservation,
   createManualSpeakerObservation,
+  deleteSpeakerProfileEmbeddings,
   listSpeakerObservations,
   listSpeakerProfiles,
   rejectSpeakerObservation,
@@ -16,6 +17,7 @@ interface SpeakerNameEditorProps {
   speakerNames: Record<string, string>;
   setSpeakerNames: (names: Record<string, string>) => void;
   sessionId?: string | null;
+  rememberSpeakers?: boolean;
 }
 
 type ReviewStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -48,6 +50,7 @@ export default function SpeakerNameEditor({
   speakerNames,
   setSpeakerNames,
   sessionId,
+  rememberSpeakers = false,
 }: SpeakerNameEditorProps) {
   const speakerInfo = useMemo(() => {
     const speakers = new Map<string, string>();
@@ -75,6 +78,13 @@ export default function SpeakerNameEditor({
 
   useEffect(() => {
     if (!isExpanded || !sessionId) {
+      return;
+    }
+    if (!rememberSpeakers) {
+      setProfiles([]);
+      setObservations([]);
+      setReviewStatus('ready');
+      setReviewError(null);
       return;
     }
 
@@ -111,7 +121,7 @@ export default function SpeakerNameEditor({
     return () => {
       isCurrent = false;
     };
-  }, [isExpanded, sessionId]);
+  }, [isExpanded, sessionId, rememberSpeakers]);
 
   const suggestionsBySpeaker = useMemo(() => {
     const grouped = new Map<string, SpeakerObservation>();
@@ -192,7 +202,7 @@ export default function SpeakerNameEditor({
   };
 
   const handleConfirmSuggestion = (speakerId: string, suggestion: SpeakerObservation) => {
-    if (!sessionId) {
+    if (!sessionId || !rememberSpeakers) {
       return;
     }
     runSpeakerAction(
@@ -226,7 +236,7 @@ export default function SpeakerNameEditor({
   };
 
   const handleRememberNewProfile = (speakerId: string, suggestion?: SpeakerObservation) => {
-    if (!sessionId) {
+    if (!sessionId || !rememberSpeakers) {
       return;
     }
     const displayName = speakerNames[speakerId]?.trim();
@@ -247,7 +257,7 @@ export default function SpeakerNameEditor({
   };
 
   const handleAssignExistingProfile = (speakerId: string, suggestion?: SpeakerObservation) => {
-    if (!sessionId) {
+    if (!sessionId || !rememberSpeakers) {
       return;
     }
     const profileId = profileTargets[speakerId];
@@ -347,6 +357,25 @@ export default function SpeakerNameEditor({
     }
   };
 
+  const handleDeleteProfileEmbeddings = async () => {
+    if (!selectedProfile) {
+      return;
+    }
+    setReviewError(null);
+    try {
+      const result = await deleteSpeakerProfileEmbeddings(selectedProfile.profile_id);
+      setActionMessage(
+        result.deleted_count === 1
+          ? 'Ein Embedding wurde gelöscht.'
+          : `${result.deleted_count} Embeddings wurden gelöscht.`
+      );
+    } catch (error) {
+      setReviewError(
+        error instanceof Error ? error.message : 'Embeddings konnten nicht gelöscht werden'
+      );
+    }
+  };
+
   if (speakerInfo.length === 0) return null;
 
   return (
@@ -370,10 +399,9 @@ export default function SpeakerNameEditor({
       {isExpanded && (
         <div className="p-4 space-y-4 border-t border-gray-200">
           <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
-            Lokale Benennung wirkt nur in dieser Sitzung. Ein dauerhaftes
-            Sprecherprofil wird erst gespeichert, wenn Sie einen Vorschlag
-            übernehmen, ein neues Profil merken oder ein bestehendes Profil
-            zuordnen.
+            {rememberSpeakers
+              ? 'Lokale Benennung wirkt nur in dieser Sitzung. Ein dauerhaftes Sprecherprofil wird erst gespeichert, wenn Sie einen Vorschlag übernehmen, ein neues Profil merken oder ein bestehendes Profil zuordnen.'
+              : 'Lokale Benennung wirkt nur in dieser Sitzung. Dauerhafte Sprecherprofile sind ausgeschaltet und werden in diesem Durchlauf nicht vorgeschlagen oder gespeichert.'}
           </div>
 
           {sessionId && reviewStatus === 'loading' && (
@@ -450,95 +478,97 @@ export default function SpeakerNameEditor({
                   )}
                 </div>
 
-                <div className="pl-0 sm:pl-36 space-y-2">
-                  {suggestion ? (
-                    <div className="rounded-md border border-yellow-200 bg-yellow-50 p-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div>
-                          <div className="text-sm font-medium text-gray-900">
-                            Vorschlag: {suggestion.profile_display_name}
+                {rememberSpeakers && (
+                  <div className="pl-0 sm:pl-36 space-y-2">
+                    {suggestion ? (
+                      <div className="rounded-md border border-yellow-200 bg-yellow-50 p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <div className="text-sm font-medium text-gray-900">
+                              Vorschlag: {suggestion.profile_display_name}
+                            </div>
+                            <div className="text-xs text-gray-600">
+                              {formatConfidence(suggestion.confidence)}
+                            </div>
                           </div>
-                          <div className="text-xs text-gray-600">
-                            {formatConfidence(suggestion.confidence)}
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleConfirmSuggestion(id, suggestion)}
+                              disabled={isBusy}
+                              className="px-3 py-1.5 text-sm bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
+                            >
+                              Vorschlag übernehmen
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRejectSuggestion(suggestion)}
+                              disabled={isBusy}
+                              className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+                            >
+                              Ablehnen
+                            </button>
                           </div>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleConfirmSuggestion(id, suggestion)}
-                            disabled={isBusy}
-                            className="px-3 py-1.5 text-sm bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
-                          >
-                            Vorschlag übernehmen
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleRejectSuggestion(suggestion)}
-                            disabled={isBusy}
-                            className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
-                          >
-                            Ablehnen
-                          </button>
                         </div>
                       </div>
-                    </div>
-                  ) : (
-                    <div className="text-xs text-gray-500">
-                      Kein automatischer Profilvorschlag für diesen Sprecher.
-                    </div>
-                  )}
+                    ) : (
+                      <div className="text-xs text-gray-500">
+                        Kein automatischer Profilvorschlag für diesen Sprecher.
+                      </div>
+                    )}
 
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleRememberNewProfile(id, suggestion)}
-                      disabled={!sessionId || !currentName.trim() || isBusy}
-                      className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400"
-                    >
-                      Neues Profil merken
-                    </button>
-                    <select
-                      value={selectedTarget}
-                      onChange={(event) =>
-                        setProfileTargets({
-                          ...profileTargets,
-                          [id]: event.target.value,
-                        })
-                      }
-                      disabled={!sessionId || profiles.length === 0}
-                      aria-label={`${id} bestehendem Profil zuordnen`}
-                      className="px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none disabled:bg-gray-100"
-                    >
-                      <option value="">Gespeichertes Profil auswählen...</option>
-                      {profiles.map((profile) => (
-                        <option key={profile.profile_id} value={profile.profile_id}>
-                          {profile.display_name}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => handleAssignExistingProfile(id, suggestion)}
-                      disabled={!sessionId || !selectedTarget || isBusy}
-                      className="px-3 py-1.5 text-sm bg-gray-900 text-white rounded hover:bg-gray-700 disabled:bg-gray-200 disabled:text-gray-400"
-                    >
-                      Bestehendem Profil zuordnen
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleSessionOnly(id, suggestion)}
-                      disabled={isBusy}
-                      className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
-                    >
-                      Nur in dieser Sitzung benennen
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleRememberNewProfile(id, suggestion)}
+                        disabled={!sessionId || !currentName.trim() || isBusy}
+                        className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400"
+                      >
+                        Neues Profil merken
+                      </button>
+                      <select
+                        value={selectedTarget}
+                        onChange={(event) =>
+                          setProfileTargets({
+                            ...profileTargets,
+                            [id]: event.target.value,
+                          })
+                        }
+                        disabled={!sessionId || profiles.length === 0}
+                        aria-label={`${id} bestehendem Profil zuordnen`}
+                        className="px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none disabled:bg-gray-100"
+                      >
+                        <option value="">Gespeichertes Profil auswählen...</option>
+                        {profiles.map((profile) => (
+                          <option key={profile.profile_id} value={profile.profile_id}>
+                            {profile.display_name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => handleAssignExistingProfile(id, suggestion)}
+                        disabled={!sessionId || !selectedTarget || isBusy}
+                        className="px-3 py-1.5 text-sm bg-gray-900 text-white rounded hover:bg-gray-700 disabled:bg-gray-200 disabled:text-gray-400"
+                      >
+                        Bestehendem Profil zuordnen
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSessionOnly(id, suggestion)}
+                        disabled={isBusy}
+                        className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+                      >
+                        Nur in dieser Sitzung benennen
+                      </button>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             );
           })}
 
-          {sessionId && (
+          {sessionId && rememberSpeakers && (
             <div className="border-t border-gray-200 pt-4">
               <h3 className="text-sm font-medium text-gray-900 mb-2">
                 Gespeicherte Profile verwalten
@@ -583,6 +613,14 @@ export default function SpeakerNameEditor({
                     className="px-3 py-1.5 text-sm bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100 disabled:opacity-50"
                   >
                     Profil archivieren
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDeleteProfileEmbeddings}
+                    disabled={!selectedProfile}
+                    className="px-3 py-1.5 text-sm bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100 disabled:opacity-50"
+                  >
+                    Embeddings löschen
                   </button>
                 </div>
               )}

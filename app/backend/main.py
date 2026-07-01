@@ -56,9 +56,11 @@ from export_protocol import (
 )
 from telemetry import TelemetryCollector
 from persistence import (
+    anonymize_speaker_observations_for_profile,
     archive_speaker_profile,
     confirm_speaker_observation,
     create_speaker_profile,
+    delete_speaker_embeddings,
     init_db,
     load_job,
     load_job_speaker_embedding,
@@ -1307,8 +1309,9 @@ def create_speaker_suggestion_observations(
     job_id: str,
     session_id: str | None,
     local_embeddings: list[LocalSpeakerEmbedding] | None,
+    speaker_memory_opt_in: bool = False,
 ) -> None:
-    if not session_id or not local_embeddings:
+    if not speaker_memory_opt_in or not session_id or not local_embeddings:
         return
 
     config = speaker_embedding_config_from_env()
@@ -1380,7 +1383,16 @@ def add_job_embedding_to_profile(
     local_speaker_id: str,
     profile_id: str,
     observation_id: int | None = None,
+    storage_reason: str | None = None,
 ) -> None:
+    if storage_reason not in {"opt_in", "confirm", "manual"}:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Globale Sprecher-Embeddings werden nur nach Opt-in oder "
+                "expliziter Sprecheraktion gespeichert"
+            ),
+        )
     local_embedding = load_job_speaker_embedding(job_id, local_speaker_id)
     if local_embedding is None:
         return
@@ -1391,6 +1403,7 @@ def add_job_embedding_to_profile(
             "source_job_id": job_id,
             "source_local_speaker_id": local_speaker_id,
             "source_observation_id": observation_id,
+            "storage_reason": storage_reason,
         }
     )
 
@@ -1928,6 +1941,7 @@ async def start_pipeline(
     options: Optional[str] = Form(None),
     model: Optional[str] = Form(None),
     system_prompt: Optional[str] = Form(None),
+    remember_speakers: bool = Form(False),
 ):
     """Start an unattended upload-to-review pipeline job."""
     if (
@@ -1992,6 +2006,7 @@ async def start_pipeline(
             "audio_filename": safe_audio_filename,
             "audio_content_type": audio.content_type,
             "audio_size_bytes": audio_size_bytes,
+            "remember_speakers": remember_speakers,
             "transcript": None,
             "error": None,
             "cancellation_requested": False,
@@ -2020,6 +2035,7 @@ async def start_pipeline(
                 "pdf_path": pdf_path,
                 "known_tops": known_tops,
                 "options": parsed_options,
+                "remember_speakers": remember_speakers,
                 "warnings": [],
             },
         },
@@ -2182,7 +2198,18 @@ async def archive_speaker_profile_endpoint(profile_id: str):
     archived = archive_speaker_profile(profile_id)
     if archived is None:
         raise HTTPException(status_code=404, detail="Profil nicht gefunden")
+    anonymize_speaker_observations_for_profile(profile_id)
     return build_speaker_profile_response(archived)
+
+
+@app.delete("/api/speaker-profiles/{profile_id}/embeddings")
+async def delete_speaker_profile_embeddings_endpoint(profile_id: str):
+    """Delete persisted biometric embeddings for a speaker profile."""
+    profile = load_speaker_profile(profile_id, include_archived=True)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profil nicht gefunden")
+    deleted_count = delete_speaker_embeddings(profile_id)
+    return {"profile_id": profile_id, "deleted_count": deleted_count}
 
 
 @app.get(
@@ -2246,6 +2273,7 @@ async def confirm_session_speaker_observation(
         local_speaker_id=observation["local_speaker_id"],
         profile_id=profile_id,
         observation_id=observation_id,
+        storage_reason="confirm",
     )
     return build_speaker_observation_response(confirmed, updated_session)
 
@@ -2343,6 +2371,7 @@ async def create_manual_speaker_observation(
         local_speaker_id=local_speaker_id,
         profile_id=profile["profile_id"],
         observation_id=manual["observation_id"],
+        storage_reason="manual",
     )
     return build_speaker_observation_response(manual, updated_session)
 
@@ -2418,6 +2447,7 @@ async def export_protocol_endpoint(request: ProtocolExportRequest):
 async def start_transcription(
     audio: UploadFile = File(...),
     session_id: Optional[str] = Form(None),
+    remember_speakers: bool = Form(False),
 ):
     """
     Upload audio file and start transcription job.
@@ -2471,6 +2501,7 @@ async def start_transcription(
             "audio_filename": safe_filename,
             "audio_content_type": audio.content_type,
             "audio_size_bytes": size_bytes,
+            "remember_speakers": remember_speakers,
             "transcript": None,
             "error": None,
             "cancellation_requested": False,
@@ -2941,6 +2972,7 @@ def run_transcription(
                 job_id=job_id,
                 session_id=job.get("session_id"),
                 local_embeddings=speaker_embeddings,
+                speaker_memory_opt_in=bool(job.get("remember_speakers")),
             )
         except Exception as e:
             logger.warning(

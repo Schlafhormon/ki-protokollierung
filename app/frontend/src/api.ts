@@ -45,13 +45,15 @@ function normalizePipelineJob(data: PipelineJob): PipelineJob {
  */
 export async function startTranscription(
   audioFile: File,
-  sessionId?: string | null
+  sessionId?: string | null,
+  rememberSpeakers = false
 ): Promise<TranscriptionJob> {
   const formData = new FormData();
   formData.append("audio", audioFile);
   if (sessionId) {
     formData.append("session_id", sessionId);
   }
+  formData.append("remember_speakers", String(rememberSpeakers));
 
   const response = await fetch(`${API_BASE}/api/transcribe`, {
     method: "POST",
@@ -92,6 +94,7 @@ export async function startPipeline(
   if (options.systemPrompt) {
     formData.append("system_prompt", options.systemPrompt);
   }
+  formData.append("remember_speakers", String(Boolean(options.rememberSpeakers)));
 
   const response = await fetch(`${API_BASE}/api/pipeline/start`, {
     method: "POST",
@@ -487,6 +490,23 @@ export async function archiveSpeakerProfile(profileId: string): Promise<SpeakerP
 
   if (!response.ok) {
     throw await readApiError(response, "Fehler beim Archivieren des Sprecherprofils");
+  }
+
+  return response.json();
+}
+
+export async function deleteSpeakerProfileEmbeddings(
+  profileId: string
+): Promise<{ profile_id: string; deleted_count: number }> {
+  const response = await fetch(
+    `${API_BASE}/api/speaker-profiles/${profileId}/embeddings`,
+    {
+      method: "DELETE",
+    }
+  );
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Löschen der Sprecher-Embeddings");
   }
 
   return response.json();

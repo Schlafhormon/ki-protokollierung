@@ -82,6 +82,7 @@ def test_speaker_profiles_embeddings_observations_and_pipeline_jobs_roundtrip(
             "status": "completed",
             "progress": 100,
             "message": "Transkription abgeschlossen",
+            "remember_speakers": True,
             "transcript": [
                 {
                     "speaker": "SPEAKER_00",
@@ -169,6 +170,7 @@ def test_speaker_profiles_embeddings_observations_and_pipeline_jobs_roundtrip(
     assert embedding["model_name"] == "test-speaker-model"
     assert embedding["metadata"] == {"source_job_id": "job-speakers"}
     assert job_embedding["embedding"] == [0.2, 0.1, 0.4]
+    assert persistence.load_job("job-speakers")["remember_speakers"] is True
     assert persistence.load_job_speaker_embeddings("job-speakers")[0][
         "quality_metadata"
     ] == {"total_seconds": 9.0}

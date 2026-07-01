@@ -41,6 +41,7 @@ const ACTIVE_SESSION_KEY = "active-session-id";
 const ACTIVE_PIPELINE_KEY = "active-pipeline-id";
 const SESSION_DRAFT_KEY = "active-session-draft";
 const TELEMETRY_OPT_IN_KEY = "telemetry-opt-in";
+const SPEAKER_MEMORY_OPT_IN_KEY = "speaker-memory-opt-in";
 
 // Implicit TOP title when no TOPs are defined
 const DEFAULT_TOP_TITLE = "Gesamtes Gespräch";
@@ -230,6 +231,13 @@ export default function App() {
   const [telemetryOptIn, setTelemetryOptIn] = useState<boolean>(() => {
     try {
       return localStorage.getItem(TELEMETRY_OPT_IN_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+  const [rememberSpeakers, setRememberSpeakers] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SPEAKER_MEMORY_OPT_IN_KEY) === "true";
     } catch {
       return false;
     }
@@ -425,6 +433,14 @@ export default function App() {
   }, [telemetryOptIn]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem(SPEAKER_MEMORY_OPT_IN_KEY, String(rememberSpeakers));
+    } catch (e) {
+      console.error("Failed to save speaker memory setting:", e);
+    }
+  }, [rememberSpeakers]);
+
+  useEffect(() => {
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current);
     }
@@ -545,7 +561,11 @@ export default function App() {
       }
 
       // Start transcription job
-      const job = await apiStartTranscription(audioFile, activeSessionId);
+      const job = await apiStartTranscription(
+        audioFile,
+        activeSessionId,
+        rememberSpeakers
+      );
 
       // Store job ID for telemetry
       setJobId(job.job_id);
@@ -759,6 +779,7 @@ export default function App() {
         pdfFile,
         model: llmSettings.model,
         systemPrompt: llmSettings.systemPrompt,
+        rememberSpeakers,
       });
       updatePipelineProcessingState(pipeline);
       localStorage.setItem(ACTIVE_PIPELINE_KEY, pipeline.pipeline_id);
@@ -1164,6 +1185,8 @@ export default function App() {
           llmSettings={llmSettings}
           telemetryOptIn={telemetryOptIn}
           setTelemetryOptIn={setTelemetryOptIn}
+          rememberSpeakers={rememberSpeakers}
+          setRememberSpeakers={setRememberSpeakers}
         />
       ) : currentStep === 2 ? (
         <AssignmentStep
@@ -1182,6 +1205,7 @@ export default function App() {
           setSpeakerNames={setSpeakerNames}
           sessionId={sessionId}
           hasSummaries={hasAnySummary(buildSessionPayload())}
+          rememberSpeakers={rememberSpeakers}
         />
       ) : (
         <SummaryStep

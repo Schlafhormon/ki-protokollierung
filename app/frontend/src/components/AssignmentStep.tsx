@@ -42,6 +42,7 @@ export default function AssignmentStep({
   setSpeakerNames,
   sessionId,
   hasSummaries = false,
+  rememberSpeakers = false,
 }: AssignmentStepProps) {
   const [selectedTop, setSelectedTop] = useState(0);
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
@@ -445,6 +446,7 @@ export default function AssignmentStep({
         speakerNames={speakerNames}
         setSpeakerNames={setSpeakerNames}
         sessionId={sessionId}
+        rememberSpeakers={rememberSpeakers}
       />
 
       {/* Agenda Detection */}

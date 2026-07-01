@@ -199,7 +199,7 @@ describe('App pipeline flow', () => {
     await uploadAndStart();
 
     expect(await screen.findByText('Fallback-Zusammenfassung.')).toBeInTheDocument();
-    expect(startTranscription).toHaveBeenCalledWith(expect.any(File), 'session-1');
+    expect(startTranscription).toHaveBeenCalledWith(expect.any(File), 'session-1', false);
   });
 
   it('keeps the review step when automatic generation has uncertain assignments', async () => {

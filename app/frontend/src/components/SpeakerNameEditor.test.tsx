@@ -49,6 +49,7 @@ function renderEditor(overrides: Partial<ComponentProps<typeof SpeakerNameEditor
       speakerNames={{}}
       setSpeakerNames={vi.fn()}
       sessionId="session-1"
+      rememberSpeakers
       {...overrides}
     />
   );
@@ -220,5 +221,17 @@ describe('SpeakerNameEditor', () => {
       display_name: 'Alice Umbenannt',
     });
     expect(fetchMock.mock.calls[3]![1]!.method).toBe('DELETE');
+  });
+
+  it('does not load or show persistent profiles while speaker memory is off', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderEditor({ rememberSpeakers: false });
+
+    expect(await screen.findByText(/Dauerhafte Sprecherprofile sind ausgeschaltet/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('SPEAKER_00 lokal benennen')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /neues profil merken/i })).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

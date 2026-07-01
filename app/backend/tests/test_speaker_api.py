@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 
 import main
 import persistence
@@ -101,6 +102,43 @@ def test_speaker_profile_crud_archives_instead_of_deleting(tmp_path, monkeypatch
     ).status_code == 409
 
 
+def test_archiving_profile_anonymizes_observations_and_embeddings_can_be_deleted(
+    tmp_path, monkeypatch
+):
+    session_id = setup_speaker_session(tmp_path, monkeypatch)
+    profile = persistence.create_speaker_profile("Alice Global", profile_id="alice")
+    persistence.save_speaker_embedding(
+        profile["profile_id"],
+        [1.0, 0.0],
+        model_name="test-embedding",
+        quality=0.9,
+    )
+    persistence.save_speaker_observation(
+        job_id="job-speakers",
+        session_id=session_id,
+        local_speaker_id="SPEAKER_00",
+        profile_id=profile["profile_id"],
+        confidence=0.8,
+        status="suggested",
+    )
+    client = TestClient(main.app)
+
+    deleted = client.delete("/api/speaker-profiles/alice/embeddings")
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted_count"] == 1
+    assert persistence.load_speaker_embeddings("alice") == []
+
+    archived = client.delete("/api/speaker-profiles/alice")
+    assert archived.status_code == 200
+    assert archived.json()["archived"] is True
+    observations = client.get(
+        f"/api/sessions/{session_id}/speaker-observations"
+    ).json()
+    assert observations[0]["profile_id"] is None
+    assert observations[0]["profile_display_name"] is None
+    assert "Alice Global" not in str(observations)
+
+
 def test_speaker_observation_confirm_and_reject_flow(tmp_path, monkeypatch):
     session_id = setup_speaker_session(tmp_path, monkeypatch)
     alice = persistence.create_speaker_profile("Alice Global", profile_id="alice")
@@ -167,6 +205,7 @@ def test_speaker_observation_confirm_and_reject_flow(tmp_path, monkeypatch):
     assert profile_embeddings[0]["metadata"]["source_local_speaker_id"] == (
         "SPEAKER_00"
     )
+    assert profile_embeddings[0]["metadata"]["storage_reason"] == "confirm"
 
     duplicate_response = client.post(
         f"/api/sessions/{session_id}/speaker-observations/"
@@ -238,6 +277,30 @@ def test_manual_speaker_observation_can_link_existing_or_new_profile(
         created_profile_id,
         model_name="test-embedding",
     )[0]["embedding"] == [0.0, 1.0]
+
+
+def test_global_embedding_copy_requires_opt_in_or_explicit_action(
+    tmp_path, monkeypatch
+):
+    setup_speaker_session(tmp_path, monkeypatch)
+    persistence.create_speaker_profile("Alice Global", profile_id="alice")
+    persistence.save_job_speaker_embedding(
+        job_id="job-speakers",
+        local_speaker_id="SPEAKER_00",
+        embedding=[1.0, 0.0],
+        model_name="test-embedding",
+        quality=0.9,
+    )
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        main.add_job_embedding_to_profile(
+            job_id="job-speakers",
+            local_speaker_id="SPEAKER_00",
+            profile_id="alice",
+        )
+
+    assert exc_info.value.status_code == 403
+    assert persistence.load_speaker_embeddings("alice") == []
 
 
 def test_speaker_observation_errors_are_reported_cleanly(tmp_path, monkeypatch):
