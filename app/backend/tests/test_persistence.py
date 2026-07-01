@@ -66,6 +66,82 @@ def test_persistence_migration_is_idempotent_and_keeps_session_state(
     assert session["assignments"] == [0]
 
 
+def test_persistence_migrates_pre_speaker_pipeline_schema(tmp_path, monkeypatch):
+    db_path = tmp_path / "legacy.sqlite3"
+    monkeypatch.setenv("PERSISTENCE_DB_PATH", str(db_path))
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with sqlite3.connect(db_path) as db:
+        db.executescript(
+            """
+            CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                job_id TEXT,
+                current_step INTEGER,
+                skipped_assignment INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE transcription_jobs (
+                job_id TEXT PRIMARY KEY,
+                session_id TEXT,
+                status TEXT NOT NULL,
+                progress INTEGER NOT NULL DEFAULT 0,
+                message TEXT NOT NULL DEFAULT '',
+                file_path TEXT,
+                audio_path TEXT,
+                audio_filename TEXT,
+                audio_content_type TEXT,
+                audio_size_bytes INTEGER,
+                error TEXT,
+                telemetry_json TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            INSERT INTO sessions (
+                session_id, job_id, current_step, skipped_assignment, created_at, updated_at
+            ) VALUES ('legacy-session', 'legacy-job', 1, 0, 1.0, 1.0);
+            INSERT INTO transcription_jobs (
+                job_id, session_id, status, progress, message, created_at, updated_at
+            ) VALUES ('legacy-job', 'legacy-session', 'pending', 5, 'wartet', 1.0, 1.0);
+            """
+        )
+
+    persistence.init_db()
+    persistence.mark_interrupted_jobs()
+
+    with sqlite3.connect(db_path) as db:
+        db.row_factory = sqlite3.Row
+        job_columns = {
+            row["name"]
+            for row in db.execute("PRAGMA table_info(transcription_jobs)").fetchall()
+        }
+        session_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        tables = {
+            row["name"]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+
+    assert {"remember_speakers", "cancellation_requested"}.issubset(job_columns)
+    assert "export_metadata_json" in session_columns
+    assert {
+        "speaker_profiles",
+        "speaker_embeddings",
+        "job_speaker_embeddings",
+        "speaker_observations",
+        "pipeline_jobs",
+        "summary_reviews",
+    }.issubset(tables)
+    legacy_job = persistence.load_job("legacy-job")
+    assert legacy_job["status"] == "failed"
+    assert legacy_job["remember_speakers"] is False
+    assert legacy_job["cancellation_requested"] is False
+
+
 def test_speaker_profiles_embeddings_observations_and_pipeline_jobs_roundtrip(
     tmp_path, monkeypatch
 ):

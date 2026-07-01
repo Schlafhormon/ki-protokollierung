@@ -744,6 +744,68 @@ def test_pipeline_marks_failed_top_summary_but_stays_reviewable(
     assert result["session"]["summaries"]["1"] == ""
     assert result["session"]["summary_reviews"]["1"]["review_warnings"][0]["severity"] == "error"
     assert result["warnings"]
+    assert "LLM nicht verfügbar" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_pipeline_fails_clearly_when_transcription_fails(tmp_path, monkeypatch):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+
+    def fail_transcription(file_path, models, progress_callback=None):
+        raise RuntimeError("Audioqualität zu schlecht")
+
+    monkeypatch.setattr(main, "transcribe_audio", fail_transcription)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/pipeline/start",
+            files={"audio": ("meeting.mp3", b"audio", "audio/mpeg")},
+        )
+        pipeline_id = response.json()["pipeline_id"]
+
+        assert wait_until(
+            lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["status"]
+            == "failed"
+        )
+        status = client.get(f"/api/pipeline/{pipeline_id}").json()
+
+    assert status["stage"] == "transcribe"
+    assert status["error"] == "RuntimeError"
+    transcription_job_id = status["transcription_job_id"]
+    assert persistence.load_job(transcription_job_id)["status"] == "failed"
+
+
+def test_pipeline_restart_marks_active_pipeline_failed(tmp_path, monkeypatch):
+    db_path = tmp_path / "sessions.sqlite3"
+    monkeypatch.setenv("PERSISTENCE_DB_PATH", str(db_path))
+    persistence.init_db()
+    persistence.save_session(
+        "session-1",
+        {
+            "tops": [],
+            "assignments": [],
+            "speaker_names": {},
+            "summaries": {},
+            "skipped_assignment": False,
+        },
+    )
+    persistence.save_pipeline_job(
+        "interrupted-pipeline",
+        {
+            "session_id": "session-1",
+            "transcription_job_id": None,
+            "status": "processing",
+            "stage": "summarize",
+            "progress": 82,
+            "result_refs": {"warnings": []},
+        },
+    )
+
+    persistence.mark_interrupted_pipeline_jobs()
+
+    job = persistence.load_pipeline_job("interrupted-pipeline")
+    assert job["status"] == "failed"
+    assert job["progress"] == 0
+    assert job["error"] == "Pipeline wurde durch Backend-Neustart unterbrochen"
 
 
 def test_pipeline_cancel_endpoint_marks_pending_pipeline_cancelled(tmp_path, monkeypatch):

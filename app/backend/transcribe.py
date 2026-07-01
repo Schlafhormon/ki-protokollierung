@@ -196,7 +196,7 @@ def transcribe_audio(
     """
     import whisperx
 
-    logger.info(f"Starting transcription for: {file_path}")
+    logger.info("Starting transcription for uploaded audio")
 
     # Initialize variables for cleanup tracking
     audio = None
@@ -208,7 +208,7 @@ def transcribe_audio(
             progress_callback(5, "Lade Audio...")
 
         # Load audio
-        logger.info(f"Loading audio file: {file_path}")
+        logger.info("Loading uploaded audio file")
         audio = whisperx.load_audio(file_path)
         audio_duration_seconds = len(audio) / 16000
         logger.info(f"Audio loaded, duration: {audio_duration_seconds:.1f} seconds")

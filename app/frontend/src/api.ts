@@ -23,6 +23,13 @@ import type {
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
+const configuredClientLlmTextChars = Number(
+  import.meta.env.VITE_MAX_CLIENT_LLM_TEXT_CHARS
+);
+const MAX_CLIENT_LLM_TEXT_CHARS =
+  Number.isFinite(configuredClientLlmTextChars) && configuredClientLlmTextChars > 0
+    ? configuredClientLlmTextChars
+    : 120000;
 
 async function readApiError(response: Response, fallback: string): Promise<Error> {
   try {
@@ -38,6 +45,23 @@ function normalizePipelineJob(data: PipelineJob): PipelineJob {
     ...data,
     warnings: data.warnings ?? [],
   };
+}
+
+function estimateTranscriptChars(lines: TranscriptLine[]): number {
+  return lines.reduce(
+    (sum, line) => sum + line.speaker.length + line.text.length + 3,
+    0
+  );
+}
+
+function assertClientLlmPayloadFits(lines: TranscriptLine[], label: string): void {
+  if (estimateTranscriptChars(lines) <= MAX_CLIENT_LLM_TEXT_CHARS) {
+    return;
+  }
+  throw new Error(
+    `${label} ist für den klassischen Browser-Workflow zu groß. ` +
+      "Bitte die Backend-Pipeline verwenden oder die Sitzung in kleinere Abschnitte teilen."
+  );
 }
 
 /**
@@ -319,6 +343,8 @@ export async function generateSummary(
   lines: TranscriptLine[],
   options?: SummarizeOptions
 ): Promise<SummarizeResult> {
+  assertClientLlmPayloadFits(lines, "Der Transkriptabschnitt");
+
   const response = await fetch(`${API_BASE}/api/summarize`, {
     method: "POST",
     headers: {
@@ -381,6 +407,8 @@ export async function generateAssignmentSuggestions(
 export async function detectAgenda(
   request: AgendaDetectionRequest
 ): Promise<AgendaDetectionResponse> {
+  assertClientLlmPayloadFits(request.transcript, "Das Transkript");
+
   const response = await fetch(`${API_BASE}/api/agenda-detection`, {
     method: "POST",
     headers: {

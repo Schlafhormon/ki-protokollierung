@@ -37,6 +37,12 @@ AGENDA_DETECTION_USE_LLM = (
 AGENDA_DETECTION_TIMEOUT_SECONDS = float(
     os.environ.get("AGENDA_DETECTION_TIMEOUT_SECONDS", "8")
 )
+AGENDA_DETECTION_CHUNK_LINES = int(
+    os.environ.get("AGENDA_DETECTION_CHUNK_LINES", "160")
+)
+AGENDA_DETECTION_CHUNK_OVERLAP_LINES = int(
+    os.environ.get("AGENDA_DETECTION_CHUNK_OVERLAP_LINES", "12")
+)
 
 DEFAULT_AGENDA_DETECTION_PROMPT = """Du erkennst Tagesordnungspunkte (TOPs) und Segmentgrenzen in deutschen Sitzungstranskripten.
 
@@ -199,6 +205,13 @@ def _maybe_detect_with_llm(
         return []
 
     try:
+        if tops is None and len(transcript) > AGENDA_DETECTION_CHUNK_LINES:
+            return _detect_unknown_agenda_with_llm_chunks(
+                transcript,
+                heuristic_segments=heuristic_segments,
+                model=model,
+                system_prompt=system_prompt,
+            )
         return _detect_with_llm(
             transcript,
             tops=tops,
@@ -207,8 +220,120 @@ def _maybe_detect_with_llm(
             system_prompt=system_prompt,
         )
     except Exception as exc:
-        logger.warning("Agenda LLM detection failed; using heuristic fallback: %s", exc)
+        logger.warning(
+            "Agenda LLM detection failed; using heuristic fallback (%s)",
+            exc.__class__.__name__,
+        )
         return []
+
+
+def _iter_transcript_chunks(
+    transcript: list[TranscriptUtterance],
+) -> list[tuple[int, list[TranscriptUtterance]]]:
+    max_lines = max(1, AGENDA_DETECTION_CHUNK_LINES)
+    overlap = max(0, min(AGENDA_DETECTION_CHUNK_OVERLAP_LINES, max_lines - 1))
+    step = max(1, max_lines - overlap)
+    chunks: list[tuple[int, list[TranscriptUtterance]]] = []
+
+    for start in range(0, len(transcript), step):
+        chunk = transcript[start : start + max_lines]
+        if chunk:
+            chunks.append((start, chunk))
+        if start + max_lines >= len(transcript):
+            break
+    return chunks
+
+
+def _segments_for_chunk(
+    segments: list[AssignmentSegment],
+    *,
+    chunk_start: int,
+    chunk_length: int,
+) -> list[AssignmentSegment]:
+    chunk_end = chunk_start + chunk_length - 1
+    adjusted = []
+    for segment in segments:
+        if segment.start_index > chunk_end or segment.end_index < chunk_start:
+            continue
+        adjusted.append(
+            AssignmentSegment(
+                top_index=segment.top_index,
+                top_title=segment.top_title,
+                start_index=max(0, segment.start_index - chunk_start),
+                end_index=min(chunk_length - 1, segment.end_index - chunk_start),
+                confidence=segment.confidence,
+                uncertain=segment.uncertain,
+                transition_type=segment.transition_type,
+                reason=segment.reason,
+                evidence_index=(
+                    segment.evidence_index - chunk_start
+                    if segment.evidence_index is not None
+                    else None
+                ),
+                evidence_text=segment.evidence_text,
+            )
+        )
+    return adjusted
+
+
+def _offset_raw_segments(
+    segments: list[_RawSegment],
+    *,
+    offset: int,
+) -> list[_RawSegment]:
+    return [
+        _RawSegment(
+            top_title=segment.top_title,
+            start_index=(
+                segment.start_index + offset
+                if segment.start_index is not None
+                else None
+            ),
+            end_index=(
+                segment.end_index + offset if segment.end_index is not None else None
+            ),
+            confidence=segment.confidence,
+            evidence_text=segment.evidence_text,
+            uncertain=segment.uncertain,
+            reason=segment.reason,
+            transition_type=segment.transition_type,
+        )
+        for segment in segments
+    ]
+
+
+def _detect_unknown_agenda_with_llm_chunks(
+    transcript: list[TranscriptUtterance],
+    *,
+    heuristic_segments: list[AssignmentSegment],
+    model: str | None,
+    system_prompt: str | None,
+) -> list[_RawSegment]:
+    detected: list[_RawSegment] = []
+    for chunk_start, chunk in _iter_transcript_chunks(transcript):
+        try:
+            detected.extend(
+                _offset_raw_segments(
+                    _detect_with_llm(
+                        chunk,
+                        tops=None,
+                        heuristic_segments=_segments_for_chunk(
+                            heuristic_segments,
+                            chunk_start=chunk_start,
+                            chunk_length=len(chunk),
+                        ),
+                        model=model,
+                        system_prompt=system_prompt,
+                    ),
+                    offset=chunk_start,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Agenda LLM chunk failed; continuing with remaining chunks (%s)",
+                exc.__class__.__name__,
+            )
+    return detected
 
 
 def _detect_with_llm(

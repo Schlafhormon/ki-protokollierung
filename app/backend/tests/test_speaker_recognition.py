@@ -105,3 +105,21 @@ def test_matching_does_not_suggest_low_scores():
     )
 
     assert matches == []
+
+
+def test_matching_without_profiles_returns_no_suggestions():
+    matches = match_speaker_embeddings(
+        [
+            LocalSpeakerEmbedding(
+                local_speaker_id="SPEAKER_00",
+                embedding=[1, 0],
+                model_name="test",
+                quality=1.0,
+            )
+        ],
+        [],
+        auto_threshold=0.9,
+        suggest_threshold=0.75,
+    )
+
+    assert matches == []

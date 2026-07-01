@@ -337,7 +337,7 @@ def remove_upload_file(file_path: str | None) -> None:
         if path.exists() and path.is_file():
             path.unlink()
     except Exception as e:
-        logger.warning(f"Failed to remove upload file {file_path}: {e}")
+        logger.warning("Failed to remove upload file for job cleanup: %s", e)
 
 
 def persist_job_state(job_id: str) -> None:
@@ -566,6 +566,11 @@ def append_pipeline_warning(pipeline_id: str, message: str) -> None:
     warnings = list(refs.get("warnings") or [])
     warnings.append(message)
     save_pipeline_state(pipeline_id, result_refs={"warnings": warnings})
+
+
+def safe_exception_label(exc: Exception) -> str:
+    """Return a non-content-bearing exception label for logs and review warnings."""
+    return exc.__class__.__name__
 
 
 def is_pipeline_cancelled(pipeline_id: str) -> bool:
@@ -1601,7 +1606,8 @@ def detect_pipeline_agenda(
         except Exception as exc:
             append_pipeline_warning(
                 pipeline_id,
-                f"TOP-Erkennung aus PDF fehlgeschlagen, nutze Fallback: {exc}",
+                "TOP-Erkennung aus PDF fehlgeschlagen, nutze Fallback "
+                f"({safe_exception_label(exc)}).",
             )
 
     try:
@@ -1632,7 +1638,8 @@ def detect_pipeline_agenda(
     except Exception as exc:
         append_pipeline_warning(
             pipeline_id,
-            f"Agenda Detection fehlgeschlagen, nutze Fallback: {exc}",
+            "Agenda Detection fehlgeschlagen, nutze Fallback "
+            f"({safe_exception_label(exc)}).",
         )
 
     return fallback_agenda(transcript, agenda_tops)
@@ -1701,7 +1708,10 @@ def summarize_pipeline_segments(
                 "duration_seconds": result.duration_seconds,
             }
         except Exception as exc:
-            message = f"Zusammenfassung für TOP {top_index + 1} fehlgeschlagen: {exc}"
+            message = (
+                f"Zusammenfassung für TOP {top_index + 1} fehlgeschlagen "
+                f"({safe_exception_label(exc)})."
+            )
             append_pipeline_warning(pipeline_id, message)
             summaries[top_index] = ""
             summary_reviews[top_index] = {
@@ -1716,7 +1726,7 @@ def summarize_pipeline_segments(
                         "excerpt": "",
                     }
                 ],
-                "error": str(exc),
+                "error": safe_exception_label(exc),
             }
 
     return summaries, summary_reviews
@@ -1865,11 +1875,16 @@ def run_pipeline_job(
             result_refs={"cancel_requested": True},
         )
     except Exception as exc:
-        logger.error("[Pipeline %s] failed: %s", pipeline_id, exc, exc_info=True)
+        logger.error(
+            "[Pipeline %s] failed (%s)",
+            pipeline_id,
+            safe_exception_label(exc),
+            exc_info=True,
+        )
         save_pipeline_state(
             pipeline_id,
             status=PIPELINE_STATUS_FAILED,
-            error=str(exc),
+            error=safe_exception_label(exc),
         )
     finally:
         if pdf_path:
@@ -2453,9 +2468,7 @@ async def start_transcription(
     Upload audio file and start transcription job.
     Returns job_id to poll for status.
     """
-    logger.info(
-        f"Received transcription request: {audio.filename} ({audio.content_type})"
-    )
+    logger.info("Received transcription request (%s)", audio.content_type)
 
     # Check if models are loaded
     if (
@@ -2486,7 +2499,7 @@ async def start_transcription(
     )
     file_path = upload_path_for(job_id, safe_filename)
     size_bytes = await save_upload_with_size_limit(audio, file_path)
-    logger.info(f"Saved file: {file_path} ({size_bytes} bytes)")
+    logger.info("Saved uploaded audio for job %s (%s bytes)", job_id, size_bytes)
 
     with JOB_LOCK:
         jobs[job_id] = {
@@ -2681,7 +2694,7 @@ async def extract_tops_endpoint(
     Extract TOPs (agenda items) from a German municipal meeting invitation PDF.
     Uses LLM to intelligently parse the document structure.
     """
-    logger.info(f"Received PDF for TOP extraction: {pdf.filename} ({pdf.content_type})")
+    logger.info("Received PDF for TOP extraction (%s)", pdf.content_type)
 
     # Validate file type
     if not is_allowed_pdf_file(pdf.filename, pdf.content_type):
@@ -2700,7 +2713,7 @@ async def extract_tops_endpoint(
 
     try:
         size_bytes = await save_upload_with_size_limit(pdf, file_path)
-        logger.info(f"Saved PDF: {file_path} ({size_bytes} bytes)")
+        logger.info("Saved uploaded PDF for TOP extraction (%s bytes)", size_bytes)
 
         # Extract TOPs using LLM
         tops = extract_tops_from_pdf(
@@ -2709,13 +2722,17 @@ async def extract_tops_endpoint(
             system_prompt=system_prompt,
         )
 
-        logger.info(f"Successfully extracted {len(tops)} TOPs from {pdf.filename}")
+        logger.info("Successfully extracted %s TOPs from uploaded PDF", len(tops))
         return ExtractTOPsResponse(tops=tops)
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"TOP extraction failed: {str(e)}", exc_info=True)
+        logger.error(
+            "TOP extraction failed (%s)",
+            safe_exception_label(e),
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=500, detail=f"Fehler bei der TOP-Extraktion: {str(e)}"
         )
@@ -2725,7 +2742,7 @@ async def extract_tops_endpoint(
         try:
             if file_path.exists():
                 os.remove(file_path)
-                logger.info(f"Cleaned up PDF file: {file_path}")
+                logger.info("Cleaned up uploaded PDF")
         except Exception as cleanup_error:
             logger.warning(f"Failed to clean up PDF: {cleanup_error}")
 
@@ -3016,7 +3033,12 @@ def run_transcription(
         if DELETE_UPLOADS_ON_CANCEL_OR_FAILURE and job:
             cleanup_job_uploads(job_id, job)
     except Exception as e:
-        logger.error(f"[Job {job_id}] Transcription failed: {str(e)}", exc_info=True)
+        logger.error(
+            "[Job %s] Transcription failed (%s)",
+            job_id,
+            safe_exception_label(e),
+            exc_info=True,
+        )
         job = update_job_state(
             job_id,
             status=JOB_STATUS_FAILED,

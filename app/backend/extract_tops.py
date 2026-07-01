@@ -65,7 +65,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
             "pdfplumber nicht installiert. Installieren Sie mit: uv add pdfplumber"
         )
 
-    logger.info(f"Extracting text from PDF: {pdf_path}")
+    logger.info("Extracting text from uploaded PDF")
 
     try:
         text_parts = []
@@ -81,7 +81,10 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         return full_text
 
     except Exception as e:
-        logger.error(f"Failed to extract text from PDF: {e}")
+        logger.error(
+            "Failed to extract text from uploaded PDF (%s)",
+            e.__class__.__name__,
+        )
         raise RuntimeError(f"PDF-Text konnte nicht extrahiert werden: {str(e)}")
 
 
@@ -139,7 +142,7 @@ TOPs:"""
         )
 
         raw_response = response.choices[0].message.content or ""
-        logger.debug(f"LLM response:\n{raw_response}")
+        logger.debug("LLM TOP extraction returned %s characters", len(raw_response))
 
         # Parse the response into individual TOPs
         tops = parse_tops_response(raw_response)
@@ -148,7 +151,7 @@ TOPs:"""
         return tops
 
     except Exception as e:
-        logger.error(f"LLM extraction failed: {e}")
+        logger.error("LLM TOP extraction failed (%s)", e.__class__.__name__)
         raise RuntimeError(f"TOP-Extraktion fehlgeschlagen: {str(e)}")
 
 

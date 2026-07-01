@@ -1,5 +1,6 @@
 from agenda_detection import detect_agenda_from_transcript, segment_known_agenda
 from assignment_suggestions import TranscriptUtterance
+import agenda_detection
 
 
 def test_segment_known_agenda_detects_clear_top_announcements():
@@ -113,3 +114,42 @@ def test_fallback_without_llm_returns_reviewable_assignments():
     assert result.tops == ["Genehmigung der Niederschrift", "Verschiedenes"]
     assert result.assignments == [0, 0, 1]
     assert result.strategy == "heuristic_transcript_fallback"
+
+
+def test_unknown_agenda_llm_detection_chunks_long_transcripts(
+    fake_openai_module,
+    monkeypatch,
+):
+    monkeypatch.setattr(agenda_detection, "AGENDA_DETECTION_CHUNK_LINES", 2)
+    monkeypatch.setattr(agenda_detection, "AGENDA_DETECTION_CHUNK_OVERLAP_LINES", 0)
+    fake_openai_module.responses = [
+        """
+        {"tops": [
+          {"top_title": "Haushalt", "start_index": 0, "end_index": 1, "confidence": 0.9}
+        ]}
+        """,
+        """
+        {"tops": [
+          {"top_title": "Schulbau", "start_index": 0, "end_index": 1, "confidence": 0.88}
+        ]}
+        """,
+    ]
+    transcript = [
+        TranscriptUtterance("MOD", "Kommen wir zu TOP 1 Haushalt."),
+        TranscriptUtterance("A", "Der Haushalt wird beraten."),
+        TranscriptUtterance("MOD", "Kommen wir zu TOP 2 Schulbau."),
+        TranscriptUtterance("B", "Der Schulbau wird beraten."),
+    ]
+
+    result = detect_agenda_from_transcript(transcript, model="test-model")
+
+    assert result.tops == ["Haushalt", "Schulbau"]
+    assert result.assignments == [0, 0, 1, 1]
+    assert [(segment.start_index, segment.end_index) for segment in result.segments] == [
+        (0, 1),
+        (2, 3),
+    ]
+    calls = [call for instance in fake_openai_module.instances for call in instance.calls]
+    assert len(calls) == 2
+    assert "0: MOD" in calls[0]["messages"][1]["content"]
+    assert "2: MOD" not in calls[0]["messages"][1]["content"]

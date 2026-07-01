@@ -9,6 +9,7 @@ import {
   deleteSpeakerProfileEmbeddings,
   detectAgenda,
   exportProtocol,
+  generateSummary,
   listSpeakerObservations,
   listSpeakerProfiles,
   loadSession,
@@ -93,6 +94,8 @@ describe('api session client', () => {
     expect(body.get('remember_speakers')).toBe('true');
     expect(body.get('audio')).toBeInstanceOf(File);
     expect(body.get('pdf')).toBeInstanceOf(File);
+    expect(body.get('transcript')).toBeNull();
+    expect(body.get('summaries')).toBeNull();
   });
 
   it('polls pipeline status until completion', async () => {
@@ -316,6 +319,44 @@ describe('api session client', () => {
       model: 'qwen3:8b',
       system_prompt: 'Prompt',
     });
+  });
+
+  it('does not send oversized legacy agenda-detection requests from the browser', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      detectAgenda({
+        transcript: [
+          {
+            speaker: 'SPEAKER_00',
+            text: 'Langer Transkripttext '.repeat(7000),
+            start: 0,
+            end: 1,
+          },
+        ],
+      })
+    ).rejects.toThrow(/Browser-Workflow zu groß/i);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not send oversized legacy summary requests from the browser', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      generateSummary('Haushalt', [
+        {
+          speaker: 'SPEAKER_00',
+          text: 'Langer Transkripttext '.repeat(7000),
+          start: 0,
+          end: 1,
+        },
+      ])
+    ).rejects.toThrow(/Browser-Workflow zu groß/i);
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('does not send telemetry when the user has not opted in', async () => {

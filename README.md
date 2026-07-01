@@ -475,6 +475,12 @@ BACKEND_GPU_IMAGE=ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:v
 
 ### Environment Variables
 
+Speaker memory is off for a session until the user explicitly enables it in the
+UI. Even high-confidence speaker matches are stored as review suggestions; a
+global profile embedding is copied only after an explicit confirm/manual action.
+Pipeline jobs persist their status in SQLite and active jobs are marked failed
+after a backend restart so the UI can show a clear restart/interruption state.
+
 | Variable             | Description                                         | Default                     |
 | -------------------- | --------------------------------------------------- | --------------------------- |
 | `HF_TOKEN`           | HuggingFace token for local dev/runtime, or BuildKit secret for local model pre-cache builds | - |
@@ -493,6 +499,18 @@ BACKEND_GPU_IMAGE=ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:v
 | `LLM_RETRY_BACKOFF_SECONDS` | Backoff between transient LLM retries       | `0.5`                       |
 | `LLM_CHUNK_CHARS`    | Target chunk size for long TOP transcripts          | `12000`                     |
 | `LLM_STRUCTURED_FALLBACK` | Fall back to plain text when structured output parsing fails | `true`        |
+| `SPEAKER_EMBEDDING_ENABLED` | Enable local speaker embedding extraction for reviewable matching | `true` |
+| `SPEAKER_EMBEDDING_MODEL` | PyAnnote embedding model for speaker memory       | `pyannote/embedding`        |
+| `SPEAKER_MATCH_AUTO_THRESHOLD` | High-confidence speaker match threshold; still requires review | `0.82` |
+| `SPEAKER_MATCH_SUGGEST_THRESHOLD` | Minimum speaker match threshold for review suggestions | `0.72` |
+| `SPEAKER_EMBEDDING_MIN_SECONDS` | Minimum clean audio per speaker before storing a local embedding | `8.0` |
+| `SPEAKER_EMBEDDING_MIN_SEGMENT_SECONDS` | Minimum diarization segment length used for embeddings | `1.5` |
+| `SPEAKER_EMBEDDING_MAX_SEGMENT_SECONDS` | Maximum duration sampled from one diarization segment | `12.0` |
+| `SPEAKER_EMBEDDING_MAX_SEGMENTS` | Maximum diarization segments sampled per speaker | `8` |
+| `AGENDA_DETECTION_USE_LLM` | Enable LLM agenda detection without an explicit request model/prompt | `false` |
+| `AGENDA_DETECTION_TIMEOUT_SECONDS` | Timeout for agenda-detection LLM calls           | `8`                         |
+| `AGENDA_DETECTION_CHUNK_LINES` | Line count per LLM chunk for long unknown-agenda transcripts | `160` |
+| `AGENDA_DETECTION_CHUNK_OVERLAP_LINES` | Overlap between agenda-detection chunks | `12` |
 | `PERSISTENCE_DB_PATH` | SQLite session database path inside backend container | `/app/data/sessions.sqlite3` |
 | `JOB_MAX_AGE_SECONDS` | Max age for in-memory job cache cleanup            | `7200`                      |
 | `JOB_MAX_COUNT`      | Max number of jobs retained in memory               | `100`                       |
@@ -500,6 +518,8 @@ BACKEND_GPU_IMAGE=ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:v
 | `DELETE_UPLOADS_ON_CANCEL_OR_FAILURE` | Delete upload files after cancelled/failed jobs | `true`        |
 | `MAX_UPLOAD_BYTES`   | Maximum upload size                                 | `524288000`                 |
 | `TRANSCRIPTION_CONCURRENCY` | Concurrent transcription workers             | `1`                         |
+| `PIPELINE_CONCURRENCY` | Concurrent end-to-end pipeline workers            | `1`                         |
+| `VITE_MAX_CLIENT_LLM_TEXT_CHARS` | Frontend guardrail for legacy browser-driven LLM JSON requests | `120000` |
 | `TELEMETRY_WEBHOOK_URL` | Runtime webhook URL for opt-in telemetry          | (empty, disabled)           |
 | `TELEMETRY_BACKUP_ENABLED` | Enable local telemetry JSONL backups          | `false`                     |
 | `TELEMETRY_BACKUP_RETENTION_DAYS` | Retention for local telemetry backups | `14`                        |
@@ -521,6 +541,9 @@ BACKEND_GPU_IMAGE=ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:v
 | `/api/speaker-profiles/{profile_id}` | PUT/DELETE | Rename or archive a speaker profile |
 | `/api/speaker-profiles/{profile_id}/embeddings` | DELETE | Delete persisted global speaker embeddings |
 | `/api/sessions/{session_id}/speaker-observations` | GET | List reviewable speaker observations |
+| `/api/pipeline/start`             | POST   | Start upload-to-review pipeline      |
+| `/api/pipeline/{pipeline_id}`     | GET    | Get pipeline status                  |
+| `/api/pipeline/{pipeline_id}/result` | GET | Load completed reviewable pipeline result |
 | `/api/telemetry/session-complete`| POST   | Report opt-in aggregate telemetry    |
 
 ### Technology Stack
