@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Layout from "./components/Layout";
 import StepIndicator from "./components/StepIndicator";
 import UploadStep from "./components/UploadStep";
@@ -84,6 +84,7 @@ FORMAT:
 interface SessionDraft extends SessionSavePayload {
   audio_url?: string | null;
   pipeline_id?: string | null;
+  summary_input_fingerprint?: string | null;
 }
 
 function withApiBase(url?: string | null): string | null {
@@ -137,9 +138,80 @@ function normalizeSummaryReviews(
   return normalized;
 }
 
+function buildSummaryInputFingerprint(
+  tops: string[],
+  transcript: TranscriptLine[],
+  assignments: (number | null)[],
+  speakerNames: Record<string, string>
+): string {
+  const normalizedSpeakerNames: Record<string, string> = {};
+  Object.keys(speakerNames)
+    .sort()
+    .forEach((speaker) => {
+      normalizedSpeakerNames[speaker] = speakerNames[speaker]?.trim() ?? "";
+    });
+  return JSON.stringify({
+    tops: tops.map((top) => top.trim()).filter(Boolean),
+    transcript: transcript.map((line) => ({
+      speaker: line.speaker,
+      text: line.text,
+      start: line.start,
+      end: line.end,
+    })),
+    assignments,
+    speakerNames: normalizedSpeakerNames,
+  });
+}
+
+function getSessionSummaryInputFingerprint(
+  session: SessionResponse | SessionDraft
+): string | null {
+  if (!hasAnySummary(session)) {
+    return null;
+  }
+  return (
+    (session as SessionDraft).summary_input_fingerprint ??
+    buildSummaryInputFingerprint(
+      session.tops ?? [],
+      session.transcript ?? [],
+      session.assignments ?? [],
+      session.speaker_names ?? {}
+    )
+  );
+}
+
+function hasFreshSessionSummaries(session: SessionResponse | SessionDraft): boolean {
+  const fingerprint = getSessionSummaryInputFingerprint(session);
+  if (!fingerprint) {
+    return false;
+  }
+  return (
+    fingerprint ===
+    buildSummaryInputFingerprint(
+      session.tops ?? [],
+      session.transcript ?? [],
+      session.assignments ?? [],
+      session.speaker_names ?? {}
+    )
+  );
+}
+
+function hasAgendaUncertainty(
+  agendaDetection?: AgendaDetectionResponse | null
+): boolean {
+  if (!agendaDetection) {
+    return false;
+  }
+  return (
+    (agendaDetection.uncertain_count ?? 0) > 0 ||
+    (agendaDetection.segments ?? []).some((segment) => segment.uncertain)
+  );
+}
+
 function hasReviewUncertainty(
   session: SessionResponse,
-  warnings: string[] = []
+  warnings: string[] = [],
+  agendaDetection?: AgendaDetectionResponse | null
 ): boolean {
   const transcriptLength = session.transcript?.length ?? 0;
   const assignments = session.assignments ?? [];
@@ -153,6 +225,10 @@ function hasReviewUncertainty(
   }
 
   if (warnings.length > 0) {
+    return true;
+  }
+
+  if (hasAgendaUncertainty(agendaDetection)) {
     return true;
   }
 
@@ -198,6 +274,7 @@ export default function App() {
   const [agendaDetectionError, setAgendaDetectionError] = useState<string | null>(null);
   const [summaries, setSummaries] = useState<Record<number, string>>({});
   const [summaryReviews, setSummaryReviews] = useState<Record<number, SummaryReview>>({});
+  const [summaryInputFingerprint, setSummaryInputFingerprint] = useState<string | null>(null);
   const [exportMetadata, setExportMetadata] = useState<ExportMetadata>(DEFAULT_EXPORT_METADATA);
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -225,6 +302,22 @@ export default function App() {
       speaker: speakerNames[line.speaker]?.trim() || line.speaker,
     }));
   };
+
+  const currentSummaryInputFingerprint = useMemo(
+    () => buildSummaryInputFingerprint(tops, transcript, assignments, speakerNames),
+    [assignments, speakerNames, tops, transcript]
+  );
+  const summariesAreFresh =
+    summaryInputFingerprint !== null &&
+    summaryInputFingerprint === currentSummaryInputFingerprint;
+  const hasFreshSummariesInState = hasAnySummary({
+    tops,
+    transcript,
+    assignments,
+    speaker_names: speakerNames,
+    summaries,
+    skipped_assignment: skippedAssignment,
+  }) && summariesAreFresh;
 
   // Telemetry state
   const [jobId, setJobId] = useState<string | null>(null);
@@ -299,6 +392,7 @@ export default function App() {
     setSpeakerNames(session.speaker_names ?? {});
     setSummaries(normalizeSummaries(session.summaries));
     setSummaryReviews(normalizeSummaryReviews(session.summary_reviews));
+    setSummaryInputFingerprint(getSessionSummaryInputFingerprint(session));
     setExportMetadata({
       ...DEFAULT_EXPORT_METADATA,
       ...(session.export_metadata ?? {}),
@@ -321,13 +415,28 @@ export default function App() {
     applySession(result.session);
     const completedPipeline = result.pipeline;
     const warnings = result.warnings ?? completedPipeline.warnings ?? [];
-    const needsReview = hasReviewUncertainty(result.session, warnings);
+    const agendaDetectionResult = result.agenda_detection ?? null;
+    const needsReview = hasReviewUncertainty(
+      result.session,
+      warnings,
+      agendaDetectionResult
+    );
 
     setPipelineJob(completedPipeline);
     setPipelineId(null);
     setJobId(result.session.job_id ?? result.job?.job_id ?? completedPipeline.transcription_job_id ?? null);
+    setAgendaDetection(agendaDetectionResult);
+    setAgendaDetectionError(null);
     setSummaryReviews(
       normalizeSummaryReviews(result.summary_reviews ?? result.session.summary_reviews)
+    );
+    setSummaryInputFingerprint(
+      buildSummaryInputFingerprint(
+        result.session.tops ?? [],
+        result.session.transcript ?? [],
+        result.session.assignments ?? [],
+        result.session.speaker_names ?? {}
+      )
     );
     setIsProcessing(false);
     setProcessingProgress(100);
@@ -369,6 +478,7 @@ export default function App() {
     setAgendaDetectionError(null);
     setSummaries({});
     setSummaryReviews({});
+    setSummaryInputFingerprint(null);
     setExportMetadata(DEFAULT_EXPORT_METADATA);
     setAudioUrl(null);
     setSpeakerNames({});
@@ -455,6 +565,7 @@ export default function App() {
       session_id: sessionId,
       audio_url: audioUrl,
       pipeline_id: pipelineId,
+      summary_input_fingerprint: summaryInputFingerprint,
     };
 
     try {
@@ -494,7 +605,7 @@ export default function App() {
         window.clearTimeout(saveTimerRef.current);
       }
     };
-  }, [audioUrl, buildSessionPayload, pipelineId, sessionId]);
+  }, [audioUrl, buildSessionPayload, pipelineId, sessionId, summaryInputFingerprint]);
 
   const updatePipelineProcessingState = (status: PipelineJob) => {
     setPipelineJob(status);
@@ -584,6 +695,7 @@ export default function App() {
       setTranscript(transcriptResult);
       setSummaryReviews({});
       setSummaries({});
+      setSummaryInputFingerprint(null);
       setAgendaDetection(null);
       setAgendaDetectionError(null);
 
@@ -672,18 +784,47 @@ export default function App() {
           setSessionId(status.session_id);
           localStorage.setItem(ACTIVE_SESSION_KEY, status.session_id);
         }
-        setPipelineId(status.pipeline_id);
         setPipelineJob(status);
         if (status.status === "completed") {
+          setPipelineId(status.pipeline_id);
           const result = await getPipelineResult(status.pipeline_id);
           applyPipelineResult(result);
         } else if (status.status === "failed" || status.status === "cancelled") {
-          setProcessingError(status.error || "Pipeline ist nicht mehr aktiv");
-          setSessionMessage(status.error || "Pipeline ist nicht mehr aktiv");
-          if (restoreCandidate.draft) {
-            applySession(restoreCandidate.draft);
+          try {
+            localStorage.removeItem(ACTIVE_PIPELINE_KEY);
+          } catch (e) {
+            console.error("Failed to clear active pipeline id:", e);
+          }
+          setPipelineId(null);
+          setDirectProtocolAvailable(false);
+          const inactiveMessage = status.error || "Pipeline ist nicht mehr aktiv";
+          const fallbackSessionId = status.session_id ?? restoreCandidate.sessionId;
+          if (fallbackSessionId) {
+            try {
+              const restored = await loadSession(fallbackSessionId);
+              applySession(restored);
+              setPipelineId(null);
+              setSessionMessage(`${inactiveMessage}. Gespeicherte Sitzung wurde geladen.`);
+            } catch (loadError) {
+              if (restoreCandidate.draft) {
+                applySession({ ...restoreCandidate.draft, pipeline_id: null });
+                setPipelineId(null);
+                setSessionMessage(`${inactiveMessage}. Lokaler Draft wurde geladen.`);
+              } else {
+                const message =
+                  loadError instanceof Error ? loadError.message : inactiveMessage;
+                setSessionMessage(message);
+              }
+            }
+          } else if (restoreCandidate.draft) {
+            applySession({ ...restoreCandidate.draft, pipeline_id: null });
+            setPipelineId(null);
+            setSessionMessage(`${inactiveMessage}. Lokaler Draft wurde geladen.`);
+          } else {
+            setSessionMessage(inactiveMessage);
           }
         } else {
+          setPipelineId(status.pipeline_id);
           void pollPipelineToResult(status.pipeline_id, status).catch((error) => {
             const message =
               error instanceof Error ? error.message : "Pipeline konnte nicht fortgesetzt werden";
@@ -696,7 +837,8 @@ export default function App() {
         const restored = await loadSession(restoreCandidate.sessionId);
         applySession(restored);
         if ((restored.current_step ?? 1) === 2 && hasAnySummary(restored)) {
-          const canGoDirect = !hasReviewUncertainty(restored);
+          const canGoDirect =
+            hasFreshSessionSummaries(restored) && !hasReviewUncertainty(restored);
           setDirectProtocolAvailable(canGoDirect);
           setPipelineNotice(
             canGoDirect
@@ -722,7 +864,9 @@ export default function App() {
         applySession(restoreCandidate.draft);
         if ((restoreCandidate.draft.current_step ?? 1) === 2 && hasAnySummary(restoreCandidate.draft)) {
           const draftSession = restoreCandidate.draft as SessionResponse;
-          const canGoDirect = !hasReviewUncertainty(draftSession);
+          const canGoDirect =
+            hasFreshSessionSummaries(restoreCandidate.draft) &&
+            !hasReviewUncertainty(draftSession);
           setDirectProtocolAvailable(canGoDirect);
           setPipelineNotice(
             canGoDirect
@@ -814,6 +958,7 @@ export default function App() {
     setIsGeneratingSummary(true);
     setSummaries({ 0: "Zusammenfassung wird generiert..." });
     setSummaryReviews({});
+    setSummaryInputFingerprint(null);
 
     try {
       const result = await generateSummary(
@@ -834,6 +979,14 @@ export default function App() {
           chunks_processed: result.chunksProcessed,
         },
       });
+      setSummaryInputFingerprint(
+        buildSummaryInputFingerprint(
+          [DEFAULT_TOP_TITLE],
+          transcriptLines,
+          new Array(transcriptLines.length).fill(0),
+          speakerNames
+        )
+      );
 
       // Send telemetry
       if (telemetryOptIn && currentJobId) {
@@ -855,6 +1008,7 @@ export default function App() {
         error instanceof Error ? error.message : "Unbekannter Fehler";
       setSummaries({ 0: `Fehler: ${errorMessage}` });
       setSummaryReviews({});
+      setSummaryInputFingerprint(null);
     } finally {
       setIsGeneratingSummary(false);
     }
@@ -878,19 +1032,21 @@ export default function App() {
 
     // Generate summaries for each TOP with assigned lines
     const validTops = tops.filter((t) => t.trim() !== "");
-    const hasServerSummaries = validTops.some((_, index) => {
+    const hasCurrentSummaries = summariesAreFresh && validTops.some((_, index) => {
       const summary = summaries[index];
       return typeof summary === "string" && summary.trim() !== "";
     });
 
-    if (hasServerSummaries) {
+    if (hasCurrentSummaries) {
       setDirectProtocolAvailable(false);
       setPipelineNotice(null);
       return;
     }
 
+    const generationFingerprint = currentSummaryInputFingerprint;
     const newSummaries: Record<number, string> = {};
     const newSummaryReviews: Record<number, SummaryReview> = {};
+    setSummaryInputFingerprint(null);
 
     console.log(`[Summary] Starting generation for ${validTops.length} TOPs`);
 
@@ -949,6 +1105,7 @@ export default function App() {
     console.log(
       `[Summary] All TOPs processed, total duration: ${totalDuration}s`
     );
+    setSummaryInputFingerprint(generationFingerprint);
 
     // Send telemetry after all summaries are generated
     if (telemetryOptIn && jobId) {
@@ -996,6 +1153,7 @@ export default function App() {
       setAgendaDetectionError(null);
       setSummaries({});
       setSummaryReviews({});
+      setSummaryInputFingerprint(null);
       setAudioUrl(null);
       setSkippedAssignment(false);
       setIsGeneratingSummary(false);
@@ -1056,6 +1214,11 @@ export default function App() {
   };
 
   const handleDirectProtocol = () => {
+    if (!hasFreshSummariesInState) {
+      setDirectProtocolAvailable(false);
+      setPipelineNotice("Zusammenfassungen müssen nach den Korrekturen neu erstellt werden.");
+      return;
+    }
     setCurrentStep(3);
     setDirectProtocolAvailable(false);
     setPipelineNotice(null);
@@ -1139,7 +1302,7 @@ export default function App() {
         <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <span>{pipelineNotice}</span>
-            {directProtocolAvailable && (
+            {directProtocolAvailable && hasFreshSummariesInState && (
               <button
                 type="button"
                 onClick={handleDirectProtocol}
@@ -1204,7 +1367,7 @@ export default function App() {
           speakerNames={speakerNames}
           setSpeakerNames={setSpeakerNames}
           sessionId={sessionId}
-          hasSummaries={hasAnySummary(buildSessionPayload())}
+          hasSummaries={hasFreshSummariesInState}
           rememberSpeakers={rememberSpeakers}
         />
       ) : (
@@ -1213,9 +1376,9 @@ export default function App() {
           tops={validTops}
           transcript={transcript}
           assignments={assignments}
-          summaries={summaries}
+          summaries={summariesAreFresh ? summaries : {}}
           setSummaries={setSummaries}
-          summaryReviews={summaryReviews}
+          summaryReviews={summariesAreFresh ? summaryReviews : {}}
           onRegenerateSummary={handleRegenerateSummary}
           isGenerating={isGeneratingSummary}
           audioUrl={audioUrl ?? undefined}

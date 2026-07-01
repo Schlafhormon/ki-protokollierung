@@ -160,6 +160,24 @@ describe('api session client', () => {
             summaries: { 0: 'Zusammenfassung' },
             skipped_assignment: false,
           },
+          agenda_detection: {
+            tops: ['Haushalt'],
+            assignments: [0],
+            segments: [
+              {
+                top_index: 0,
+                top_title: 'Haushalt',
+                start_index: 0,
+                end_index: 0,
+                confidence: 0.91,
+                uncertain: false,
+                transition_type: 'explicit',
+                reason: 'Explizite TOP-Nennung',
+              },
+            ],
+            strategy: 'known_agenda_heuristic',
+            uncertain_count: 0,
+          },
           warnings: ['Hinweis'],
         }),
     });
@@ -171,6 +189,8 @@ describe('api session client', () => {
     expect(result.pipeline.warnings).toEqual([]);
     expect(result.warnings).toEqual(['Hinweis']);
     expect(result.session.summaries[0]).toBe('Zusammenfassung');
+    expect(result.agenda_detection?.segments).toHaveLength(1);
+    expect(result.agenda_detection?.uncertain_count).toBe(0);
   });
 
   it('saves and loads persisted session state', async () => {

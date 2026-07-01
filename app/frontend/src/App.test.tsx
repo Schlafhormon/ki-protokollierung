@@ -55,7 +55,8 @@ const completedPipeline: PipelineJob = {
 function pipelineResult(
   overrides: Partial<PipelineResultResponse['session']> = {},
   pipeline: PipelineJob = completedPipeline,
-  warnings: string[] = []
+  warnings: string[] = [],
+  agendaDetection: PipelineResultResponse['agenda_detection'] = null
 ): PipelineResultResponse {
   return {
     pipeline,
@@ -88,6 +89,7 @@ function pipelineResult(
     speaker_observations: [],
     summary_reviews: overrides.summary_reviews ?? {},
     warnings,
+    agenda_detection: agendaDetection,
   };
 }
 
@@ -193,6 +195,113 @@ describe('App pipeline flow', () => {
     expect(generateSummary).not.toHaveBeenCalled();
   });
 
+  it('sets agenda detection from the pipeline result', async () => {
+    vi.mocked(getPipelineResult).mockResolvedValue(
+      pipelineResult(
+        {},
+        completedPipeline,
+        [],
+        {
+          tops: ['Haushalt'],
+          assignments: [0],
+          strategy: 'known_agenda_heuristic',
+          uncertain_count: 0,
+          segments: [
+            {
+              top_index: 0,
+              top_title: 'Haushalt',
+              start_index: 0,
+              end_index: 0,
+              confidence: 0.95,
+              uncertain: false,
+              transition_type: 'explicit',
+              reason: 'Explizite TOP-Nennung',
+              evidence_index: 0,
+              evidence_text: 'Der Haushalt wird beraten.',
+            },
+          ],
+        }
+      )
+    );
+
+    await uploadAndStart();
+
+    expect(await screen.findByText(/1 Segmente, 0 unsicher/i)).toBeInTheDocument();
+    expect(screen.getByText(/Strategie: known_agenda_heuristic/i)).toBeInTheDocument();
+  });
+
+  it('hides direct protocol when agenda detection is uncertain', async () => {
+    vi.mocked(getPipelineResult).mockResolvedValue(
+      pipelineResult(
+        {},
+        completedPipeline,
+        [],
+        {
+          tops: ['Haushalt'],
+          assignments: [0],
+          strategy: 'llm_repaired',
+          uncertain_count: 1,
+          segments: [
+            {
+              top_index: 0,
+              top_title: 'Haushalt',
+              start_index: 0,
+              end_index: 0,
+              confidence: 0.45,
+              uncertain: true,
+              transition_type: 'repaired',
+              reason: 'Segment wurde repariert',
+              evidence_index: 0,
+              evidence_text: 'Der Haushalt wird beraten.',
+            },
+          ],
+        }
+      )
+    );
+
+    await uploadAndStart();
+
+    expect(await screen.findByText(/1 Segmente, 1 unsicher/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /direkt zum protokoll/i })).not.toBeInTheDocument();
+  });
+
+  it('treats pipeline summaries as stale after assignment inputs change and regenerates', async () => {
+    const user = userEvent.setup();
+    vi.mocked(generateSummary).mockResolvedValue({
+      summary: 'Neu generierte Zusammenfassung.',
+      durationSeconds: 2,
+      structured: null,
+      sourceLinks: [],
+      reviewWarnings: [],
+      fallbackUsed: false,
+      chunksProcessed: 1,
+    });
+
+    await uploadAndStart(user);
+
+    expect(await screen.findByRole('button', { name: /direkt zum protokoll/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^zum protokoll/i })).toBeInTheDocument();
+
+    const topInput = screen.getByLabelText(/ausgewählter top/i);
+    await user.clear(topInput);
+    await user.type(topInput, 'Neuer Haushalt');
+    await user.click(screen.getByRole('button', { name: /top umbenennen/i }));
+
+    expect(screen.queryByRole('button', { name: /direkt zum protokoll/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /zusammenfassungen erstellen/i }));
+
+    await waitFor(() => {
+      expect(generateSummary).toHaveBeenCalledWith(
+        'Neuer Haushalt',
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'Der Haushalt wird beraten.' }),
+        ]),
+        expect.any(Object)
+      );
+    });
+    expect(await screen.findByText('Neu generierte Zusammenfassung.')).toBeInTheDocument();
+  });
+
   it('falls back to the legacy flow when the pipeline fails', async () => {
     vi.mocked(startPipeline).mockRejectedValue(new Error('Pipeline nicht erreichbar'));
 
@@ -245,5 +354,29 @@ describe('App pipeline flow', () => {
       expect(pollPipeline).toHaveBeenCalledWith('pipeline-1', expect.any(Function));
     });
     expect(await screen.findByRole('button', { name: /direkt zum protokoll/i })).toBeInTheDocument();
+  });
+
+  it('clears a failed restored pipeline id and loads the saved session', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('active-pipeline-id', 'pipeline-1');
+    localStorage.setItem('active-session-id', 'session-1');
+    vi.mocked(getPipelineStatus).mockResolvedValue({
+      ...startedPipeline,
+      status: 'failed',
+      stage: 'summarize',
+      progress: 0,
+      error: 'Pipeline wurde durch Backend-Neustart unterbrochen',
+    });
+
+    render(<App />);
+    await user.click(
+      await screen.findByRole('button', { name: /letzte sitzung fortsetzen/i })
+    );
+
+    await waitFor(() => {
+      expect(loadSession).toHaveBeenCalledWith('session-1');
+    });
+    expect(localStorage.getItem('active-pipeline-id')).toBeNull();
+    expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
   });
 });

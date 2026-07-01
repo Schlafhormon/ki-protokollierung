@@ -47,6 +47,21 @@ function normalizePipelineJob(data: PipelineJob): PipelineJob {
   };
 }
 
+function normalizeAgendaDetection(
+  data: PipelineResultResponse["agenda_detection"]
+): PipelineResultResponse["agenda_detection"] {
+  if (!data) {
+    return null;
+  }
+  return {
+    tops: data.tops ?? [],
+    assignments: data.assignments ?? [],
+    segments: data.segments ?? [],
+    strategy: data.strategy ?? "unknown",
+    uncertain_count: data.uncertain_count ?? 0,
+  };
+}
+
 function estimateTranscriptChars(lines: TranscriptLine[]): number {
   return lines.reduce(
     (sum, line) => sum + line.speaker.length + line.text.length + 3,
@@ -177,6 +192,7 @@ export async function getPipelineResult(
     ...result,
     pipeline: normalizePipelineJob(result.pipeline),
     warnings: result.warnings ?? [],
+    agenda_detection: normalizeAgendaDetection(result.agenda_detection),
   };
 }
 

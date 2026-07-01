@@ -580,6 +580,13 @@ def test_pipeline_runs_to_reviewable_result_and_persists_status_after_cache_clea
         assert session["summaries"]["0"] == "Zusammenfassung TOP 1 Haushalt"
         assert session["summary_reviews"]["0"]["structured"]["discussion"]
         assert session["audio_url"].startswith("/api/audio/")
+        assert result["agenda_detection"]["tops"] == [
+            "TOP 1 Haushalt",
+            "TOP 2 Schulbau",
+        ]
+        assert result["agenda_detection"]["assignments"] == [0, 0, 1]
+        assert result["agenda_detection"]["uncertain_count"] == 0
+        assert result["agenda_detection"]["segments"][0]["top_title"] == "TOP 1 Haushalt"
 
         session["summaries"]["0"] = "Manuell korrigierte Zusammenfassung."
         save_response = client.put(
@@ -685,6 +692,96 @@ def test_pipeline_falls_back_to_full_conversation_when_agenda_detection_fails(
     assert result["session"]["tops"] == ["Gesamtes Gespräch"]
     assert result["session"]["assignments"] == [0]
     assert result["warnings"]
+    assert result["agenda_detection"]["tops"] == ["Gesamtes Gespräch"]
+    assert result["agenda_detection"]["assignments"] == [0]
+    assert result["agenda_detection"]["uncertain_count"] == 1
+    assert result["agenda_detection"]["strategy"] == "pipeline_fallback_full_conversation"
+
+
+def test_pipeline_result_exposes_agenda_segments_and_uncertainty(
+    tmp_path, monkeypatch
+):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+    persistence.save_session(
+        "session-agenda",
+        {
+            "job_id": None,
+            "current_step": 3,
+            "tops": ["TOP 1 Haushalt", "TOP 2 Schulbau"],
+            "transcript": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "TOP 1 Haushalt.",
+                    "start": 0.0,
+                    "end": 1.0,
+                },
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Vielleicht TOP 2 Schulbau.",
+                    "start": 1.0,
+                    "end": 2.0,
+                },
+            ],
+            "assignments": [0, 1],
+            "speaker_names": {},
+            "summaries": {0: "Haushalt.", 1: "Schulbau."},
+            "summary_reviews": {},
+            "skipped_assignment": False,
+        },
+    )
+    persistence.save_pipeline_job(
+        "pipeline-agenda",
+        {
+            "session_id": "session-agenda",
+            "transcription_job_id": None,
+            "status": "completed",
+            "stage": "ready_for_review",
+            "progress": 100,
+            "result_refs": {
+                "warnings": [],
+                "agenda": {
+                    "strategy": "llm_repaired",
+                    "uncertain_count": 1,
+                    "segments": [
+                        {
+                            "top_index": 0,
+                            "top_title": "TOP 1 Haushalt",
+                            "start_index": 0,
+                            "end_index": 0,
+                            "confidence": 0.92,
+                            "uncertain": False,
+                            "transition_type": "explicit",
+                            "reason": "Explizite TOP-Nennung",
+                            "evidence_index": 0,
+                            "evidence_text": "TOP 1 Haushalt.",
+                        },
+                        {
+                            "top_index": 1,
+                            "top_title": "TOP 2 Schulbau",
+                            "start_index": 1,
+                            "end_index": 1,
+                            "confidence": 0.42,
+                            "uncertain": True,
+                            "transition_type": "repaired",
+                            "reason": "Segment wurde repariert und muss geprüft werden",
+                            "evidence_index": 1,
+                            "evidence_text": "Vielleicht TOP 2 Schulbau.",
+                        },
+                    ],
+                },
+            },
+        },
+    )
+
+    with TestClient(main.app) as client:
+        response = client.get("/api/pipeline/pipeline-agenda/result")
+
+    assert response.status_code == 200
+    agenda_detection = response.json()["agenda_detection"]
+    assert agenda_detection["tops"] == ["TOP 1 Haushalt", "TOP 2 Schulbau"]
+    assert agenda_detection["assignments"] == [0, 1]
+    assert agenda_detection["uncertain_count"] == 1
+    assert agenda_detection["segments"][1]["uncertain"] is True
 
 
 def test_pipeline_marks_failed_top_summary_but_stays_reviewable(

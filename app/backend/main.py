@@ -913,15 +913,6 @@ class SpeakerObservationResponse(BaseModel):
     updated_at: float
 
 
-class PipelineResultResponse(BaseModel):
-    pipeline: PipelineStatusResponse
-    session: SessionResponse
-    job: Optional[TranscriptionJob] = None
-    speaker_observations: List[SpeakerObservationResponse] = Field(default_factory=list)
-    summary_reviews: Dict[int, Any] = Field(default_factory=dict)
-    warnings: List[str] = Field(default_factory=list)
-
-
 class SpeakerObservationConfirmRequest(BaseModel):
     profile_id: Optional[str] = None
     confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
@@ -1029,6 +1020,16 @@ class AgendaDetectionResponse(BaseModel):
     segments: List[AssignmentSuggestionSegmentResponse]
     uncertain_count: int
     strategy: str
+
+
+class PipelineResultResponse(BaseModel):
+    pipeline: PipelineStatusResponse
+    session: SessionResponse
+    job: Optional[TranscriptionJob] = None
+    speaker_observations: List[SpeakerObservationResponse] = Field(default_factory=list)
+    summary_reviews: Dict[int, Any] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
+    agenda_detection: Optional[AgendaDetectionResponse] = None
 
 
 class ExportMetadataRequest(BaseModel):
@@ -1482,6 +1483,28 @@ def build_pipeline_status_response(job: dict[str, Any]) -> PipelineStatusRespons
         error=job.get("error"),
         created_at=job.get("created_at"),
         updated_at=job.get("updated_at"),
+    )
+
+
+def build_pipeline_agenda_detection_response(
+    agenda_info: Any,
+    session: SessionResponse,
+) -> AgendaDetectionResponse | None:
+    if not isinstance(agenda_info, dict):
+        return None
+
+    segments: list[AssignmentSuggestionSegmentResponse] = []
+    for raw_segment in agenda_info.get("segments") or []:
+        if not isinstance(raw_segment, dict):
+            continue
+        segments.append(AssignmentSuggestionSegmentResponse(**raw_segment))
+
+    return AgendaDetectionResponse(
+        tops=list(session.tops or []),
+        assignments=list(session.assignments or []),
+        segments=segments,
+        strategy=str(agenda_info.get("strategy") or "unknown"),
+        uncertain_count=int(agenda_info.get("uncertain_count") or 0),
     )
 
 
@@ -2109,6 +2132,10 @@ async def get_pipeline_result(pipeline_id: str):
         for observation in load_speaker_observations(session_id=session_id)
     ]
     status = build_pipeline_status_response(pipeline_job)
+    agenda_detection = build_pipeline_agenda_detection_response(
+        _pipeline_refs(pipeline_job).get("agenda"),
+        session_response,
+    )
     return PipelineResultResponse(
         pipeline=status,
         session=session_response,
@@ -2116,6 +2143,7 @@ async def get_pipeline_result(pipeline_id: str):
         speaker_observations=observations,
         summary_reviews=session_response.summary_reviews,
         warnings=status.warnings,
+        agenda_detection=agenda_detection,
     )
 
 

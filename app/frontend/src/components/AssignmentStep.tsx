@@ -573,7 +573,7 @@ export default function AssignmentStep({
           disabled={selectedLineIndex === null}
           className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
         >
-          Segment bearbeiten
+          Segment zuordnen
         </button>
         <button
           type="button"

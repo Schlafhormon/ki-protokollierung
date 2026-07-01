@@ -103,6 +103,7 @@ export interface PipelineResultResponse {
   speaker_observations?: SpeakerObservation[];
   summary_reviews?: Record<number, SummaryReview> | Record<string, SummaryReview>;
   warnings: string[];
+  agenda_detection?: AgendaDetectionResponse | null;
 }
 
 export interface SessionSavePayload {
