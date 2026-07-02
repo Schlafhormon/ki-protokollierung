@@ -1,519 +1,396 @@
 # Protokollierungsassistenz
 
-Automatic transcription and meeting minutes generation from audio recordings of German municipal meetings.
+Webanwendung zur automatischen Transkription, Sprechererkennung, TOP-Zuordnung,
+Zusammenfassung und Protokollerstellung aus Audioaufnahmen kommunaler Sitzungen.
 
-Automatische Transkription und Protokollerstellung aus Audioaufnahmen von deutschen Kommunalsitzungen.
+Dieses Repository ist ein weiterentwickelter Fork der ursprünglichen
+Protokollierungsassistenz. Die Weiterentwicklung erfolgte durch
+**Keule-Services**, **Erik Benke** und die **Stadt Doberlug-Kirchhain**.
 
-### Screenshots
+<p align="center">
+  <img src="app/frontend/public/logos/Keule-Logo.png" alt="Keule-Services Logo" height="64">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="app/frontend/public/logos/Logo-jpeg_4c.jpg" alt="Stadt Doberlug-Kirchhain Logo" height="72">
+</p>
 
-<table>
-  <tr>
-    <td align="center"><strong>Upload</strong></td>
-    <td align="center"><strong>Processing</strong></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/1.png" alt="Upload" width="400"></td>
-    <td><img src="docs/screenshots/2.png" alt="Processing" width="400"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>Assign segments to agenda items</strong></td>
-    <td align="center"><strong>Export meeting minutes</strong></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/3.png" alt="Assign" width="400"></td>
-    <td><img src="docs/screenshots/4.png" alt="Export" width="400"></td>
-  </tr>
-</table>
+## Was ist neu in diesem Fork?
 
----
+- End-to-End-Pipeline vom Audio-Upload bis zur prüfbaren Protokollvorlage
+- automatische Sprecherdiarisierung mit lokalen Sprecherprofilen
+- automatische Sprecher-Wiedererkennung mit Opt-in, Profilvorschlägen und manueller Bestätigung
+- Verwaltung gespeicherter Sprecherprofile inklusive Umbenennen, Archivieren und Löschen gespeicherter Embeddings
+- automatische TOP-Erkennung und Segmentierung aus Transkript und optionaler PDF-Einladung
+- PDF-Upload zur Extraktion von Tagesordnungspunkten
+- Review-Oberfläche für unsichere TOP-Grenzen, Sprecherzuordnungen und Zusammenfassungen
+- editierbares Transkript mit Zusammenführen/Splitten von Zeilen und Segmenten
+- sitzungsübergreifende Persistenz in SQLite inklusive Sitzungswiederherstellung
+- Export als DOCX, PDF oder TXT mit Metadaten, Sprecherliste, Transkript-Auszug und Generierungshinweis
+- lokales Docker-Setup mit CPU- oder optionalem NVIDIA-GPU-Betrieb
 
-## System Requirements / Systemanforderungen
+Die bisherigen Screenshots wurden entfernt, weil sie den aktuellen Stand der
+Anwendung nicht mehr abbilden.
 
-| Requirement | Minimum | Recommended |
-|-------------|---------|-------------|
-| **Disk Space** | 25 GB | 40 GB |
-| **RAM** | 8 GB | 16 GB |
-| **Internet** | Required for setup | Required for setup |
-| **Operating System** | Windows 10/11, macOS 11+, Linux | - |
+## Typischer Ablauf
 
-### Optional: NVIDIA GPU (Windows/Linux only)
+1. Audioaufnahme hochladen.
+2. Optional PDF-Einladung hochladen oder TOPs manuell eingeben.
+3. Optional "Sprecher dauerhaft merken" aktivieren, wenn Sprecherprofile für künftige Sitzungen genutzt werden sollen.
+4. "Automatisch verarbeiten" starten.
+5. Erkannte TOP-Segmente, Sprecher und unsichere Stellen prüfen und bei Bedarf korrigieren.
+6. Zusammenfassungen je TOP prüfen, neu generieren oder bearbeiten.
+7. Protokoll mit Sitzungsmetadaten als DOCX, PDF oder TXT exportieren.
 
-If you have an NVIDIA graphics card, the application can transcribe audio much faster. macOS users will use CPU mode (still works, just much slower).
+Wenn keine TOPs angegeben werden, kann die Anwendung ein gesamtes Gespräch als
+einen Gesamt-TOP zusammenfassen.
 
-Wenn Sie eine NVIDIA-Grafikkarte haben, kann die Anwendung Audio viel schneller transkribieren. macOS-Benutzer verwenden den CPU-Modus (funktioniert trotzdem, nur viel langsamer).
+## Systemanforderungen
 
----
+| Anforderung | Minimum | Empfohlen |
+| --- | --- | --- |
+| Betriebssystem | Windows 10/11, macOS 11+, Linux | Windows/Linux für GPU |
+| Docker | Docker Desktop oder Docker Engine mit Compose | aktuelle Docker-Version |
+| RAM | 8 GB | 16 GB oder mehr |
+| Speicherplatz | 25 GB | 40 GB oder mehr |
+| Internet | für Installation, Images und Modell-Downloads | stabile Verbindung |
+| GPU | optional | NVIDIA-GPU mit Container Toolkit |
+
+Für die lokale Transkription nutzt das Backend WhisperX und PyAnnote. Wenn die
+Modelle nicht im Docker-Image vorinstalliert sind, wird für die PyAnnote-
+Diarisierung ein HuggingFace-Token über `HF_TOKEN` benötigt.
 
 ## Installation
 
-### Step 1: Download the Application
-
-Download the application from GitHub:
-
-Laden Sie die Anwendung von GitHub herunter:
-
-1. Go to: **https://github.com/aihpi/pilotproject-protokollierungsassistenz**
-2. Click the green **"Code"** button
-3. Click **"Download ZIP"**
-4. Save the file to your computer (e.g., Downloads folder)
-5. **Extract the ZIP file:**
-   - **Windows:** Right-click the ZIP file → "Extract All..." → Choose a location (e.g., Desktop or Documents)
-   - **macOS:** Double-click the ZIP file to extract it
-
-You should now have a folder called `protokollierungsassistenz-main` (or similar).
-
-Sie sollten jetzt einen Ordner namens `protokollierungsassistenz-main` (oder ähnlich) haben.
-
----
-
-### Step 2: Install Docker Desktop
-
-Docker is required to run the application. Download and install Docker Desktop:
-
-Docker wird benötigt, um die Anwendung auszuführen. Laden Sie Docker Desktop herunter und installieren Sie es:
-
-| Operating System | Download Link |
-|------------------|---------------|
-| **Windows** | [Download Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) |
-| **macOS** | [Download Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac-install/) |
-| **Linux** | [Download Docker Desktop for Linux](https://docs.docker.com/desktop/install/linux-install/) |
-
-After installation, **start Docker Desktop** and wait until it shows "Docker Desktop is running".
-
-Nach der Installation **starten Sie Docker Desktop** und warten Sie, bis "Docker Desktop is running" angezeigt wird.
-
----
-
-### Step 3: Run the Setup Script
-
-#### Windows
-
-1. Open the folder where you downloaded/extracted the application
-2. Find the file **`setup.ps1`**
-3. **Right-click** on it and select **"Run with PowerShell"**
-4. Follow the on-screen instructions
-
-If you see a security warning, click "Run anyway" or "More info" → "Run anyway".
-
-#### macOS / Linux
-
-1. Open **Terminal** (macOS: Applications → Utilities → Terminal)
-2. Navigate to the application folder:
-   ```bash
-   cd /path/to/protokollierungsassistenz
-   ```
-3. Run the setup script:
-   ```bash
-   ./setup.sh
-   ```
-4. Follow the on-screen instructions
-
----
-
-### Optional: Pin a Stable Release
-
-By default the setup uses the existing moving image tags (`latest`,
-`cpu-latest`, `gpu-latest`). To install a specific published release instead,
-set `PROTOKOLL_IMAGE_TAG` before starting:
+### 1. Repository beziehen
 
 ```bash
-PROTOKOLL_IMAGE_TAG=v1.2.3 ./setup.sh
+git clone https://github.com/Schlafhormon/ki-protokollierung.git
+cd ki-protokollierung
 ```
 
+Alternativ kann das Repository als ZIP von GitHub heruntergeladen und entpackt
+werden.
+
+### 2. Docker installieren und starten
+
+Installieren Sie Docker Desktop bzw. Docker Engine mit Docker Compose:
+
+- Windows: https://docs.docker.com/desktop/install/windows-install/
+- macOS: https://docs.docker.com/desktop/install/mac-install/
+- Linux: https://docs.docker.com/desktop/install/linux-install/
+
+Starten Sie Docker, bevor Sie das Setup ausführen.
+
+### 3. Optional `.env` anlegen
+
+Für viele lokale Tests reichen die Standardwerte. Wenn Sie lokale Images ohne
+vorinstallierte Modelle verwenden, setzen Sie für die Sprecherdiarisierung einen
+HuggingFace-Token:
+
+```bash
+cp .env.example .env
+# In .env setzen:
+# HF_TOKEN=hf_...
+```
+
+Unter PowerShell:
+
 ```powershell
-$env:PROTOKOLL_IMAGE_TAG = "v1.2.3"
+Copy-Item .env.example .env
+# Danach .env bearbeiten und HF_TOKEN setzen, falls erforderlich.
+```
+
+### 4. Setup starten
+
+Windows:
+
+```powershell
 .\setup.ps1
 ```
 
-The setup scripts pull missing images by default. Set
-`PROTOKOLL_PULL_POLICY=always` for the old "always check for updates" behavior,
-or `PROTOKOLL_PULL_POLICY=never` for fully offline starts with local images.
+macOS/Linux:
 
-Runtime state is stored in local bind mounts:
+```bash
+chmod +x ./setup.sh
+./setup.sh
+```
 
-- `./uploads` for retained audio playback after session restore
-- `./data` for the SQLite session database
+Das Setup prüft Docker, erkennt optional eine NVIDIA-GPU, baut in diesem Fork bei
+einem lokalen Repository standardmäßig lokale Docker-Images und startet
+Frontend, Backend und Ollama per Docker Compose.
 
-### Lokale Datenschutzdaten / Local Privacy Data
+Nach erfolgreichem Start ist die Anwendung erreichbar unter:
 
-Die Anwendung verarbeitet Audio, Transkripte und Sprecherinformationen lokal in
-der Docker-Umgebung. In `./data/sessions.sqlite3` können gespeichert werden:
+```text
+http://localhost:3000
+```
 
-- Sitzungszustand, TOPs, Zuordnungen, Zusammenfassungen und Export-Metadaten
-- lokale Sprecherbenennungen pro Sitzung
-- lokale Job-Sprecher-Embeddings für Review-Funktionen einer Sitzung
-- globale Sprecherprofile und globale Sprecher-Embeddings nur nach Opt-in
-  "Sprecher dauerhaft merken" oder nach einer ausdrücklichen Aktion wie
-  "Vorschlag übernehmen", "Neues Profil merken" oder "Bestehendem Profil
-  zuordnen"
+## Setup-Befehle
 
-Das Opt-in "Sprecher dauerhaft merken" ist standardmäßig aus. Ohne diese
-Auswahl werden bei der automatischen Verarbeitung keine gespeicherten
-Sprecherprofile vorgeschlagen. Lokale Sprecher können trotzdem in der aktuellen
-Sitzung benannt werden.
+| Befehl | Windows | macOS/Linux |
+| --- | --- | --- |
+| Starten/Fortsetzen | `.\setup.ps1` | `./setup.sh` |
+| Stoppen | `.\setup.ps1 stop` | `./setup.sh stop` |
+| Status prüfen | `.\setup.ps1 status` | `./setup.sh status` |
+| Neustart | `.\setup.ps1 restart` | `./setup.sh restart` |
+| Logs anzeigen | `.\setup.ps1 logs` | `./setup.sh logs` |
+| Daten löschen und neu starten | `.\setup.ps1 cleanup` | `./setup.sh cleanup` |
 
-Gespeicherte Sprecherprofile lassen sich in der Sprecherprüfung verwalten:
+Wichtige Setup-Variablen:
 
-- "Profil archivieren" entfernt das Profil aus künftigen Vorschlägen und löst
-  gespeicherte Observations vom Profilnamen.
-- "Embeddings löschen" entfernt die global gespeicherten biometrischen
-  Referenz-Embeddings eines Profils.
-- Archivierte Profile werden standardmäßig nicht mehr in der Profilliste und
-  nicht mehr als automatische Sprecher-Vorschläge verwendet.
+| Variable | Bedeutung | Standard |
+| --- | --- | --- |
+| `PROTOKOLL_BUILD_LOCAL` | lokale Images aus diesem Repository bauen (`auto`, `true`, `false`) | `auto` |
+| `PROTOKOLL_PRECACHE_MODELS` | ML-Modelle beim lokalen Build vorladen | `0` |
+| `PROTOKOLL_BUILD_NO_CACHE` | Docker-Build ohne Cache erzwingen | `false` |
+| `PROTOKOLL_IMAGE_TAG` | veröffentlichte App-Images auf einen Release-Tag pinnen | leer |
+| `PROTOKOLL_PULL_POLICY` | Pull-Verhalten für Images (`missing`, `always`, `never`) | `missing` |
+| `FRONTEND_IMAGE`, `BACKEND_IMAGE`, `BACKEND_GPU_IMAGE` | explizite Image-Referenzen verwenden | leer |
 
----
+Wenn `PROTOKOLL_IMAGE_TAG` oder explizite Image-Variablen gesetzt sind, nutzt
+das Setup diese Images statt automatisch lokale Images zu bauen.
 
-### Step 4: Wait for Download
+## Datenschutz und Sprecherprofile
 
-The setup will download the application images (~6 GB) and AI models (~5 GB). This may take **5-15 minutes** depending on your internet speed.
+Die Anwendung verarbeitet Audio, Transkripte, TOPs, Zusammenfassungen und
+Sprecherinformationen lokal in der Docker-Umgebung. Persistente Daten liegen in:
 
-Das Setup lädt die Anwendungsimages (~6 GB) und KI-Modelle (~5 GB) herunter. Dies kann je nach Internetgeschwindigkeit **5-15 Minuten** dauern.
+- `./data/sessions.sqlite3` für Sitzungen, Jobs, TOPs, Zuordnungen, Sprecherprofile und Export-Metadaten
+- `./uploads` für gespeicherte Audiodateien zur Wiedergabe und Sitzungswiederherstellung
+- Docker-Volume `ollama_data` für lokale Ollama-Modelle
 
-You will see progress messages. When complete, your browser will open automatically.
+Das dauerhafte Merken von Sprechern ist standardmäßig ausgeschaltet. Ohne Opt-in
+werden keine globalen Sprecherprofile vorgeschlagen oder automatisch dauerhaft
+gespeichert. Lokale Sprecher können weiterhin nur für die aktuelle Sitzung
+benannt werden.
 
-Sie sehen Fortschrittsmeldungen. Nach Abschluss öffnet sich Ihr Browser automatisch.
+Dauerhafte Sprecherprofile und globale Embeddings entstehen erst nach einer
+ausdrücklichen Aktion, zum Beispiel:
 
----
+- "Sprecher dauerhaft merken" aktivieren
+- "Vorschlag übernehmen"
+- "Neues Profil merken"
+- "Bestehendem Profil zuordnen"
 
-### Step 5: Start Using the Application
+In der Sprecherprüfung können Profile umbenannt, archiviert und gespeicherte
+Embeddings gelöscht werden. Archivierte Profile werden standardmäßig nicht mehr
+für Vorschläge verwendet.
 
-Once setup is complete, the application is available at:
+## Konfiguration
 
-Nach Abschluss des Setups ist die Anwendung verfügbar unter:
+Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 
-**http://localhost:3000**
+| Variable | Beschreibung | Standard |
+| --- | --- | --- |
+| `HF_TOKEN` | HuggingFace-Token für PyAnnote, wenn Modelle nicht vorinstalliert sind | leer |
+| `WHISPER_MODEL` | Whisper-Modell | `large-v2` |
+| `WHISPER_DEVICE` | Gerät für WhisperX (`cpu`, `cuda`, `auto`) | Compose: `cpu` |
+| `WHISPER_BATCH_SIZE` | Batch-Größe für Transkription | `16` |
+| `WHISPER_LANGUAGE` | Sprache | `de` |
+| `LLM_BASE_URL` | OpenAI-kompatibler LLM-Endpunkt | `http://ollama:11434/v1` |
+| `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `qwen3:8b` |
+| `LLM_TIMEOUT_SECONDS` | Timeout je LLM-Anfrage | `120` |
+| `LLM_CHUNK_CHARS` | Chunk-Größe für lange TOP-Texte | `12000` |
+| `SPEAKER_EMBEDDING_ENABLED` | lokale Sprecher-Embeddings für prüfbare Matches erzeugen | `true` |
+| `SPEAKER_MATCH_AUTO_THRESHOLD` | Schwelle für starke Sprecherprofil-Matches | `0.82` |
+| `SPEAKER_MATCH_SUGGEST_THRESHOLD` | Mindestschwelle für Vorschläge | `0.72` |
+| `AGENDA_DETECTION_USE_LLM` | LLM für TOP-Erkennung ohne expliziten UI/API-Wunsch verwenden | `false` |
+| `PERSISTENCE_DB_PATH` | SQLite-Pfad im Backend-Container | `/app/data/sessions.sqlite3` |
+| `MAX_UPLOAD_BYTES` | maximale Uploadgröße | `524288000` |
+| `TRANSCRIPTION_CONCURRENCY` | parallele Transkriptionsjobs | `1` |
+| `PIPELINE_CONCURRENCY` | parallele End-to-End-Pipelinejobs | `1` |
 
----
+Weitere Optionen stehen in `.env.example`.
 
-## Daily Usage / Tägliche Nutzung
+## GPU-Modus
 
-### Starting the Application
+Für NVIDIA-GPUs unter Windows oder Linux:
 
-If you restart your computer, you need to start the application again:
+1. NVIDIA-Treiber installieren.
+2. NVIDIA Container Toolkit installieren.
+3. Docker neu starten.
+4. Setup ausführen und GPU-Modus auswählen, wenn das Skript danach fragt.
 
-Wenn Sie Ihren Computer neu starten, müssen Sie die Anwendung erneut starten:
+Der GPU-Override nutzt `docker-compose.gpu.yml` und setzt das Backend auf
+`WHISPER_DEVICE=cuda`. macOS unterstützt diesen NVIDIA-GPU-Modus nicht.
 
-1. **Start Docker Desktop** (if not running)
-2. Run the setup script:
-   - **Windows:** Right-click `setup.ps1` → "Run with PowerShell"
-   - **macOS/Linux:** Open Terminal in the application folder and run `./setup.sh`
+## Fehlerbehebung
 
-The script will check if the application is already running and open your browser automatically.
+### Docker läuft nicht
 
-Das Skript prüft, ob die Anwendung bereits läuft und öffnet automatisch Ihren Browser.
+Docker Desktop bzw. Docker Engine starten und das Setup erneut ausführen.
 
-### Stopping the Application
+### Backend meldet fehlenden HuggingFace-Token
 
-To stop the application and free up resources:
+Wenn lokale Images ohne vorinstallierte Modelle gebaut wurden, setzen Sie in
+`.env`:
 
-Um die Anwendung zu stoppen und Ressourcen freizugeben:
+```text
+HF_TOKEN=hf_...
+```
 
-- **Windows:** `.\setup.ps1 stop`
-- **macOS/Linux:** `./setup.sh stop`
+Danach neu starten:
 
-### Other Commands / Weitere Befehle
+```bash
+./setup.sh restart
+```
 
-| Command | Description |
-|---------|-------------|
-| `./setup.sh status` | Check if services are running / Status der Dienste prüfen |
-| `./setup.sh logs` | View live logs / Live-Logs anzeigen |
-| `./setup.sh restart` | Restart the application / Anwendung neu starten |
+oder unter Windows:
 
----
+```powershell
+.\setup.ps1 restart
+```
 
-## Troubleshooting / Fehlerbehebung
+### Anwendung ist langsam
 
-### "Docker is not running"
+- CPU-Transkription ist deutlich langsamer als GPU-Transkription.
+- Der erste Lauf lädt Modelle und kann länger dauern.
+- Docker sollte ausreichend RAM erhalten, empfohlen sind mindestens 8 GB.
 
-Make sure Docker Desktop is started and shows "Running" status.
-
-Stellen Sie sicher, dass Docker Desktop gestartet ist und den Status "Running" zeigt.
-
-### "Not enough disk space"
-
-Free up at least 25 GB of disk space before running setup.
-
-Geben Sie mindestens 25 GB Speicherplatz frei, bevor Sie das Setup ausführen.
-
-### Application is slow
-
-- Transcription on CPU is slower than GPU (this is normal)
-- First transcription may take longer due to model loading
-- Ensure Docker Desktop has enough memory allocated (8 GB+)
-
-### View Logs
-
-To see what's happening:
+### Logs ansehen
 
 ```bash
 docker compose logs -f
 ```
 
-Press `Ctrl+C` to stop viewing logs.
-
-### Complete Reset
-
-If something goes wrong and you want to start fresh:
+oder über das Setup:
 
 ```bash
-docker compose down -v
-./setup.sh  # or .\setup.ps1 on Windows
+./setup.sh logs
 ```
 
-## GPU Mode (Optional, Windows/Linux)
+### Cleanup
 
-If you have an NVIDIA GPU and want faster transcription:
+Das entfernt Container und Docker-Volumes, insbesondere heruntergeladene
+Ollama-Modelle. Die lokalen Bind-Mounts `uploads/` und `data/` bleiben bestehen;
+löschen Sie diese Ordner nur bewusst, wenn auch hochgeladene Dateien und
+gespeicherte Sitzungen entfernt werden sollen.
 
-1. Install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-2. Run the setup script - it will detect your GPU automatically
-3. Choose "Yes" when asked about GPU mode
-
-macOS does not support NVIDIA GPUs.
-
----
-
-## Reporting Issues & Feedback
-
-Found a bug? Have a feature request? We'd love to hear from you!
-
-Haben Sie einen Fehler gefunden? Haben Sie einen Funktionswunsch? Wir freuen uns über Ihr Feedback!
-
-### How to Report an Issue
-
-1. Go to: **https://github.com/aihpi/pilotproject-protokollierungsassistenz/issues**
-2. Click **"New Issue"**
-3. Include the following information:
-   - Your operating system (Windows/macOS/Linux)
-   - What you were trying to do
-   - What happened (error message, screenshot if possible)
-   - Steps to reproduce the problem
-
-### Feature Requests
-
-Have an idea for improving the application? Create an issue and describe:
-- What feature you'd like to see
-- Why it would be helpful for your work
-
----
-
-## For Developers
-
-<details>
-<summary>Click to expand developer documentation</summary>
-
-### Overview
-
-This application provides a web-based workflow for generating meeting minutes (Sitzungsprotokolle) from audio recordings:
-
-1. **Upload** - Upload audio recording and enter agenda items (Tagesordnungspunkte/TOPs)
-2. **Transcribe** - Automatic transcription with speaker diarization using WhisperX + PyAnnote
-3. **Assign** - Manually assign transcript segments to each TOP
-4. **Summarize** - Generate summaries per TOP using an LLM (Qwen3 8B via Ollama)
-5. **Export** - Download the final meeting minutes
-
-Der Exportbereich im letzten Schritt enthält Metadatenfelder für Gremium, Datum,
-Ort, Sitzungstitel und Teilnehmer. Das Protokoll kann als DOCX, PDF oder TXT
-heruntergeladen werden. Optional lassen sich Sprecherliste, Transkript-Auszug und
-ein Bearbeitungs-/Generierungshinweis als Anhang aufnehmen.
-
-### Project Structure
-
+```bash
+./setup.sh cleanup
 ```
-protokollierungsassistenz/
+
+Windows:
+
+```powershell
+.\setup.ps1 cleanup
+```
+
+## Entwicklung
+
+### Projektstruktur
+
+```text
+ki-protokollierung/
 ├── app/
-│   ├── frontend/          # React + TypeScript web application
-│   └── backend/           # FastAPI Python backend
-├── scripts/               # Runtime helper scripts used by Compose
-│   └── research/          # Non-production research prototypes and archives
-├── .github/workflows/     # CI/CD for building Docker images
-└── docker-compose.yml     # Production deployment
+│   ├── frontend/          React + TypeScript + Vite
+│   └── backend/           FastAPI, WhisperX, PyAnnote, Export, Persistenz
+├── scripts/               Hilfs- und Research-Skripte
+├── k8s/                   Kubernetes-Manifeste
+├── docker-compose.yml     lokale Compose-Umgebung
+├── docker-compose.gpu.yml GPU-Override
+├── setup.ps1              Windows-Setup
+└── setup.sh               macOS/Linux-Setup
 ```
 
-Research scripts under `scripts/research/` are not part of the production application path. They may contain local sample paths and require manual input/data setup before use.
-
-### Pre-built Images
-
-Docker images are automatically built and published to GitHub Container Registry.
-Moving tags remain available for convenience:
-
-- `ghcr.io/aihpi/pilotproject-protokollierungsassistenz/frontend:latest`
-- `ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:cpu-latest`
-- `ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:gpu-latest`
-
-Versioned release tags are preferred for reproducible deployments:
-
-- `ghcr.io/aihpi/pilotproject-protokollierungsassistenz/frontend:vX.Y.Z`
-- `ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:vX.Y.Z`
-- `ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:vX.Y.Z-gpu`
-
-Commit-specific `sha-...` tags are used by the Kubernetes deployment manifests.
-These images include all ML models pre-bundled, so no HuggingFace token is required for end users.
-
-### Development Setup
-
-#### 1. Ollama (for summarization)
-
-```bash
-# macOS
-brew install ollama
-
-# Start Ollama server
-ollama serve
-
-# Pull the model (in another terminal)
-ollama pull qwen3:8b
-```
-
-#### 2. Backend
+### Backend lokal
 
 ```bash
 cd app/backend
-
-# Install dependencies with uv
 uv sync
-
-# Set environment variables
-export HF_TOKEN=your_huggingface_token
-
-# Run development server
-uv run uvicorn main:app --port 8010
+HF_TOKEN=hf_... uv run uvicorn main:app --port 8010
 ```
 
-The backend runs on `http://localhost:8010`.
+Das Backend läuft dann unter `http://localhost:8010`.
 
-#### 3. Frontend
+### Frontend lokal
 
 ```bash
 cd app/frontend
-
-# Install dependencies
 npm install
-
-# Run development server
 npm run dev
 ```
 
-The frontend runs on `http://localhost:5173`.
+Das Frontend läuft dann unter `http://localhost:5173`.
 
-### Building Docker Images Locally
+### Tests
 
-To build images locally (requires HuggingFace token):
-
-```bash
-export HF_TOKEN=your_huggingface_token
-
-# CPU image
-DOCKER_BUILDKIT=1 docker build \
-  --secret id=hf_token,env=HF_TOKEN \
-  -t backend:cpu ./app/backend
-
-# GPU image
-DOCKER_BUILDKIT=1 docker build \
-  -f app/backend/Dockerfile.gpu \
-  --secret id=hf_token,env=HF_TOKEN \
-  -t backend:gpu ./app/backend
-```
-
-For development images without pre-cached models, build with
-`--build-arg PRECACHE_MODELS=0` and provide `HF_TOKEN` at runtime if diarization
-requires it.
-
-Runtime images can be pinned through `.env` or shell environment variables:
+Backend:
 
 ```bash
-FRONTEND_IMAGE=ghcr.io/aihpi/pilotproject-protokollierungsassistenz/frontend:v1.2.3
-BACKEND_IMAGE=ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:v1.2.3
-BACKEND_GPU_IMAGE=ghcr.io/aihpi/pilotproject-protokollierungsassistenz/backend:v1.2.3-gpu
+cd app/backend
+uv run pytest
 ```
 
-### Environment Variables
+Frontend:
 
-Speaker memory is off for a session until the user explicitly enables it in the
-UI. Even high-confidence speaker matches are stored as review suggestions; a
-global profile embedding is copied only after an explicit confirm/manual action.
-Pipeline jobs persist their status in SQLite and active jobs are marked failed
-after a backend restart so the UI can show a clear restart/interruption state.
+```bash
+cd app/frontend
+npm test
+npm run typecheck
+npm run lint
+```
 
-| Variable             | Description                                         | Default                     |
-| -------------------- | --------------------------------------------------- | --------------------------- |
-| `HF_TOKEN`           | HuggingFace token for local dev/runtime, or BuildKit secret for local model pre-cache builds | - |
-| `FRONTEND_IMAGE`     | Frontend image reference for Docker Compose         | `frontend:latest` GHCR image |
-| `BACKEND_IMAGE`      | CPU backend image reference for Docker Compose      | `backend:cpu-latest` GHCR image |
-| `BACKEND_GPU_IMAGE`  | GPU backend image reference for Docker Compose override | `backend:gpu-latest` GHCR image |
-| `OLLAMA_IMAGE`       | Ollama image reference for Docker Compose           | `ollama/ollama:latest`      |
-| `WHISPER_MODEL`      | Whisper model size                                  | `large-v2`                  |
-| `WHISPER_DEVICE`     | Device for inference (`cuda`, `cpu`, `auto`)        | `auto`                      |
-| `WHISPER_BATCH_SIZE` | Batch size for transcription                        | `16`                        |
-| `WHISPER_LANGUAGE`   | Language code                                       | `de`                        |
-| `LLM_BASE_URL`       | Ollama API endpoint                                 | `http://localhost:11434/v1` |
-| `LLM_MODEL`          | Model name for summarization                        | `qwen3:8b`                  |
-| `LLM_TIMEOUT_SECONDS` | Timeout per LLM request                            | `120`                       |
-| `LLM_MAX_RETRIES`    | Retries for transient LLM errors                    | `2`                         |
-| `LLM_RETRY_BACKOFF_SECONDS` | Backoff between transient LLM retries       | `0.5`                       |
-| `LLM_CHUNK_CHARS`    | Target chunk size for long TOP transcripts          | `12000`                     |
-| `LLM_STRUCTURED_FALLBACK` | Fall back to plain text when structured output parsing fails | `true`        |
-| `SPEAKER_EMBEDDING_ENABLED` | Enable local speaker embedding extraction for reviewable matching | `true` |
-| `SPEAKER_EMBEDDING_MODEL` | PyAnnote embedding model for speaker memory       | `pyannote/embedding`        |
-| `SPEAKER_MATCH_AUTO_THRESHOLD` | High-confidence speaker match threshold; still requires review | `0.82` |
-| `SPEAKER_MATCH_SUGGEST_THRESHOLD` | Minimum speaker match threshold for review suggestions | `0.72` |
-| `SPEAKER_EMBEDDING_MIN_SECONDS` | Minimum clean audio per speaker before storing a local embedding | `8.0` |
-| `SPEAKER_EMBEDDING_MIN_SEGMENT_SECONDS` | Minimum diarization segment length used for embeddings | `1.5` |
-| `SPEAKER_EMBEDDING_MAX_SEGMENT_SECONDS` | Maximum duration sampled from one diarization segment | `12.0` |
-| `SPEAKER_EMBEDDING_MAX_SEGMENTS` | Maximum diarization segments sampled per speaker | `8` |
-| `AGENDA_DETECTION_USE_LLM` | Enable LLM agenda detection without an explicit request model/prompt | `false` |
-| `AGENDA_DETECTION_TIMEOUT_SECONDS` | Timeout for agenda-detection LLM calls           | `8`                         |
-| `AGENDA_DETECTION_CHUNK_LINES` | Line count per LLM chunk for long unknown-agenda transcripts | `160` |
-| `AGENDA_DETECTION_CHUNK_OVERLAP_LINES` | Overlap between agenda-detection chunks | `12` |
-| `PERSISTENCE_DB_PATH` | SQLite session database path inside backend container | `/app/data/sessions.sqlite3` |
-| `JOB_MAX_AGE_SECONDS` | Max age for in-memory job cache cleanup            | `7200`                      |
-| `JOB_MAX_COUNT`      | Max number of jobs retained in memory               | `100`                       |
-| `DELETE_UPLOADS_ON_JOB_CLEANUP` | Delete upload files when old jobs are cleaned up | `false`          |
-| `DELETE_UPLOADS_ON_CANCEL_OR_FAILURE` | Delete upload files after cancelled/failed jobs | `true`        |
-| `MAX_UPLOAD_BYTES`   | Maximum upload size                                 | `524288000`                 |
-| `TRANSCRIPTION_CONCURRENCY` | Concurrent transcription workers             | `1`                         |
-| `PIPELINE_CONCURRENCY` | Concurrent end-to-end pipeline workers            | `1`                         |
-| `VITE_MAX_CLIENT_LLM_TEXT_CHARS` | Frontend guardrail for legacy browser-driven LLM JSON requests | `120000` |
+### Lokale Docker-Images bauen
 
-### API Endpoints
+CPU:
 
-| Endpoint                         | Method | Description                          |
-| -------------------------------- | ------ | ------------------------------------ |
-| `/health`                        | GET    | Health check                         |
-| `/api/transcribe`                | POST   | Upload audio and start transcription |
-| `/api/transcribe/{job_id}`       | GET    | Get transcription job status         |
-| `/api/audio/{job_id}`            | GET    | Stream audio file                    |
-| `/api/summarize`                 | POST   | Generate summary for a TOP segment   |
-| `/api/extract-tops`              | POST   | Extract TOPs from PDF                |
-| `/api/export`                    | POST   | Export minutes as TXT, DOCX or PDF   |
-| `/api/speaker-profiles`          | GET/POST | List or create speaker profiles after explicit action |
-| `/api/speaker-profiles/{profile_id}` | PUT/DELETE | Rename or archive a speaker profile |
-| `/api/speaker-profiles/{profile_id}/embeddings` | DELETE | Delete persisted global speaker embeddings |
-| `/api/sessions/{session_id}/speaker-observations` | GET | List reviewable speaker observations |
-| `/api/pipeline/start`             | POST   | Start upload-to-review pipeline      |
-| `/api/pipeline/{pipeline_id}`     | GET    | Get pipeline status                  |
-| `/api/pipeline/{pipeline_id}/result` | GET | Load completed reviewable pipeline result |
+```bash
+docker build --build-arg PRECACHE_MODELS=0 -t ki-protokollierung-backend:local ./app/backend
+docker build -t ki-protokollierung-frontend:local ./app/frontend
+```
 
-### Technology Stack
+GPU:
 
-**Frontend:**
-- React 19 with TypeScript
-- Vite
-- Tailwind CSS
+```bash
+docker build -f app/backend/Dockerfile.gpu --build-arg PRECACHE_MODELS=0 -t ki-protokollierung-backend:gpu-local ./app/backend
+```
 
-**Backend:**
-- FastAPI
-- WhisperX (speech-to-text with word-level timestamps)
-- PyAnnote (speaker diarization)
-- Ollama with Qwen3 8B (summarization)
+Wenn Modelle im Image vorinstalliert werden sollen, `PRECACHE_MODELS=1` setzen
+und `HF_TOKEN` als BuildKit-Secret bereitstellen.
 
-</details>
+## API-Auszug
 
----
+| Endpoint | Methode | Zweck |
+| --- | --- | --- |
+| `/health` | GET | Healthcheck |
+| `/api/pipeline/start` | POST | End-to-End-Verarbeitung starten |
+| `/api/pipeline/{pipeline_id}` | GET | Pipeline-Status abrufen |
+| `/api/pipeline/{pipeline_id}/cancel` | POST | Pipeline abbrechen |
+| `/api/pipeline/{pipeline_id}/result` | GET | fertiges Review-Ergebnis laden |
+| `/api/sessions` | POST | Sitzung speichern/anlegen |
+| `/api/sessions/{session_id}` | GET/PUT | Sitzung laden/speichern |
+| `/api/transcribe` | POST | Legacy-Transkriptionsjob starten |
+| `/api/audio/{job_id}` | GET | Audiodatei streamen |
+| `/api/extract-tops` | POST | TOPs aus PDF extrahieren |
+| `/api/agenda-detection` | POST | TOPs und Segmentgrenzen erkennen |
+| `/api/summarize` | POST | Zusammenfassung erzeugen |
+| `/api/export` | POST | Protokoll als TXT, DOCX oder PDF exportieren |
+| `/api/speaker-profiles` | GET/POST | Sprecherprofile listen/anlegen |
+| `/api/speaker-profiles/{profile_id}` | PUT/DELETE | Profil ändern oder archivieren |
+| `/api/speaker-profiles/{profile_id}/embeddings` | DELETE | gespeicherte Embeddings löschen |
+| `/api/sessions/{session_id}/speaker-observations` | GET | Sprecherprofil-Vorschläge abrufen |
 
-## Acknowledgements
+## Kubernetes
 
-<a href="http://hpi.de/kisz">
-  <img src="app/frontend/public/logos/logo_bmftr_de.png" alt="BMFTR Logo" width="170">
-</a>
+Unter `k8s/` liegen Manifeste für ein GPU-beschleunigtes Deployment. Die
+Kubernetes-Variante nutzt standardmäßig eine externe OpenAI-kompatible LLM-API
+statt des lokalen Ollama-Containers. Details stehen in `k8s/README.md`.
 
-The [AI Service Centre Berlin Brandenburg](http://hpi.de/kisz) is funded by the [Federal Ministry of Research, Technology and Space](https://www.bmbf.de/) under the funding code 16IS22092.
+## Ursprung und Förderung
+
+Die ursprüngliche Protokollierungsassistenz entstand im Umfeld des AI Service
+Centre Berlin Brandenburg. Dieses Repository enthält die darauf aufbauende
+Weiterentwicklung durch Keule-Services, Erik Benke und die Stadt
+Doberlug-Kirchhain.
+
+<p>
+  <a href="http://hpi.de/kisz">
+    <img src="app/frontend/public/logos/logo_aisc_150dpi.png" alt="AI Service Centre Berlin Brandenburg Logo" height="48">
+  </a>
+  &nbsp;&nbsp;
+  <img src="app/frontend/public/logos/logo_bmftr_de.png" alt="BMFTR Logo" height="48">
+</p>
+
+Das AI Service Centre Berlin Brandenburg wird durch das Bundesministerium für
+Forschung, Technologie und Raumfahrt unter dem Förderkennzeichen 16IS22092
+gefördert.
