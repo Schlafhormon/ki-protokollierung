@@ -30,7 +30,6 @@ vi.mock('./api', () => ({
   pollTranscription: vi.fn(),
   detectAgenda: vi.fn(),
   generateSummary: vi.fn(),
-  reportSessionComplete: vi.fn(),
   extractTOPsFromPDF: vi.fn(),
   exportProtocol: vi.fn(),
 }));

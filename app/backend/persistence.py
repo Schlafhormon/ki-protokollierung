@@ -56,7 +56,6 @@ def init_db(db_path: Path | None = None) -> None:
                 remember_speakers INTEGER NOT NULL DEFAULT 0,
                 cancellation_requested INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
-                telemetry_json TEXT,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
@@ -236,6 +235,12 @@ def init_db(db_path: Path | None = None) -> None:
             row["name"]
             for row in db.execute("PRAGMA table_info(transcription_jobs)").fetchall()
         }
+        if "telemetry_json" in existing_columns:
+            try:
+                db.execute("ALTER TABLE transcription_jobs DROP COLUMN telemetry_json")
+                existing_columns.remove("telemetry_json")
+            except sqlite3.OperationalError:
+                db.execute("UPDATE transcription_jobs SET telemetry_json = NULL")
         if "cancellation_requested" not in existing_columns:
             db.execute(
                 """
@@ -928,10 +933,10 @@ def save_job(job_id: str, job_data: dict[str, Any], db_path: Path | None = None)
             INSERT INTO transcription_jobs (
                 job_id, session_id, status, progress, message, file_path, audio_path,
                 audio_filename, audio_content_type, audio_size_bytes,
-                remember_speakers, cancellation_requested, error, telemetry_json,
+                remember_speakers, cancellation_requested, error,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 status = excluded.status,
@@ -945,7 +950,6 @@ def save_job(job_id: str, job_data: dict[str, Any], db_path: Path | None = None)
                 remember_speakers = excluded.remember_speakers,
                 cancellation_requested = excluded.cancellation_requested,
                 error = excluded.error,
-                telemetry_json = excluded.telemetry_json,
                 updated_at = excluded.updated_at
             """,
             (
@@ -962,7 +966,6 @@ def save_job(job_id: str, job_data: dict[str, Any], db_path: Path | None = None)
                 1 if job_data.get("remember_speakers") else 0,
                 1 if job_data.get("cancellation_requested") else 0,
                 job_data.get("error"),
-                _to_json(job_data.get("telemetry")),
                 created_at,
                 updated_at,
             ),
@@ -1004,7 +1007,16 @@ def save_job(job_id: str, job_data: dict[str, Any], db_path: Path | None = None)
 def load_job(job_id: str, db_path: Path | None = None) -> dict[str, Any] | None:
     with connect(db_path) as db:
         row = db.execute(
-            "SELECT * FROM transcription_jobs WHERE job_id = ?", (job_id,)
+            """
+            SELECT
+                job_id, session_id, status, progress, message, file_path, audio_path,
+                audio_filename, audio_content_type, audio_size_bytes,
+                remember_speakers, cancellation_requested, error,
+                created_at, updated_at
+            FROM transcription_jobs
+            WHERE job_id = ?
+            """,
+            (job_id,),
         ).fetchone()
         if row is None:
             return None
@@ -1020,8 +1032,6 @@ def load_job(job_id: str, db_path: Path | None = None) -> dict[str, Any] | None:
         ).fetchall()
 
     job = dict(row)
-    telemetry = _from_json(job.pop("telemetry_json", None))
-    job["telemetry"] = telemetry or {}
     job["cancellation_requested"] = bool(job.get("cancellation_requested"))
     job["remember_speakers"] = bool(job.get("remember_speakers"))
     job["transcript"] = [dict(line) for line in lines] if lines else None

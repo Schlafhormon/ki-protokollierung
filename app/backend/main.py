@@ -35,8 +35,6 @@ from transcribe import (
     load_models,
     TranscriptionModels,
     _cleanup_memory,
-    WHISPER_MODEL,
-    WHISPER_BATCH_SIZE,
 )
 from summarize import (
     LLMCallError,
@@ -54,7 +52,6 @@ from export_protocol import (
     build_protocol_document,
     render_protocol,
 )
-from telemetry import TelemetryCollector
 from persistence import (
     anonymize_speaker_observations_for_profile,
     archive_speaker_profile,
@@ -1057,23 +1054,6 @@ class ProtocolExportRequest(BaseModel):
     speaker_names: Dict[str, str] = Field(default_factory=dict)
     summaries: Dict[int, str] = Field(default_factory=dict)
     summary_reviews: Dict[int, Any] = Field(default_factory=dict)
-
-
-class SessionCompleteRequest(BaseModel):
-    """Request model for reporting session completion with telemetry."""
-
-    telemetry_consent: bool = False
-    job_id: str
-    top_count: int
-    protocol_char_count: int
-    summarization_duration_seconds: float
-    llm_model: str
-    system_prompt_kind: str = "custom"
-
-
-class SessionCompleteResponse(BaseModel):
-    success: bool
-    message: str
 
 
 def build_speaker_suggestion_responses(
@@ -2868,82 +2848,6 @@ async def agenda_detection_endpoint(request: AgendaDetectionRequest):
     )
 
 
-@app.post("/api/telemetry/session-complete", response_model=SessionCompleteResponse)
-async def report_session_complete(request: SessionCompleteRequest):
-    """
-    Report session completion and send telemetry data.
-
-    Called by the frontend when the user exports the protocol.
-    Combines transcription metrics (stored in job) with summarization metrics (from frontend).
-    """
-    if not request.telemetry_consent:
-        logger.info("Telemetry report ignored because consent was not provided")
-        return SessionCompleteResponse(
-            success=True,
-            message="Telemetry disabled by user",
-        )
-
-    logger.info(f"Received session complete report for job: {request.job_id}")
-
-    # Get job data
-    job = get_job_from_cache_or_db(request.job_id)
-    if not job:
-        logger.warning(f"Job {request.job_id} not found for telemetry")
-        # Still send telemetry with available data
-        collector = TelemetryCollector()
-        collector.set_summarization_metrics(
-            llm_model=request.llm_model,
-            system_prompt_kind=request.system_prompt_kind,
-            top_count=request.top_count,
-            summarization_duration_seconds=request.summarization_duration_seconds,
-            protocol_char_count=request.protocol_char_count,
-        )
-        collector.send()
-        return SessionCompleteResponse(
-            success=True,
-            message="Telemetry sent (job not found, partial data)",
-        )
-
-    # Create telemetry collector and populate with all data
-    collector = TelemetryCollector()
-
-    # Set Whisper config
-    telemetry_data = job.get("telemetry", {})
-    if telemetry_data:
-        collector.set_whisper_config(
-            model=telemetry_data.get("whisper_model", WHISPER_MODEL),
-            batch_size=telemetry_data.get("whisper_batch_size", WHISPER_BATCH_SIZE),
-        )
-
-        # Set transcription metrics
-        collector.set_transcription_metrics(
-            audio_duration_seconds=telemetry_data.get("audio_duration_seconds", 0),
-            transcription_duration_seconds=telemetry_data.get(
-                "transcription_duration_seconds", 0
-            ),
-            transcript_line_count=telemetry_data.get("transcript_line_count", 0),
-            transcript_char_count=telemetry_data.get("transcript_char_count", 0),
-        )
-
-    # Set summarization metrics from frontend
-    collector.set_summarization_metrics(
-        llm_model=request.llm_model,
-        system_prompt_kind=request.system_prompt_kind,
-        top_count=request.top_count,
-        summarization_duration_seconds=request.summarization_duration_seconds,
-        protocol_char_count=request.protocol_char_count,
-    )
-
-    # Send telemetry
-    collector.send()
-
-    logger.info(f"Telemetry sent for job {request.job_id}")
-    return SessionCompleteResponse(
-        success=True,
-        message="Telemetry sent successfully",
-    )
-
-
 # ----- Transcription Worker -----
 
 
@@ -2996,19 +2900,13 @@ def run_transcription(
             )
             logger.info(f"[Job {job_id}] Progress: {progress}% - {message}")
 
-        # Time the transcription
-        transcription_start = time.time()
         result = transcribe_audio(file_path, models, progress_callback)
-        transcription_duration = time.time() - transcription_start
 
         if is_job_cancelled(job_id):
             raise CancellationRequested()
 
         transcript = result.transcript
-
-        # Calculate transcript metrics
         transcript_line_count = len(transcript)
-        transcript_char_count = sum(len(line.get("text", "")) for line in transcript)
         speaker_embeddings = getattr(result, "speaker_embeddings", None) or []
 
         try:
@@ -3035,14 +2933,6 @@ def run_transcription(
             transcript=transcript,
             audio_path=file_path,
             error=None,
-            telemetry={
-                "audio_duration_seconds": result.audio_duration_seconds,
-                "transcription_duration_seconds": transcription_duration,
-                "transcript_line_count": transcript_line_count,
-                "transcript_char_count": transcript_char_count,
-                "whisper_model": WHISPER_MODEL,
-                "whisper_batch_size": WHISPER_BATCH_SIZE,
-            },
         )
 
         logger.info(

@@ -38,7 +38,6 @@ py-modules = [
     "persistence",
     "speaker_recognition",
     "summarize",
-    "telemetry",
     "transcribe",
 ]
 

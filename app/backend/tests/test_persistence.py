@@ -127,6 +127,7 @@ def test_persistence_migrates_pre_speaker_pipeline_schema(tmp_path, monkeypatch)
         }
 
     assert {"remember_speakers", "cancellation_requested"}.issubset(job_columns)
+    assert "telemetry_json" not in job_columns
     assert "export_metadata_json" in session_columns
     assert {
         "speaker_profiles",
@@ -308,7 +309,6 @@ def test_transcription_job_is_restored_from_sqlite_after_memory_cache_is_cleared
                     "end": 1.2,
                 }
             ],
-            "telemetry": {"audio_duration_seconds": 1.2},
         },
     )
 

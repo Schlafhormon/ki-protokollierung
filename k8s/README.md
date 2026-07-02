@@ -76,7 +76,7 @@ k8s/
 `backend/pvc.yaml` creates a `ReadWriteOnce` PVC named `tops-backend-data`.
 The backend mounts it as:
 
-- `/app/data` for the SQLite session database and optional telemetry backups
+- `/app/data` for the SQLite session database
 - `/app/uploads` for retained audio playback after session restore
 
 If your cluster has no default `StorageClass`, set one in `backend/pvc.yaml`

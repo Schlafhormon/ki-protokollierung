@@ -20,7 +20,6 @@ import {
   generateSummary,
   detectAgenda,
   checkBackendHealth,
-  reportSessionComplete,
   saveSession,
   loadSession,
 } from "./api";
@@ -40,7 +39,6 @@ const LLM_SETTINGS_KEY = "llm-settings";
 const ACTIVE_SESSION_KEY = "active-session-id";
 const ACTIVE_PIPELINE_KEY = "active-pipeline-id";
 const SESSION_DRAFT_KEY = "active-session-draft";
-const TELEMETRY_OPT_IN_KEY = "telemetry-opt-in";
 const SPEAKER_MEMORY_OPT_IN_KEY = "speaker-memory-opt-in";
 
 // Implicit TOP title when no TOPs are defined
@@ -92,15 +90,6 @@ function withApiBase(url?: string | null): string | null {
   if (/^https?:\/\//i.test(url)) return url;
   const baseUrl = import.meta.env.VITE_API_URL || "";
   return `${baseUrl}${url}`;
-}
-
-function getSystemPromptKind(
-  prompt: string,
-  genericPrompt: string
-): "default" | "custom" | "generic" {
-  if (prompt === genericPrompt) return "generic";
-  if (prompt === DEFAULT_LLM_SETTINGS.systemPrompt) return "default";
-  return "custom";
 }
 
 function normalizeSummaries(
@@ -319,15 +308,7 @@ export default function App() {
     skipped_assignment: skippedAssignment,
   }) && summariesAreFresh;
 
-  // Telemetry state
   const [jobId, setJobId] = useState<string | null>(null);
-  const [telemetryOptIn, setTelemetryOptIn] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(TELEMETRY_OPT_IN_KEY) === "true";
-    } catch {
-      return false;
-    }
-  });
   const [rememberSpeakers, setRememberSpeakers] = useState<boolean>(() => {
     try {
       return localStorage.getItem(SPEAKER_MEMORY_OPT_IN_KEY) === "true";
@@ -536,14 +517,6 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(TELEMETRY_OPT_IN_KEY, String(telemetryOptIn));
-    } catch (e) {
-      console.error("Failed to save telemetry setting:", e);
-    }
-  }, [telemetryOptIn]);
-
-  useEffect(() => {
-    try {
       localStorage.setItem(SPEAKER_MEMORY_OPT_IN_KEY, String(rememberSpeakers));
     } catch (e) {
       console.error("Failed to save speaker memory setting:", e);
@@ -678,7 +651,6 @@ export default function App() {
         rememberSpeakers
       );
 
-      // Store job ID for telemetry
       setJobId(job.job_id);
 
       // Poll for completion
@@ -736,7 +708,7 @@ export default function App() {
           setAssignments(new Array(transcriptResult.length).fill(0));
           setIsProcessing(false);
           setCurrentStep(3);
-          generateSummaryForAll(transcriptResult, job.job_id);
+          generateSummaryForAll(transcriptResult);
         }
       } catch (error) {
         const detectionError =
@@ -758,7 +730,7 @@ export default function App() {
           setTops([DEFAULT_TOP_TITLE]);
           setAssignments(new Array(transcriptResult.length).fill(0));
           setCurrentStep(3);
-          generateSummaryForAll(transcriptResult, job.job_id);
+          generateSummaryForAll(transcriptResult);
         }
       }
     } catch (error) {
@@ -951,10 +923,7 @@ export default function App() {
   };
 
   // Generate summary for entire conversation (when no TOPs are defined)
-  const generateSummaryForAll = async (
-    transcriptLines: TranscriptLine[],
-    currentJobId: string
-  ) => {
+  const generateSummaryForAll = async (transcriptLines: TranscriptLine[]) => {
     setIsGeneratingSummary(true);
     setSummaries({ 0: "Zusammenfassung wird generiert..." });
     setSummaryReviews({});
@@ -988,21 +957,6 @@ export default function App() {
         )
       );
 
-      // Send telemetry
-      if (telemetryOptIn && currentJobId) {
-        reportSessionComplete({
-          telemetryConsent: telemetryOptIn,
-          jobId: currentJobId,
-          topCount: 1,
-          protocolCharCount: result.summary.length,
-          summarizationDurationSeconds: result.durationSeconds,
-          llmModel: llmSettings.model,
-          systemPromptKind: getSystemPromptKind(
-            GENERIC_SUMMARY_PROMPT,
-            GENERIC_SUMMARY_PROMPT
-          ),
-        });
-      }
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Unbekannter Fehler";
@@ -1107,26 +1061,6 @@ export default function App() {
     );
     setSummaryInputFingerprint(generationFingerprint);
 
-    // Send telemetry after all summaries are generated
-    if (telemetryOptIn && jobId) {
-      const protocolCharCount = Object.values(newSummaries).reduce(
-        (sum, s) => sum + (s?.length || 0),
-        0
-      );
-      reportSessionComplete({
-        telemetryConsent: telemetryOptIn,
-        jobId,
-        topCount: validTops.length,
-        protocolCharCount,
-        summarizationDurationSeconds: totalDuration,
-        llmModel: llmSettings.model,
-        systemPromptKind: getSystemPromptKind(
-          llmSettings.systemPrompt,
-          GENERIC_SUMMARY_PROMPT
-        ),
-      });
-      console.log(`[Summary] Telemetry sent`);
-    }
   };
 
   const handleStep2Back = () => {
@@ -1346,8 +1280,6 @@ export default function App() {
           tops={tops}
           setTops={setTops}
           llmSettings={llmSettings}
-          telemetryOptIn={telemetryOptIn}
-          setTelemetryOptIn={setTelemetryOptIn}
           rememberSpeakers={rememberSpeakers}
           setRememberSpeakers={setRememberSpeakers}
         />

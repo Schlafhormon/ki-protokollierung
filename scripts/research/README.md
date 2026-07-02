@@ -15,4 +15,4 @@ This directory contains non-production prototypes that were useful while explori
 
 These scripts are not wired into the FastAPI/React application, Docker Compose setup, or Kubernetes manifests. Before running one, replace hard-coded local sample paths in its `main()` block with local inputs or refactor it to accept CLI arguments.
 
-Generated transcripts, boundaries, protocol drafts, local data, and telemetry-style JSONL outputs should stay untracked; the repository root `.gitignore` contains patterns for the common outputs.
+Generated transcripts, boundaries, protocol drafts, and local data should stay untracked; the repository root `.gitignore` contains patterns for the common outputs.

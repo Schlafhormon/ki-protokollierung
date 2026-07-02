@@ -23,6 +23,12 @@ $ErrorActionPreference = "Continue"
 # PROTOKOLL_IMAGE_TAG=v1.2.3 to pin application images to a release tag.
 $IMAGE_BASE = "ghcr.io/aihpi/pilotproject-protokollierungsassistenz"
 $PROTOKOLL_IMAGE_TAG = $env:PROTOKOLL_IMAGE_TAG
+$USER_FRONTEND_IMAGE = $env:FRONTEND_IMAGE
+$USER_BACKEND_IMAGE = $env:BACKEND_IMAGE
+$USER_BACKEND_GPU_IMAGE = $env:BACKEND_GPU_IMAGE
+$PROTOKOLL_BUILD_LOCAL = if ($env:PROTOKOLL_BUILD_LOCAL) { $env:PROTOKOLL_BUILD_LOCAL } else { "auto" }
+$PROTOKOLL_PRECACHE_MODELS = if ($env:PROTOKOLL_PRECACHE_MODELS) { $env:PROTOKOLL_PRECACHE_MODELS } else { "0" }
+$PROTOKOLL_BUILD_NO_CACHE = if ($env:PROTOKOLL_BUILD_NO_CACHE) { $env:PROTOKOLL_BUILD_NO_CACHE } else { "false" }
 $script:PROTOKOLL_PULL_POLICY = if ($env:PROTOKOLL_PULL_POLICY) { $env:PROTOKOLL_PULL_POLICY } else { "missing" }
 
 if ($PROTOKOLL_IMAGE_TAG) {
@@ -52,6 +58,7 @@ $PORT_OLLAMA = 11434
 # Global state
 $script:USE_GPU = $false
 $script:MissingItems = @()
+$script:BUILD_LOCAL_IMAGES = $false
 
 # Print colored messages (German)
 function Write-Info { Write-Host "[INFO] " -ForegroundColor Blue -NoNewline; Write-Host $args }
@@ -62,6 +69,35 @@ function Write-Err { Write-Host "[FEHLER] " -ForegroundColor Red -NoNewline; Wri
 # Get script directory
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
+
+function Test-Truthy {
+    param([string]$Value)
+    return $Value -match "^(1|true|yes|ja|on)$"
+}
+
+function Test-Falsy {
+    param([string]$Value)
+    return $Value -match "^(0|false|no|nein|off)$"
+}
+
+$hasLocalDockerfiles = (Test-Path "app\backend\Dockerfile") -and (Test-Path "app\frontend\Dockerfile")
+$explicitApplicationImage =
+    $USER_FRONTEND_IMAGE -or $USER_BACKEND_IMAGE -or $USER_BACKEND_GPU_IMAGE -or $PROTOKOLL_IMAGE_TAG
+
+if (Test-Truthy $PROTOKOLL_BUILD_LOCAL) {
+    $script:BUILD_LOCAL_IMAGES = $true
+} elseif ((-not (Test-Falsy $PROTOKOLL_BUILD_LOCAL)) -and $PROTOKOLL_BUILD_LOCAL.ToLower() -eq "auto") {
+    $script:BUILD_LOCAL_IMAGES = $hasLocalDockerfiles -and (-not $explicitApplicationImage)
+}
+
+if ($script:BUILD_LOCAL_IMAGES) {
+    $FRONTEND_IMAGE = "ki-protokollierung-frontend:local"
+    $BACKEND_CPU_IMAGE = "ki-protokollierung-backend:local"
+    $BACKEND_GPU_IMAGE = "ki-protokollierung-backend:gpu-local"
+    $env:FRONTEND_IMAGE = $FRONTEND_IMAGE
+    $env:BACKEND_IMAGE = $BACKEND_CPU_IMAGE
+    $env:BACKEND_GPU_IMAGE = $BACKEND_GPU_IMAGE
+}
 
 #######################################
 # Show help message
@@ -85,6 +121,9 @@ function Show-Help {
     Write-Host ""
     Write-Host "Optionale Umgebungsvariablen:"
     Write-Host "  PROTOKOLL_IMAGE_TAG=v1.2.3       Stabile App-Images verwenden"
+    Write-Host "  PROTOKOLL_BUILD_LOCAL=auto       Lokale Repo-Images bauen: auto, true, false"
+    Write-Host "  PROTOKOLL_BUILD_NO_CACHE=true    Lokalen Docker-Build ohne Cache ausfuehren"
+    Write-Host "  PROTOKOLL_PRECACHE_MODELS=0      Modelle beim lokalen Build vorladen: 0 oder 1"
     Write-Host "  PROTOKOLL_PULL_POLICY=missing    Pull-Verhalten: missing, always, never"
     Write-Host "  FRONTEND_IMAGE/BACKEND_IMAGE/... Vollstaendige Image-Referenzen setzen"
     Write-Host ""
@@ -94,6 +133,38 @@ function Show-Help {
     Write-Host "  .\setup.ps1 status    # Pruefen ob alles laeuft"
     Write-Host "  .\setup.ps1 logs      # Fehlersuche mit Logs"
     Write-Host ""
+}
+
+#######################################
+# Build local application images from this repository
+#######################################
+function Invoke-BuildLocalImages {
+    Write-Info "Baue lokale Docker-Images aus dem geklonten Repository..."
+
+    $buildArgs = @()
+    if (Test-Truthy $PROTOKOLL_BUILD_NO_CACHE) {
+        $buildArgs += "--no-cache"
+    }
+
+    $backendTag = if ($script:USE_GPU) { $BACKEND_GPU_IMAGE } else { $BACKEND_CPU_IMAGE }
+    $backendDockerfile = if ($script:USE_GPU) { ".\app\backend\Dockerfile.gpu" } else { ".\app\backend\Dockerfile" }
+
+    Write-Info "Baue Backend-Image: $backendTag"
+    docker build @buildArgs --build-arg "PRECACHE_MODELS=$PROTOKOLL_PRECACHE_MODELS" -f $backendDockerfile -t $backendTag ".\app\backend"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Backend-Image konnte nicht gebaut werden."
+        return $false
+    }
+
+    Write-Info "Baue Frontend-Image: $FRONTEND_IMAGE"
+    docker build @buildArgs -t $FRONTEND_IMAGE ".\app\frontend"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Frontend-Image konnte nicht gebaut werden."
+        return $false
+    }
+
+    Write-Success "Lokale Docker-Images wurden gebaut"
+    return $true
 }
 
 #######################################
@@ -714,7 +785,19 @@ function Invoke-Start {
     }
     Write-Host ""
 
-    Invoke-PullImages
+    if ($script:BUILD_LOCAL_IMAGES) {
+        if (-not (Invoke-BuildLocalImages)) {
+            Read-Host "Druecken Sie Enter zum Beenden"
+            exit 1
+        }
+        Write-Info "Pruefe Runtime-Image fuer Ollama..."
+        docker compose pull ollama 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Konnte Ollama-Image nicht aktualisieren. Docker versucht es beim Start erneut."
+        }
+    } else {
+        Invoke-PullImages
+    }
     Write-Host ""
 
     if ($script:USE_GPU) {

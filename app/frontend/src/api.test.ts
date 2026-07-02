@@ -13,7 +13,6 @@ import {
   listSpeakerObservations,
   listSpeakerProfiles,
   loadSession,
-  reportSessionComplete,
   saveSession,
   startPipeline,
   startTranscription,
@@ -377,55 +376,6 @@ describe('api session client', () => {
     ).rejects.toThrow(/Browser-Workflow zu groß/i);
 
     expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('does not send telemetry when the user has not opted in', async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-
-    await reportSessionComplete({
-      telemetryConsent: false,
-      jobId: 'job-1',
-      topCount: 2,
-      protocolCharCount: 120,
-      summarizationDurationSeconds: 3.5,
-      llmModel: 'qwen3:8b',
-      systemPromptKind: 'custom',
-    });
-
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('posts telemetry opt-in without prompt or content fields', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      text: () => Promise.resolve(''),
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    await reportSessionComplete({
-      telemetryConsent: true,
-      jobId: 'job-1',
-      topCount: 2,
-      protocolCharCount: 120,
-      summarizationDurationSeconds: 3.5,
-      llmModel: 'qwen3:8b',
-      systemPromptKind: 'custom',
-    });
-
-    expect(fetchMock.mock.calls[0]![0]).toBe('/api/telemetry/session-complete');
-    const body = JSON.parse(fetchMock.mock.calls[0]![1]!.body as string);
-    expect(body).toMatchObject({
-      telemetry_consent: true,
-      job_id: 'job-1',
-      top_count: 2,
-      protocol_char_count: 120,
-      summarization_duration_seconds: 3.5,
-      llm_model: 'qwen3:8b',
-      system_prompt_kind: 'custom',
-    });
-    expect(body).not.toHaveProperty('system_prompt');
-    expect(JSON.stringify(body)).not.toContain('Transkriptinhalt');
   });
 
   it('uses speaker profile and observation endpoints', async () => {

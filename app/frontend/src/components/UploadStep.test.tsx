@@ -18,8 +18,6 @@ const defaultProps: UploadStepProps = {
   tops: [''],
   setTops: vi.fn(),
   llmSettings: { model: 'qwen3:8b', systemPrompt: '' },
-  telemetryOptIn: false,
-  setTelemetryOptIn: vi.fn(),
   rememberSpeakers: false,
   setRememberSpeakers: vi.fn(),
 };
@@ -57,8 +55,6 @@ describe('UploadStep', () => {
         setAudioFile={setAudioFile}
         pdfFile={null}
         setPdfFile={vi.fn()}
-        telemetryOptIn={false}
-        setTelemetryOptIn={vi.fn()}
         rememberSpeakers={false}
         setRememberSpeakers={vi.fn()}
       />,
@@ -86,22 +82,6 @@ describe('UploadStep', () => {
       expect(setPdfFile).toHaveBeenCalledWith(pdf);
     });
     expect(await screen.findByText(/2 TOPs erfolgreich extrahiert/i)).toBeInTheDocument();
-  });
-
-  it('shows telemetry fields and lets the user opt in explicitly', async () => {
-    const user = userEvent.setup();
-    const setTelemetryOptIn = vi.fn();
-    renderUploadStep({ setTelemetryOptIn });
-
-    expect(screen.getByText(/Anonyme Nutzungsstatistiken teilen/i)).toBeInTheDocument();
-    expect(screen.getByText(/Nicht übertragen werden/i)).toBeInTheDocument();
-    expect(screen.getByText(/System-Prompt-Inhalt/i)).toBeInTheDocument();
-
-    await user.click(screen.getByRole('checkbox', {
-      name: /Anonyme Nutzungsstatistiken teilen/i,
-    }));
-
-    expect(setTelemetryOptIn).toHaveBeenCalledWith(true);
   });
 
   it('keeps persistent speaker memory off until the user opts in', async () => {

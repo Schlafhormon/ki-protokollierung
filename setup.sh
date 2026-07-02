@@ -29,6 +29,12 @@ NC='\033[0m' # No Color
 IMAGE_BASE="ghcr.io/aihpi/pilotproject-protokollierungsassistenz"
 PROTOKOLL_IMAGE_TAG="${PROTOKOLL_IMAGE_TAG:-}"
 PROTOKOLL_PULL_POLICY="${PROTOKOLL_PULL_POLICY:-missing}" # missing|always|never
+USER_FRONTEND_IMAGE="${FRONTEND_IMAGE:-}"
+USER_BACKEND_IMAGE="${BACKEND_IMAGE:-}"
+USER_BACKEND_GPU_IMAGE="${BACKEND_GPU_IMAGE:-}"
+PROTOKOLL_BUILD_LOCAL="${PROTOKOLL_BUILD_LOCAL:-auto}" # auto|true|false
+PROTOKOLL_PRECACHE_MODELS="${PROTOKOLL_PRECACHE_MODELS:-0}"
+PROTOKOLL_BUILD_NO_CACHE="${PROTOKOLL_BUILD_NO_CACHE:-false}"
 
 if [ -n "$PROTOKOLL_IMAGE_TAG" ]; then
     FRONTEND_IMAGE="${FRONTEND_IMAGE:-${IMAGE_BASE}/frontend:${PROTOKOLL_IMAGE_TAG}}"
@@ -64,6 +70,51 @@ error() { echo -e "${RED}[FEHLER]${NC} $1"; }
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
+truthy() {
+    local value
+    value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$value" in
+        1|true|yes|ja|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+falsy() {
+    local value
+    value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$value" in
+        0|false|no|nein|off) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+BUILD_LOCAL_IMAGES=false
+HAS_LOCAL_DOCKERFILES=false
+if [ -f "app/backend/Dockerfile" ] && [ -f "app/frontend/Dockerfile" ]; then
+    HAS_LOCAL_DOCKERFILES=true
+fi
+
+EXPLICIT_APPLICATION_IMAGE=false
+if [ -n "$USER_FRONTEND_IMAGE" ] || [ -n "$USER_BACKEND_IMAGE" ] || [ -n "$USER_BACKEND_GPU_IMAGE" ] || [ -n "$PROTOKOLL_IMAGE_TAG" ]; then
+    EXPLICIT_APPLICATION_IMAGE=true
+fi
+
+if truthy "$PROTOKOLL_BUILD_LOCAL"; then
+    BUILD_LOCAL_IMAGES=true
+elif ! falsy "$PROTOKOLL_BUILD_LOCAL" && [ "$(printf '%s' "$PROTOKOLL_BUILD_LOCAL" | tr '[:upper:]' '[:lower:]')" = "auto" ]; then
+    if [ "$HAS_LOCAL_DOCKERFILES" = true ] && [ "$EXPLICIT_APPLICATION_IMAGE" = false ]; then
+        BUILD_LOCAL_IMAGES=true
+    fi
+fi
+
+if [ "$BUILD_LOCAL_IMAGES" = true ]; then
+    FRONTEND_IMAGE="ki-protokollierung-frontend:local"
+    BACKEND_CPU_IMAGE="ki-protokollierung-backend:local"
+    BACKEND_GPU_IMAGE="ki-protokollierung-backend:gpu-local"
+    BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
+    export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE
+fi
+
 ########################################
 # Show help message
 ########################################
@@ -86,6 +137,9 @@ show_help() {
     echo ""
     echo "Optionale Umgebungsvariablen:"
     echo "  PROTOKOLL_IMAGE_TAG=v1.2.3       Stabile App-Images verwenden"
+    echo "  PROTOKOLL_BUILD_LOCAL=auto       Lokale Repo-Images bauen: auto, true, false"
+    echo "  PROTOKOLL_BUILD_NO_CACHE=true    Lokalen Docker-Build ohne Cache ausfuehren"
+    echo "  PROTOKOLL_PRECACHE_MODELS=0      Modelle beim lokalen Build vorladen: 0 oder 1"
     echo "  PROTOKOLL_PULL_POLICY=missing    Pull-Verhalten: missing, always, never"
     echo "  FRONTEND_IMAGE/BACKEND_IMAGE/... Vollstaendige Image-Referenzen setzen"
     echo ""
@@ -95,6 +149,42 @@ show_help() {
     echo "  ./setup.sh status   # Pruefen ob alles laeuft"
     echo "  ./setup.sh logs     # Fehlersuche mit Logs"
     echo ""
+}
+
+########################################
+# Build local application images from this repository
+########################################
+build_local_images() {
+    info "Baue lokale Docker-Images aus dem geklonten Repository..."
+
+    local build_args=()
+    if truthy "$PROTOKOLL_BUILD_NO_CACHE"; then
+        build_args+=(--no-cache)
+    fi
+
+    local backend_tag="$BACKEND_CPU_IMAGE"
+    local backend_dockerfile="./app/backend/Dockerfile"
+    if [ "$USE_GPU" = true ]; then
+        backend_tag="$BACKEND_GPU_IMAGE"
+        backend_dockerfile="./app/backend/Dockerfile.gpu"
+    fi
+
+    info "Baue Backend-Image: $backend_tag"
+    docker build "${build_args[@]}" --build-arg "PRECACHE_MODELS=$PROTOKOLL_PRECACHE_MODELS" -f "$backend_dockerfile" -t "$backend_tag" "./app/backend"
+    if [ $? -ne 0 ]; then
+        error "Backend-Image konnte nicht gebaut werden."
+        return 1
+    fi
+
+    info "Baue Frontend-Image: $FRONTEND_IMAGE"
+    docker build "${build_args[@]}" -t "$FRONTEND_IMAGE" "./app/frontend"
+    if [ $? -ne 0 ]; then
+        error "Frontend-Image konnte nicht gebaut werden."
+        return 1
+    fi
+
+    success "Lokale Docker-Images wurden gebaut"
+    return 0
 }
 
 ########################################
@@ -707,7 +797,13 @@ do_start() {
     fi
     echo ""
 
-    pull_images
+    if [ "$BUILD_LOCAL_IMAGES" = true ]; then
+        build_local_images || exit 1
+        info "Pruefe Runtime-Image fuer Ollama..."
+        docker compose pull ollama 2>/dev/null || warn "Konnte Ollama-Image nicht aktualisieren. Docker versucht es beim Start erneut."
+    else
+        pull_images
+    fi
     echo ""
 
     if [ "$USE_GPU" = true ]; then

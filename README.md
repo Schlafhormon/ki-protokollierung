@@ -132,7 +132,7 @@ or `PROTOKOLL_PULL_POLICY=never` for fully offline starts with local images.
 Runtime state is stored in local bind mounts:
 
 - `./uploads` for retained audio playback after session restore
-- `./data` for the SQLite session database and optional telemetry backups
+- `./data` for the SQLite session database
 
 ### Lokale Datenschutzdaten / Local Privacy Data
 
@@ -259,53 +259,6 @@ If something goes wrong and you want to start fresh:
 docker compose down -v
 ./setup.sh  # or .\setup.ps1 on Windows
 ```
-
----
-
-## Nutzungsstatistiken / Usage Statistics
-
-Telemetrie ist standardmäßig deaktiviert und wird nur gesendet, wenn Nutzerinnen
-oder Nutzer sie in der UI ausdrücklich einschalten. Zusätzlich muss zur Laufzeit
-`TELEMETRY_WEBHOOK_URL` gesetzt sein; die URL wird nicht ins Image eingebrannt.
-
-Telemetry is disabled by default and is only sent after explicit opt-in in the UI.
-`TELEMETRY_WEBHOOK_URL` must also be configured at runtime; it is not baked into
-the container image.
-
-### Erfasste Daten / Data Collected
-
-- Zeitstempel und App-Version / timestamp and app version
-- Geräteklasse, GPU-Name und VRAM, falls verfügbar / device type, GPU name and VRAM if available
-- Verwendete Whisper- und LLM-Modelle / Whisper and LLM model names
-- Whisper-Batch-Größe / Whisper batch size
-- Audiodauer und Verarbeitungszeiten / audio duration and processing times
-- Anzahl Transkriptzeilen und Zeichenanzahl / transcript line and character counts
-- Anzahl Tagesordnungspunkte / number of agenda items
-- Protokoll-Zeichenanzahl / protocol character count
-- Prompt-Kategorie (`default`, `custom`, `generic`), nicht der Prompt selbst / prompt category, not the prompt content
-- Erfolgsstatus und technische Fehlerkategorie, falls gesetzt / success status and technical error category if set
-
-### Nicht erfasste Daten / Data NOT Collected
-
-- Audio-Dateien, Audiodaten oder Dateinamen / audio files, audio data or filenames
-- Inhalte von Transkripten, TOPs oder Protokollen / transcript, agenda item or protocol content
-- Namen, Sprecherzuordnungen oder andere Personenangaben / names, speaker mappings or other personal data
-- Sprecherprofile oder Sprecher-Embeddings / speaker profiles or speaker embeddings
-- TOP-Titel / agenda item titles
-- System-Prompt-Inhalte oder Prompt-Auszüge / system prompt content or prompt excerpts
-
-### Lokale Backups / Local Backups
-
-Lokale Telemetrie-Backups sind standardmäßig deaktiviert
-(`TELEMETRY_BACKUP_ENABLED=false`). Wenn sie aktiviert werden, werden nur die oben
-genannten aggregierten Telemetrie-Felder als JSONL gespeichert. Die Retention ist
-konfigurierbar und wird beim Schreiben angewendet:
-
-- `TELEMETRY_BACKUP_RETENTION_DAYS` (Standard: `14`)
-- `TELEMETRY_BACKUP_MAX_FILES` (Standard: `30`)
-- `TELEMETRY_BACKUP_DIR` (Docker/K8s-Standard: `/app/data/telemetry_backup`)
-
----
 
 ## GPU Mode (Optional, Windows/Linux)
 
@@ -520,11 +473,6 @@ after a backend restart so the UI can show a clear restart/interruption state.
 | `TRANSCRIPTION_CONCURRENCY` | Concurrent transcription workers             | `1`                         |
 | `PIPELINE_CONCURRENCY` | Concurrent end-to-end pipeline workers            | `1`                         |
 | `VITE_MAX_CLIENT_LLM_TEXT_CHARS` | Frontend guardrail for legacy browser-driven LLM JSON requests | `120000` |
-| `TELEMETRY_WEBHOOK_URL` | Runtime webhook URL for opt-in telemetry          | (empty, disabled)           |
-| `TELEMETRY_BACKUP_ENABLED` | Enable local telemetry JSONL backups          | `false`                     |
-| `TELEMETRY_BACKUP_RETENTION_DAYS` | Retention for local telemetry backups | `14`                        |
-| `TELEMETRY_BACKUP_MAX_FILES` | Maximum local telemetry backup files       | `30`                        |
-| `TELEMETRY_BACKUP_DIR` | Directory for local telemetry backups             | `/app/data/telemetry_backup` |
 
 ### API Endpoints
 
@@ -544,7 +492,6 @@ after a backend restart so the UI can show a clear restart/interruption state.
 | `/api/pipeline/start`             | POST   | Start upload-to-review pipeline      |
 | `/api/pipeline/{pipeline_id}`     | GET    | Get pipeline status                  |
 | `/api/pipeline/{pipeline_id}/result` | GET | Load completed reviewable pipeline result |
-| `/api/telemetry/session-complete`| POST   | Report opt-in aggregate telemetry    |
 
 ### Technology Stack
 
