@@ -42,6 +42,19 @@ export interface SpeakerObservation {
   updated_at: number;
 }
 
+export interface SpeakerMatchDiagnostic {
+  local_speaker_id: string;
+  reason_code: string;
+  reason: string;
+  best_profile_id?: string | null;
+  best_profile_display_name?: string | null;
+  best_score?: number | null;
+  suggest_threshold?: number | null;
+  local_audio_seconds?: number | null;
+  local_embedding_available: boolean;
+  profile_embedding_count: number;
+}
+
 export interface SpeakerSuggestion {
   observation_id: number;
   local_speaker_id: string;

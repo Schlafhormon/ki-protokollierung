@@ -20,10 +20,12 @@ class SpeakerEmbeddingConfig:
     enabled: bool = True
     auto_threshold: float = 0.82
     suggest_threshold: float = 0.72
+    match_top_k: int = 3
     min_total_seconds: float = 8.0
     min_segment_seconds: float = 1.5
     max_segment_seconds: float = 12.0
     max_segments_per_speaker: int = 8
+    max_profile_embeddings_per_model: int = 16
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,7 @@ class LocalSpeakerEmbedding:
     embedding: list[float]
     model_name: str
     quality: float
+    reference_embeddings: list[list[float]] = field(default_factory=list)
     quality_metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -40,6 +43,7 @@ class ProfileReference:
     profile_id: str
     display_name: str
     embedding: list[float]
+    embeddings: list[list[float]]
     embedding_count: int
 
 
@@ -51,6 +55,21 @@ class SpeakerMatch:
     confidence: float
     match_level: str
     status: str = "suggested"
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SpeakerMatchDiagnostic:
+    local_speaker_id: str
+    reason_code: str
+    reason: str
+    best_profile_id: str | None = None
+    best_profile_display_name: str | None = None
+    best_score: float | None = None
+    suggest_threshold: float | None = None
+    local_audio_seconds: float | None = None
+    local_embedding_available: bool = False
+    profile_embedding_count: int = 0
 
 
 def _get_float_env(name: str, default: float) -> float:
@@ -96,6 +115,7 @@ def speaker_embedding_config_from_env() -> SpeakerEmbeddingConfig:
         enabled=_get_bool_env("SPEAKER_EMBEDDING_ENABLED", True),
         auto_threshold=auto_threshold,
         suggest_threshold=suggest_threshold,
+        match_top_k=max(1, _get_int_env("SPEAKER_MATCH_TOP_K", 3)),
         min_total_seconds=max(
             0.1, _get_float_env("SPEAKER_EMBEDDING_MIN_SECONDS", 8.0)
         ),
@@ -107,6 +127,9 @@ def speaker_embedding_config_from_env() -> SpeakerEmbeddingConfig:
         ),
         max_segments_per_speaker=max(
             1, _get_int_env("SPEAKER_EMBEDDING_MAX_SEGMENTS", 8)
+        ),
+        max_profile_embeddings_per_model=max(
+            1, _get_int_env("SPEAKER_PROFILE_MAX_EMBEDDINGS_PER_MODEL", 16)
         ),
     )
 
@@ -159,11 +182,11 @@ def build_profile_references(
     references: list[ProfileReference] = []
     for profile in profiles:
         profile_id = str(profile["profile_id"])
-        embeddings = [
-            item.get("embedding")
-            for item in embeddings_by_profile.get(profile_id, [])
-            if item.get("embedding") is not None
-        ]
+        embeddings = []
+        for item in embeddings_by_profile.get(profile_id, []):
+            embedding = normalize_embedding(item.get("embedding") or [])
+            if embedding is not None:
+                embeddings.append(embedding)
         reference_embedding = mean_normalized_embedding(embeddings)
         if reference_embedding is None:
             continue
@@ -172,10 +195,54 @@ def build_profile_references(
                 profile_id=profile_id,
                 display_name=str(profile["display_name"]),
                 embedding=reference_embedding,
+                embeddings=embeddings,
                 embedding_count=len(embeddings),
             )
         )
     return references
+
+
+def profile_reference_similarity(
+    local_embedding: Iterable[Any],
+    reference: ProfileReference,
+    *,
+    top_k: int = 3,
+) -> tuple[float, dict[str, Any]] | None:
+    local_normalized = normalize_embedding(local_embedding)
+    if local_normalized is None:
+        return None
+
+    scores = [
+        score
+        for embedding in reference.embeddings
+        if (score := cosine_similarity(local_normalized, embedding)) is not None
+    ]
+    mean_score = cosine_similarity(local_normalized, reference.embedding)
+    if not scores and mean_score is None:
+        return None
+
+    sorted_scores = sorted(scores, reverse=True)
+    best_score = sorted_scores[0] if sorted_scores else mean_score
+    selected_top_k = sorted_scores[: max(1, top_k)]
+    top_k_score = (
+        sum(selected_top_k) / len(selected_top_k)
+        if selected_top_k
+        else best_score
+    )
+    mean_component = mean_score if mean_score is not None else best_score
+    combined_score = (
+        0.6 * float(best_score)
+        + 0.25 * float(top_k_score)
+        + 0.15 * float(mean_component)
+    )
+    score = max(float(best_score), combined_score)
+    return score, {
+        "best_score": round(float(best_score), 4),
+        "top_k_score": round(float(top_k_score), 4),
+        "mean_score": round(float(mean_component), 4),
+        "embedding_count": reference.embedding_count,
+        "top_k": min(len(selected_top_k), max(1, top_k)),
+    }
 
 
 def match_speaker_embeddings(
@@ -184,24 +251,30 @@ def match_speaker_embeddings(
     *,
     auto_threshold: float,
     suggest_threshold: float,
+    top_k: int = 3,
 ) -> list[SpeakerMatch]:
     """Return one reviewable profile suggestion per local speaker, if confident."""
     references = list(profile_references)
     matches: list[SpeakerMatch] = []
 
     for local in local_embeddings:
-        best: tuple[ProfileReference, float] | None = None
+        best: tuple[ProfileReference, float, dict[str, Any]] | None = None
         for reference in references:
-            score = cosine_similarity(local.embedding, reference.embedding)
-            if score is None:
+            result = profile_reference_similarity(
+                local.embedding,
+                reference,
+                top_k=top_k,
+            )
+            if result is None:
                 continue
+            score, diagnostics = result
             if best is None or score > best[1]:
-                best = (reference, score)
+                best = (reference, score, diagnostics)
 
         if best is None:
             continue
 
-        reference, score = best
+        reference, score, diagnostics = best
         if score < suggest_threshold:
             continue
 
@@ -212,10 +285,122 @@ def match_speaker_embeddings(
                 display_name=reference.display_name,
                 confidence=round(max(0.0, min(1.0, score)), 4),
                 match_level="auto" if score >= auto_threshold else "suggest",
+                diagnostics=diagnostics,
             )
         )
 
     return sorted(matches, key=lambda item: item.confidence, reverse=True)
+
+
+def diagnose_speaker_matches(
+    *,
+    local_speaker_ids: Iterable[str],
+    local_embeddings: Iterable[LocalSpeakerEmbedding],
+    profile_references: Iterable[ProfileReference],
+    config: SpeakerEmbeddingConfig,
+    local_audio_seconds: dict[str, float] | None = None,
+) -> list[SpeakerMatchDiagnostic]:
+    references = list(profile_references)
+    embeddings_by_speaker = {
+        embedding.local_speaker_id: embedding for embedding in local_embeddings
+    }
+    profile_embedding_count = sum(reference.embedding_count for reference in references)
+    diagnostics: list[SpeakerMatchDiagnostic] = []
+
+    for local_speaker_id in sorted({str(item) for item in local_speaker_ids}):
+        audio_seconds = (local_audio_seconds or {}).get(local_speaker_id)
+        local_embedding = embeddings_by_speaker.get(local_speaker_id)
+
+        if not config.enabled:
+            diagnostics.append(
+                SpeakerMatchDiagnostic(
+                    local_speaker_id=local_speaker_id,
+                    reason_code="embedding_disabled",
+                    reason="Embedding-Modell ist deaktiviert",
+                    suggest_threshold=config.suggest_threshold,
+                    local_audio_seconds=audio_seconds,
+                    profile_embedding_count=profile_embedding_count,
+                )
+            )
+            continue
+
+        if local_embedding is None:
+            reason_code = "insufficient_speaker_audio"
+            reason = "zu wenig Sprecher-Audio"
+            if audio_seconds is None or audio_seconds >= config.min_total_seconds:
+                reason_code = "embedding_model_unavailable"
+                reason = "Embedding-Modell nicht verfügbar"
+            diagnostics.append(
+                SpeakerMatchDiagnostic(
+                    local_speaker_id=local_speaker_id,
+                    reason_code=reason_code,
+                    reason=reason,
+                    suggest_threshold=config.suggest_threshold,
+                    local_audio_seconds=audio_seconds,
+                    profile_embedding_count=profile_embedding_count,
+                )
+            )
+            continue
+
+        if not references:
+            diagnostics.append(
+                SpeakerMatchDiagnostic(
+                    local_speaker_id=local_speaker_id,
+                    reason_code="no_profile_embedding",
+                    reason="kein Profil-Embedding",
+                    suggest_threshold=config.suggest_threshold,
+                    local_audio_seconds=audio_seconds,
+                    local_embedding_available=True,
+                    profile_embedding_count=0,
+                )
+            )
+            continue
+
+        best: tuple[ProfileReference, float] | None = None
+        for reference in references:
+            result = profile_reference_similarity(
+                local_embedding.embedding,
+                reference,
+                top_k=config.match_top_k,
+            )
+            if result is None:
+                continue
+            score, _ = result
+            if best is None or score > best[1]:
+                best = (reference, score)
+
+        if best is None:
+            diagnostics.append(
+                SpeakerMatchDiagnostic(
+                    local_speaker_id=local_speaker_id,
+                    reason_code="no_compatible_profile_embedding",
+                    reason="kein kompatibles Profil-Embedding",
+                    suggest_threshold=config.suggest_threshold,
+                    local_audio_seconds=audio_seconds,
+                    local_embedding_available=True,
+                    profile_embedding_count=profile_embedding_count,
+                )
+            )
+            continue
+
+        reference, score = best
+        if score < config.suggest_threshold:
+            diagnostics.append(
+                SpeakerMatchDiagnostic(
+                    local_speaker_id=local_speaker_id,
+                    reason_code="below_threshold",
+                    reason="unter Schwellwert",
+                    best_profile_id=reference.profile_id,
+                    best_profile_display_name=reference.display_name,
+                    best_score=round(max(0.0, min(1.0, score)), 4),
+                    suggest_threshold=config.suggest_threshold,
+                    local_audio_seconds=audio_seconds,
+                    local_embedding_available=True,
+                    profile_embedding_count=profile_embedding_count,
+                )
+            )
+
+    return diagnostics
 
 
 def load_pyannote_embedding_inference(
@@ -361,6 +546,7 @@ def extract_local_speaker_embeddings(
     for speaker, candidates in candidates_by_speaker.items():
         candidates = sorted(candidates, key=lambda item: _segment_duration(item), reverse=True)
         embeddings: list[list[float]] = []
+        reference_embeddings: list[list[float]] = []
         selected_segments: list[dict[str, float]] = []
         total_seconds = 0.0
 
@@ -387,12 +573,11 @@ def extract_local_speaker_embeddings(
             if normalized is None:
                 continue
             embeddings.append(normalized)
+            reference_embeddings.append(normalized)
             selected_segments.append(
                 {"start": round(start, 3), "end": round(end, 3), "duration": round(end - start, 3)}
             )
             total_seconds += end - start
-            if total_seconds >= config.min_total_seconds:
-                break
 
         speaker_embedding = mean_normalized_embedding(embeddings)
         if speaker_embedding is None or total_seconds < config.min_total_seconds:
@@ -407,6 +592,7 @@ def extract_local_speaker_embeddings(
                 embedding=speaker_embedding,
                 model_name=config.model_name,
                 quality=round(quality, 4),
+                reference_embeddings=reference_embeddings,
                 quality_metadata={
                     "selected_segments": selected_segments,
                     "selected_segment_count": len(selected_segments),

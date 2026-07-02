@@ -13,6 +13,7 @@ import type {
   PipelineStartOptions,
   SessionResponse,
   SessionSavePayload,
+  SpeakerMatchDiagnostic,
   SpeakerObservation,
   SpeakerProfile,
   SummaryReviewWarning,
@@ -566,6 +567,23 @@ export async function listSpeakerObservations(
 
   if (!response.ok) {
     throw await readApiError(response, "Fehler beim Laden der Sprecher-Erkennungen");
+  }
+
+  return response.json();
+}
+
+export async function listSpeakerMatchDiagnostics(
+  sessionId: string
+): Promise<SpeakerMatchDiagnostic[]> {
+  const response = await fetch(
+    `${API_BASE}/api/sessions/${sessionId}/speaker-match-diagnostics`
+  );
+
+  if (!response.ok) {
+    throw await readApiError(
+      response,
+      "Fehler beim Laden der Sprecher-Erkennungsdiagnose"
+    );
   }
 
   return response.json();

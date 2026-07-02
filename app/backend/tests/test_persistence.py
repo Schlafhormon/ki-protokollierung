@@ -279,6 +279,37 @@ def test_speaker_profiles_embeddings_observations_and_pipeline_jobs_roundtrip(
     }
 
 
+def test_prune_speaker_embeddings_keeps_best_limited_profile_references(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "sessions.sqlite3"
+    monkeypatch.setenv("PERSISTENCE_DB_PATH", str(db_path))
+    persistence.init_db()
+    persistence.create_speaker_profile("Alice", profile_id="alice")
+
+    for index, quality in enumerate([0.1, 0.9, 0.4, 0.8]):
+        persistence.save_speaker_embedding(
+            "alice",
+            [float(index), 1.0],
+            model_name="test-model",
+            quality=quality,
+            metadata={"index": index},
+        )
+
+    deleted = persistence.prune_speaker_embeddings(
+        "alice",
+        model_name="test-model",
+        max_count=2,
+    )
+    remaining = persistence.load_speaker_embeddings(
+        "alice",
+        model_name="test-model",
+    )
+
+    assert deleted == 2
+    assert [item["metadata"]["index"] for item in remaining] == [1, 3]
+
+
 def test_transcription_job_is_restored_from_sqlite_after_memory_cache_is_cleared(
     tmp_path, monkeypatch
 ):

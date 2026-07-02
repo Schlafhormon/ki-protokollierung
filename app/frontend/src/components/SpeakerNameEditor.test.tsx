@@ -71,10 +71,12 @@ describe('SpeakerNameEditor', () => {
       .fn()
       .mockResolvedValueOnce(jsonResponse([aliceProfile]))
       .mockResolvedValueOnce(jsonResponse([aliceSuggestion]))
+      .mockResolvedValueOnce(jsonResponse([]))
       .mockResolvedValueOnce(
         jsonResponse({ ...aliceSuggestion, status: 'confirmed' })
       )
-      .mockResolvedValueOnce(jsonResponse([aliceProfile]));
+      .mockResolvedValueOnce(jsonResponse([aliceProfile]))
+      .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetchMock);
 
     renderEditor({ setSpeakerNames });
@@ -87,7 +89,7 @@ describe('SpeakerNameEditor', () => {
         SPEAKER_00: 'Alice Global',
       })
     );
-    expect(fetchMock.mock.calls[2]![0]).toBe(
+      expect(fetchMock.mock.calls[3]![0]).toBe(
       '/api/sessions/session-1/speaker-observations/7/confirm'
     );
   });
@@ -98,7 +100,9 @@ describe('SpeakerNameEditor', () => {
       .fn()
       .mockResolvedValueOnce(jsonResponse([aliceProfile]))
       .mockResolvedValueOnce(jsonResponse([aliceSuggestion]))
-      .mockResolvedValueOnce(jsonResponse({ ...aliceSuggestion, status: 'rejected' }));
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ ...aliceSuggestion, status: 'rejected' }))
+      .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetchMock);
 
     renderEditor();
@@ -107,11 +111,11 @@ describe('SpeakerNameEditor', () => {
     await user.click(screen.getByRole('button', { name: /^ablehnen$/i }));
 
     await waitFor(() =>
-      expect(fetchMock.mock.calls[2]![0]).toBe(
+        expect(fetchMock.mock.calls[3]![0]).toBe(
         '/api/sessions/session-1/speaker-observations/7/reject'
       )
     );
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it('stores a new profile only through the explicit remember action', async () => {
@@ -129,10 +133,12 @@ describe('SpeakerNameEditor', () => {
       .fn()
       .mockResolvedValueOnce(jsonResponse([]))
       .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([]))
       .mockResolvedValueOnce(jsonResponse(manualObservation))
       .mockResolvedValueOnce(
         jsonResponse([{ ...aliceProfile, profile_id: 'charlie', display_name: 'Charlie Global' }])
-      );
+      )
+      .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetchMock);
 
     renderEditor({
@@ -148,10 +154,10 @@ describe('SpeakerNameEditor', () => {
         SPEAKER_00: 'Charlie Global',
       })
     );
-    expect(fetchMock.mock.calls[2]![0]).toBe(
+    expect(fetchMock.mock.calls[3]![0]).toBe(
       '/api/sessions/session-1/speaker-observations/manual'
     );
-    expect(JSON.parse(fetchMock.mock.calls[2]![1]!.body as string)).toMatchObject({
+    expect(JSON.parse(fetchMock.mock.calls[3]![1]!.body as string)).toMatchObject({
       local_speaker_id: 'SPEAKER_00',
       display_name: 'Charlie Global',
     });
@@ -164,8 +170,10 @@ describe('SpeakerNameEditor', () => {
       .fn()
       .mockResolvedValueOnce(jsonResponse([aliceProfile]))
       .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([]))
       .mockResolvedValueOnce(jsonResponse({ ...aliceSuggestion, status: 'manual' }))
-      .mockResolvedValueOnce(jsonResponse([aliceProfile]));
+      .mockResolvedValueOnce(jsonResponse([aliceProfile]))
+      .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetchMock);
 
     renderEditor({ setSpeakerNames });
@@ -180,11 +188,11 @@ describe('SpeakerNameEditor', () => {
     );
 
     await waitFor(() =>
-      expect(fetchMock.mock.calls[2]![0]).toBe(
+        expect(fetchMock.mock.calls[3]![0]).toBe(
         '/api/sessions/session-1/speaker-observations/manual'
       )
     );
-    expect(JSON.parse(fetchMock.mock.calls[2]![1]!.body as string)).toMatchObject({
+    expect(JSON.parse(fetchMock.mock.calls[3]![1]!.body as string)).toMatchObject({
       local_speaker_id: 'SPEAKER_00',
       profile_id: 'alice',
     });
@@ -200,6 +208,7 @@ describe('SpeakerNameEditor', () => {
       .fn()
       .mockResolvedValueOnce(jsonResponse([aliceProfile]))
       .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([]))
       .mockResolvedValueOnce(jsonResponse(renamedProfile))
       .mockResolvedValueOnce(jsonResponse({ ...renamedProfile, archived: true }))
       .mockResolvedValueOnce(jsonResponse([]));
@@ -214,13 +223,41 @@ describe('SpeakerNameEditor', () => {
     await user.click(screen.getByRole('button', { name: /^profil archivieren$/i }));
 
     await waitFor(() =>
-      expect(fetchMock.mock.calls[3]![0]).toBe('/api/speaker-profiles/alice')
+      expect(fetchMock.mock.calls[4]![0]).toBe('/api/speaker-profiles/alice')
     );
-    expect(fetchMock.mock.calls[2]![1]!.method).toBe('PUT');
-    expect(JSON.parse(fetchMock.mock.calls[2]![1]!.body as string)).toEqual({
+    expect(fetchMock.mock.calls[3]![1]!.method).toBe('PUT');
+    expect(JSON.parse(fetchMock.mock.calls[3]![1]!.body as string)).toEqual({
       display_name: 'Alice Umbenannt',
     });
-    expect(fetchMock.mock.calls[3]![1]!.method).toBe('DELETE');
+    expect(fetchMock.mock.calls[4]![1]!.method).toBe('DELETE');
+  });
+
+  it('shows the diagnostic reason when no automatic suggestion was created', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse([aliceProfile]))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(
+        jsonResponse([
+          {
+            local_speaker_id: 'SPEAKER_00',
+            reason_code: 'below_threshold',
+            reason: 'unter Schwellwert',
+            best_profile_id: 'alice',
+            best_profile_display_name: 'Alice Global',
+            best_score: 0.61,
+            suggest_threshold: 0.72,
+            local_audio_seconds: 14,
+            local_embedding_available: true,
+            profile_embedding_count: 4,
+          },
+        ])
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderEditor();
+
+    expect(await screen.findByText(/Grund: unter Schwellwert/i)).toBeInTheDocument();
   });
 
   it('does not load or show persistent profiles while speaker memory is off', async () => {

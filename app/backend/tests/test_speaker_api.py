@@ -303,6 +303,129 @@ def test_global_embedding_copy_requires_opt_in_or_explicit_action(
     assert persistence.load_speaker_embeddings("alice") == []
 
 
+def test_explicit_profile_action_persists_multiple_reference_embeddings_with_limit(
+    tmp_path, monkeypatch
+):
+    session_id = setup_speaker_session(tmp_path, monkeypatch)
+    monkeypatch.setenv("SPEAKER_PROFILE_MAX_EMBEDDINGS_PER_MODEL", "3")
+    persistence.create_speaker_profile("Alice Global", profile_id="alice")
+    persistence.save_job_speaker_embedding(
+        job_id="job-speakers",
+        local_speaker_id="SPEAKER_00",
+        embedding=[1.0, 0.0],
+        model_name="test-embedding",
+        quality=0.9,
+        quality_metadata={
+            "total_seconds": 20.0,
+            "selected_segments": [
+                {"start": 0.0, "end": 3.0, "duration": 3.0},
+                {"start": 3.0, "end": 6.0, "duration": 3.0},
+                {"start": 6.0, "end": 9.0, "duration": 3.0},
+                {"start": 9.0, "end": 12.0, "duration": 3.0},
+            ],
+            "reference_embeddings": [
+                [1.0, 0.0],
+                [0.98, 0.02],
+                [0.96, 0.04],
+                [0.94, 0.06],
+            ],
+        },
+    )
+    client = TestClient(main.app)
+
+    manual = client.post(
+        f"/api/sessions/{session_id}/speaker-observations/manual",
+        json={"local_speaker_id": "SPEAKER_00", "profile_id": "alice"},
+    )
+
+    assert manual.status_code == 200
+    profile_embeddings = persistence.load_speaker_embeddings(
+        "alice",
+        model_name="test-embedding",
+    )
+    assert len(profile_embeddings) == 3
+    assert [item["embedding"] for item in profile_embeddings] == [
+        [0.98, 0.02],
+        [0.96, 0.04],
+        [0.94, 0.06],
+    ]
+    assert profile_embeddings[0]["metadata"]["source_reference_index"] == 1
+    assert "source_segment" in profile_embeddings[0]["metadata"]
+
+
+def test_speaker_suggestions_are_recomputed_after_profile_is_saved(
+    tmp_path, monkeypatch
+):
+    session_id = setup_speaker_session(tmp_path, monkeypatch)
+    persistence.save_job_speaker_embedding(
+        job_id="job-speakers",
+        local_speaker_id="SPEAKER_00",
+        embedding=[1.0, 0.0],
+        model_name="test-embedding",
+        quality=0.9,
+        quality_metadata={"reference_embeddings": [[1.0, 0.0]]},
+    )
+    persistence.save_job_speaker_embedding(
+        job_id="job-speakers",
+        local_speaker_id="SPEAKER_01",
+        embedding=[0.99, 0.01],
+        model_name="test-embedding",
+        quality=0.9,
+    )
+    client = TestClient(main.app)
+
+    manual = client.post(
+        f"/api/sessions/{session_id}/speaker-observations/manual",
+        json={"local_speaker_id": "SPEAKER_00", "display_name": "Alice Global"},
+    )
+
+    assert manual.status_code == 200
+    observations = persistence.load_speaker_observations(
+        session_id=session_id,
+        status="suggested",
+    )
+    assert [(item["local_speaker_id"], item["profile_id"]) for item in observations] == [
+        ("SPEAKER_01", manual.json()["profile_id"])
+    ]
+
+
+def test_speaker_match_diagnostics_report_no_profile_and_below_threshold(
+    tmp_path, monkeypatch
+):
+    session_id = setup_speaker_session(tmp_path, monkeypatch)
+    monkeypatch.setenv("SPEAKER_EMBEDDING_MIN_SECONDS", "1.0")
+    persistence.save_job_speaker_embedding(
+        job_id="job-speakers",
+        local_speaker_id="SPEAKER_00",
+        embedding=[0.0, 1.0],
+        model_name="pyannote/embedding",
+        quality=0.9,
+    )
+    client = TestClient(main.app)
+
+    no_profile = client.get(
+        f"/api/sessions/{session_id}/speaker-match-diagnostics"
+    )
+    assert no_profile.status_code == 200
+    assert no_profile.json()[0]["reason_code"] == "no_profile_embedding"
+
+    persistence.create_speaker_profile("Alice Global", profile_id="alice")
+    persistence.save_speaker_embedding(
+        "alice",
+        [1.0, 0.0],
+        model_name="pyannote/embedding",
+        quality=0.9,
+    )
+    below_threshold = client.get(
+        f"/api/sessions/{session_id}/speaker-match-diagnostics"
+    )
+    by_speaker = {item["local_speaker_id"]: item for item in below_threshold.json()}
+
+    assert by_speaker["SPEAKER_00"]["reason_code"] == "below_threshold"
+    assert by_speaker["SPEAKER_00"]["best_profile_id"] == "alice"
+    assert by_speaker["SPEAKER_01"]["reason_code"] == "embedding_model_unavailable"
+
+
 def test_speaker_observation_errors_are_reported_cleanly(tmp_path, monkeypatch):
     session_id = setup_speaker_session(tmp_path, monkeypatch)
     archived = persistence.create_speaker_profile("Archiviert", profile_id="archived")

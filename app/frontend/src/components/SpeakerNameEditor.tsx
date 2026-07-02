@@ -4,12 +4,18 @@ import {
   confirmSpeakerObservation,
   createManualSpeakerObservation,
   deleteSpeakerProfileEmbeddings,
+  listSpeakerMatchDiagnostics,
   listSpeakerObservations,
   listSpeakerProfiles,
   rejectSpeakerObservation,
   updateSpeakerProfile,
 } from '../api';
-import type { SpeakerObservation, SpeakerProfile, TranscriptLine } from '../types';
+import type {
+  SpeakerMatchDiagnostic,
+  SpeakerObservation,
+  SpeakerProfile,
+  TranscriptLine,
+} from '../types';
 import AudioPlayer from './AudioPlayer';
 
 interface SpeakerNameEditorProps {
@@ -71,6 +77,7 @@ export default function SpeakerNameEditor({
   const [mergeTargets, setMergeTargets] = useState<Record<string, string>>({});
   const [profiles, setProfiles] = useState<SpeakerProfile[]>([]);
   const [observations, setObservations] = useState<SpeakerObservation[]>([]);
+  const [diagnostics, setDiagnostics] = useState<SpeakerMatchDiagnostic[]>([]);
   const [reviewStatus, setReviewStatus] = useState<ReviewStatus>('idle');
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -87,6 +94,7 @@ export default function SpeakerNameEditor({
     if (!rememberSpeakers) {
       setProfiles([]);
       setObservations([]);
+      setDiagnostics([]);
       setReviewStatus('ready');
       setReviewError(null);
       return;
@@ -96,13 +104,18 @@ export default function SpeakerNameEditor({
     setReviewStatus('loading');
     setReviewError(null);
 
-    Promise.all([listSpeakerProfiles(), listSpeakerObservations(sessionId)])
-      .then(([loadedProfiles, loadedObservations]) => {
+    Promise.all([
+      listSpeakerProfiles(),
+      listSpeakerObservations(sessionId),
+      listSpeakerMatchDiagnostics(sessionId),
+    ])
+      .then(([loadedProfiles, loadedObservations, loadedDiagnostics]) => {
         if (!isCurrent) {
           return;
         }
         setProfiles(loadedProfiles);
         setObservations(loadedObservations);
+        setDiagnostics(loadedDiagnostics);
         setReviewStatus('ready');
         const firstProfile = loadedProfiles[0];
         if (firstProfile) {
@@ -154,6 +167,14 @@ export default function SpeakerNameEditor({
     return grouped;
   }, [observations]);
 
+  const diagnosticsBySpeaker = useMemo(() => {
+    const grouped = new Map<string, SpeakerMatchDiagnostic>();
+    for (const diagnostic of diagnostics) {
+      grouped.set(diagnostic.local_speaker_id, diagnostic);
+    }
+    return grouped;
+  }, [diagnostics]);
+
   const selectedProfile = profiles.find(
     (profile) => profile.profile_id === selectedProfileId
   );
@@ -166,6 +187,13 @@ export default function SpeakerNameEditor({
       setSelectedProfileId(nextProfile?.profile_id ?? '');
       setProfileNameDraft(nextProfile?.display_name ?? '');
     }
+  };
+
+  const refreshDiagnostics = async () => {
+    if (!sessionId || !rememberSpeakers) {
+      return;
+    }
+    setDiagnostics(await listSpeakerMatchDiagnostics(sessionId));
   };
 
   const handleNameChange = (speakerId: string, name: string) => {
@@ -196,6 +224,7 @@ export default function SpeakerNameEditor({
       applyObservationName(speakerId, updated);
       setActionMessage(successMessage);
       await refreshProfiles();
+      await refreshDiagnostics();
     } catch (error) {
       setReviewError(
         error instanceof Error ? error.message : 'Sprecheraktion fehlgeschlagen'
@@ -230,6 +259,7 @@ export default function SpeakerNameEditor({
       );
       setObservations((current) => upsertObservation(current, updated));
       setActionMessage('Vorschlag wurde abgelehnt.');
+      await refreshDiagnostics();
     } catch (error) {
       setReviewError(
         error instanceof Error ? error.message : 'Vorschlag konnte nicht abgelehnt werden'
@@ -426,6 +456,7 @@ export default function SpeakerNameEditor({
           {speakerInfo.map(({ id, sample, start }) => {
             const suggestion = suggestionsBySpeaker.get(id);
             const accepted = acceptedBySpeaker.get(id);
+            const diagnostic = diagnosticsBySpeaker.get(id);
             const selectedTarget = profileTargets[id] || '';
             const currentName = speakerNames[id] || '';
             const isBusy = actionSpeaker === id;
@@ -534,6 +565,17 @@ export default function SpeakerNameEditor({
                     ) : (
                       <div className="text-xs text-gray-500">
                         Kein automatischer Profilvorschlag für diesen Sprecher.
+                        {diagnostic && !accepted && (
+                          <span className="ml-1">
+                            Grund: {diagnostic.reason}
+                            {diagnostic.best_score !== null &&
+                              diagnostic.best_score !== undefined &&
+                              diagnostic.suggest_threshold !== null &&
+                              diagnostic.suggest_threshold !== undefined
+                              ? ` (${formatConfidence(diagnostic.best_score)} unter ${formatConfidence(diagnostic.suggest_threshold)})`
+                              : ''}
+                          </span>
+                        )}
                       </div>
                     )}
 

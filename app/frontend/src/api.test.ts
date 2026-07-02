@@ -10,6 +10,7 @@ import {
   detectAgenda,
   exportProtocol,
   generateSummary,
+  listSpeakerMatchDiagnostics,
   listSpeakerObservations,
   listSpeakerProfiles,
   loadSession,
@@ -487,6 +488,7 @@ describe('api session client', () => {
     await deleteSpeakerProfileEmbeddings('alice');
     await createSpeakerProfile({ displayName: 'Bob Global', scope: 'committee-1' });
     await listSpeakerObservations('session-1');
+    await listSpeakerMatchDiagnostics('session-1');
     await confirmSpeakerObservation('session-1', 7, { profileId: 'alice' });
     await createManualSpeakerObservation('session-1', {
       localSpeakerId: 'SPEAKER_00',
@@ -516,15 +518,18 @@ describe('api session client', () => {
       '/api/sessions/session-1/speaker-observations'
     );
     expect(fetchMock.mock.calls[6]![0]).toBe(
+      '/api/sessions/session-1/speaker-match-diagnostics'
+    );
+    expect(fetchMock.mock.calls[7]![0]).toBe(
       '/api/sessions/session-1/speaker-observations/7/confirm'
     );
-    expect(JSON.parse(fetchMock.mock.calls[6]![1]!.body as string)).toMatchObject({
+    expect(JSON.parse(fetchMock.mock.calls[7]![1]!.body as string)).toMatchObject({
       profile_id: 'alice',
     });
-    expect(fetchMock.mock.calls[7]![0]).toBe(
+    expect(fetchMock.mock.calls[8]![0]).toBe(
       '/api/sessions/session-1/speaker-observations/manual'
     );
-    expect(JSON.parse(fetchMock.mock.calls[7]![1]!.body as string)).toMatchObject({
+    expect(JSON.parse(fetchMock.mock.calls[8]![1]!.body as string)).toMatchObject({
       local_speaker_id: 'SPEAKER_00',
       profile_id: 'alice',
       observation_id: 7,

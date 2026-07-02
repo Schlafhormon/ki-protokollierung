@@ -175,6 +175,15 @@ In der Sprecherprüfung können Profile umbenannt, archiviert und gespeicherte
 Embeddings gelöscht werden. Archivierte Profile werden standardmäßig nicht mehr
 für Vorschläge verwendet.
 
+Für dauerhafte Profile werden keine Roh-Audiodaten gespeichert. Nach einer
+expliziten Bestätigung werden nur qualitätsgefilterte Segment-Embeddings aus
+nicht überlappenden, ausreichend langen Sprecherabschnitten übernommen. Pro
+Profil und Embedding-Modell bleibt die Anzahl begrenzt; beim Matching werden
+mehrere Referenzen inklusive Profilmittel verglichen. Falls kein Vorschlag
+entsteht, liefert die Sprecherprüfung Diagnosegründe wie fehlende
+Profil-Embeddings, zu wenig Sprecher-Audio, ein nicht verfügbares
+Embedding-Modell oder Scores unterhalb des Schwellwerts.
+
 ## Konfiguration
 
 Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
@@ -193,6 +202,12 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `SPEAKER_EMBEDDING_ENABLED` | lokale Sprecher-Embeddings für prüfbare Matches erzeugen | `true` |
 | `SPEAKER_MATCH_AUTO_THRESHOLD` | Schwelle für starke Sprecherprofil-Matches | `0.82` |
 | `SPEAKER_MATCH_SUGGEST_THRESHOLD` | Mindestschwelle für Vorschläge | `0.72` |
+| `SPEAKER_MATCH_TOP_K` | Anzahl der besten Profilreferenzen für Top-k-Matching | `3` |
+| `SPEAKER_EMBEDDING_MIN_SECONDS` | Mindestmenge qualifiziertes Audio pro lokalem Sprecher | `8.0` |
+| `SPEAKER_EMBEDDING_MIN_SEGMENT_SECONDS` | Mindestdauer eines Referenzsegments | `1.5` |
+| `SPEAKER_EMBEDDING_MAX_SEGMENT_SECONDS` | maximale Segmentdauer vor dem Cropping | `12.0` |
+| `SPEAKER_EMBEDDING_MAX_SEGMENTS` | maximale lokale Segmente pro Sprecher für die Extraktion | `8` |
+| `SPEAKER_PROFILE_MAX_EMBEDDINGS_PER_MODEL` | maximale globale Referenz-Embeddings je Profil und Modell | `16` |
 | `AGENDA_DETECTION_USE_LLM` | LLM für TOP-Erkennung ohne expliziten UI/API-Wunsch verwenden | `false` |
 | `PERSISTENCE_DB_PATH` | SQLite-Pfad im Backend-Container | `/app/data/sessions.sqlite3` |
 | `MAX_UPLOAD_BYTES` | maximale Uploadgröße | `524288000` |

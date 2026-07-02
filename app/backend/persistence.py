@@ -409,6 +409,45 @@ def delete_speaker_embeddings(
         return int(cursor.rowcount or 0)
 
 
+def prune_speaker_embeddings(
+    profile_id: str,
+    *,
+    model_name: str,
+    max_count: int,
+    db_path: Path | None = None,
+) -> int:
+    """Keep only the best bounded set of embeddings for one profile/model."""
+    if max_count < 1:
+        raise ValueError("max_count must be at least 1")
+
+    with connect(db_path) as db:
+        keep_rows = db.execute(
+            """
+            SELECT embedding_id
+            FROM speaker_embeddings
+            WHERE profile_id = ? AND model_name = ?
+            ORDER BY COALESCE(quality, 0) DESC, created_at DESC, embedding_id DESC
+            LIMIT ?
+            """,
+            (profile_id, model_name, max_count),
+        ).fetchall()
+        keep_ids = {int(row["embedding_id"]) for row in keep_rows}
+        if not keep_ids:
+            return 0
+
+        placeholders = ",".join("?" for _ in keep_ids)
+        cursor = db.execute(
+            f"""
+            DELETE FROM speaker_embeddings
+            WHERE profile_id = ?
+              AND model_name = ?
+              AND embedding_id NOT IN ({placeholders})
+            """,
+            [profile_id, model_name, *keep_ids],
+        )
+        return int(cursor.rowcount or 0)
+
+
 def load_speaker_profile(
     profile_id: str,
     *,
