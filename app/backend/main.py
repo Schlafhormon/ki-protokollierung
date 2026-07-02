@@ -2075,7 +2075,7 @@ def run_pipeline_job(
             summaries=summaries,
             summary_reviews=summary_reviews,
             skipped_assignment=not bool(tops),
-            current_step=3,
+            current_step=2 if not tops else 3,
         )
 
         ensure_pipeline_not_cancelled(pipeline_id)

@@ -204,6 +204,9 @@ function hasReviewUncertainty(
 ): boolean {
   const transcriptLength = session.transcript?.length ?? 0;
   const assignments = session.assignments ?? [];
+  if (transcriptLength > 0 && session.skipped_assignment) {
+    return true;
+  }
   if (transcriptLength > 0 && !session.skipped_assignment) {
     if (assignments.length !== transcriptLength) {
       return true;
@@ -431,7 +434,7 @@ export default function App() {
         ? "Automatische Verarbeitung abgeschlossen. Bitte prüfen Sie unsichere Zuordnungen vor dem Protokoll."
         : "Automatische Verarbeitung abgeschlossen. Sie können direkt zum Protokoll wechseln oder die Zuordnung prüfen."
     );
-    setCurrentStep(result.session.skipped_assignment ? 3 : 2);
+    setCurrentStep(2);
 
     try {
       localStorage.removeItem(ACTIVE_PIPELINE_KEY);
@@ -687,8 +690,7 @@ export default function App() {
         setTops([]);
         setAssignments(new Array(transcriptResult.length).fill(null));
         setIsProcessing(false);
-        setCurrentStep(3);
-        generateSummaryForAll(transcriptResult, true);
+        setCurrentStep(2);
         return;
       }
       setProcessingStatus("TOPs und Segmentgrenzen werden erkannt...");
@@ -718,11 +720,10 @@ export default function App() {
           setCurrentStep(2);
         } else {
           setSkippedAssignment(true);
-          setTops([DEFAULT_TOP_TITLE]);
-          setAssignments(new Array(transcriptResult.length).fill(0));
+          setTops([]);
+          setAssignments(new Array(transcriptResult.length).fill(null));
           setIsProcessing(false);
-          setCurrentStep(3);
-          generateSummaryForAll(transcriptResult);
+          setCurrentStep(2);
         }
       } catch (error) {
         const detectionError =
@@ -741,10 +742,9 @@ export default function App() {
           setCurrentStep(2);
         } else {
           setSkippedAssignment(true);
-          setTops([DEFAULT_TOP_TITLE]);
-          setAssignments(new Array(transcriptResult.length).fill(0));
-          setCurrentStep(3);
-          generateSummaryForAll(transcriptResult);
+          setTops([]);
+          setAssignments(new Array(transcriptResult.length).fill(null));
+          setCurrentStep(2);
         }
       }
     } catch (error) {
@@ -1104,23 +1104,7 @@ export default function App() {
 
   const handleStep3Back = () => {
     setDirectProtocolAvailable(false);
-    if (skippedAssignment) {
-      // Go back to upload step, reset auto-created TOP
-      setCurrentStep(1);
-      setTops(EMPTY_TOPS);
-      setTranscript([]);
-      setAssignments([]);
-      setAgendaDetection(null);
-      setAgendaDetectionError(null);
-      setSummaries({});
-      setSummaryReviews({});
-      setSummaryInputFingerprint(null);
-      setAudioUrl(null);
-      setSkippedAssignment(false);
-      setIsGeneratingSummary(false);
-    } else {
-      setCurrentStep(2);
-    }
+    setCurrentStep(2);
   };
 
   const handleRegenerateSummary = async (topIndex: number) => {

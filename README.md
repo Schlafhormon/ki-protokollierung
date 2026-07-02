@@ -4,7 +4,7 @@ Webanwendung zur automatischen Transkription, Sprechererkennung, TOP-Zuordnung,
 Zusammenfassung und Protokollerstellung aus Audioaufnahmen kommunaler Sitzungen.
 
 Dieses Repository ist ein weiterentwickelter Fork der ursprünglichen
-Protokollierungsassistenz. Die Weiterentwicklung erfolgte durch
+Protokollierungsassistenz. Die Weiterentwicklung erfolgt durch
 **Keule-Services**, **Erik Benke** und die **Stadt Doberlug-Kirchhain**.
 
 <p align="center">

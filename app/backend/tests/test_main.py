@@ -709,6 +709,59 @@ def test_pipeline_falls_back_to_full_conversation_when_agenda_detection_fails(
     assert result["agenda_detection"]["strategy"] == "pipeline_fallback_full_conversation"
 
 
+def test_pipeline_without_tops_stays_on_review_step_for_speaker_assignment(
+    tmp_path, monkeypatch
+):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+
+    monkeypatch.setattr(
+        main,
+        "transcribe_audio",
+        lambda file_path, models, progress_callback=None: FakeTranscriptionResult(
+            transcript=[
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Wir beraten ohne Tagesordnung.",
+                    "start": 0.0,
+                    "end": 3.0,
+                }
+            ],
+            audio_duration_seconds=3.0,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "summarize_segment",
+        lambda *args, **kwargs: summarize.SummarizationResult(
+            summary="Gesamtes Gespräch wurde zusammengefasst.",
+            duration_seconds=0.01,
+            structured=None,
+        ),
+    )
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/pipeline/start",
+            data={"skip_agenda_detection": "true"},
+            files={"audio": ("meeting.mp3", b"audio", "audio/mpeg")},
+        )
+        pipeline_id = response.json()["pipeline_id"]
+
+        assert wait_until(
+            lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["stage"]
+            == "ready_for_review"
+        )
+        result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
+
+    assert result["session"]["current_step"] == 2
+    assert result["session"]["skipped_assignment"] is True
+    assert result["session"]["tops"] == []
+    assert result["session"]["assignments"] == [None]
+    assert result["session"]["summaries"]["0"] == (
+        "Gesamtes Gespräch wurde zusammengefasst."
+    )
+
+
 def test_pipeline_result_exposes_agenda_segments_and_uncertainty(
     tmp_path, monkeypatch
 ):

@@ -264,6 +264,24 @@ describe('App pipeline flow', () => {
     expect(screen.queryByRole('button', { name: /direkt zum protokoll/i })).not.toBeInTheDocument();
   });
 
+  it('keeps the speaker review step when no TOPs are available', async () => {
+    vi.mocked(getPipelineResult).mockResolvedValue(
+      pipelineResult({
+        current_step: 2,
+        tops: [],
+        assignments: [null],
+        skipped_assignment: true,
+        summaries: { 0: 'Gesamtes Gespräch wurde zusammengefasst.' },
+      })
+    );
+
+    await uploadAndStart();
+
+    expect(await screen.findByText(/Sprecher umbenennen und Profile prüfen/i)).toBeInTheDocument();
+    expect(screen.getByText(/Keine TOPs angelegt/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /direkt zum protokoll/i })).not.toBeInTheDocument();
+  });
+
   it('treats pipeline summaries as stale after assignment inputs change and regenerates', async () => {
     const user = userEvent.setup();
     vi.mocked(generateSummary).mockResolvedValue({
@@ -306,7 +324,9 @@ describe('App pipeline flow', () => {
 
     await uploadAndStart();
 
-    expect(await screen.findByText('Fallback-Zusammenfassung.')).toBeInTheDocument();
+    expect(await screen.findByText(/Sprecher umbenennen und Profile prüfen/i)).toBeInTheDocument();
+    expect(screen.getByText(/Keine TOPs angelegt/i)).toBeInTheDocument();
+    expect(generateSummary).not.toHaveBeenCalled();
     expect(startTranscription).toHaveBeenCalledWith(expect.any(File), 'session-1', false);
   });
 
