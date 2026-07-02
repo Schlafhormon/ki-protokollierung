@@ -94,6 +94,7 @@ export interface PipelineStartOptions {
   model?: string;
   systemPrompt?: string;
   rememberSpeakers?: boolean;
+  skipAgendaDetection?: boolean;
 }
 
 export interface PipelineResultResponse {
@@ -258,6 +259,8 @@ export interface UploadStepProps {
   llmSettings?: LLMSettings;
   rememberSpeakers: boolean;
   setRememberSpeakers: (enabled: boolean) => void;
+  skipAgendaDetection: boolean;
+  setSkipAgendaDetection: (enabled: boolean) => void;
 }
 
 export interface ProcessingStepProps {

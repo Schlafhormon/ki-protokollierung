@@ -194,7 +194,7 @@ export default function AssignmentStep({
   };
 
   const deleteSelectedTop = () => {
-    if (tops.length <= 1) {
+    if (tops.length === 0) {
       return;
     }
     const newTops = tops.filter((_, index) => index !== selectedTop);
@@ -205,7 +205,7 @@ export default function AssignmentStep({
     });
     setTops(newTops);
     setAssignments(newAssignments);
-    setSelectedTop(Math.min(selectedTop, newTops.length - 1));
+    setSelectedTop(Math.max(0, Math.min(selectedTop, newTops.length - 1)));
   };
 
   const mergeSelectedTopWithPrevious = () => {
@@ -416,7 +416,8 @@ export default function AssignmentStep({
 
   const assignedCount = assignments.filter((a) => a !== null).length;
   const totalCount = transcript.length;
-  const canProceed = assignedCount > 0;
+  const hasTops = tops.length > 0;
+  const canProceed = hasTops ? assignedCount > 0 : true;
   const selectedSegmentBounds =
     selectedLineIndex !== null ? getCurrentSegmentBounds(selectedLineIndex) : null;
   const safeSuggestionCount =
@@ -433,9 +434,17 @@ export default function AssignmentStep({
       {/* Instructions */}
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
         <p className="text-blue-800 text-sm">
-          <strong>Anleitung:</strong> 1) TOP links auswählen → 2) Zeilen rechts
-          anklicken (Shift+Klick für Bereich) → 3) Zugeordnete Zeilen werden
-          farblich markiert{audioUrl && ' → Doppelklick auf Zeile zum Abspielen'}
+          {hasTops ? (
+            <>
+              <strong>Anleitung:</strong> 1) TOP links auswählen → 2) Zeilen rechts
+              anklicken (Shift+Klick für Bereich) → 3) Zugeordnete Zeilen werden
+              farblich markiert{audioUrl && ' → Doppelklick auf Zeile zum Abspielen'}
+            </>
+          ) : (
+            <>
+              Keine TOPs angelegt. Das gesamte Transkript wird ohne automatische TOP-Erkennung zusammengefasst.
+            </>
+          )}
         </p>
       </div>
 
@@ -447,6 +456,7 @@ export default function AssignmentStep({
         setSpeakerNames={setSpeakerNames}
         sessionId={sessionId}
         rememberSpeakers={rememberSpeakers}
+        audioUrl={audioUrl}
       />
 
       {/* Agenda Detection */}
@@ -552,7 +562,7 @@ export default function AssignmentStep({
         <div className="w-48 h-2 bg-gray-200 rounded-full overflow-hidden">
           <div
             className="h-full bg-blue-500 transition-all"
-            style={{ width: `${(assignedCount / totalCount) * 100}%` }}
+            style={{ width: `${totalCount ? (assignedCount / totalCount) * 100 : 0}%` }}
           />
         </div>
       </div>
@@ -657,7 +667,7 @@ export default function AssignmentStep({
               <button
                 type="button"
                 onClick={deleteSelectedTop}
-                disabled={tops.length <= 1}
+                disabled={tops.length === 0}
                 className="px-2 py-1.5 text-xs bg-white border border-gray-300 rounded hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
               >
                 TOP löschen
@@ -673,7 +683,11 @@ export default function AssignmentStep({
             </div>
           </div>
           <div className="space-y-2">
-            {tops.map((top, index) => {
+            {tops.length === 0 ? (
+              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-600">
+                Keine TOPs vorhanden.
+              </div>
+            ) : tops.map((top, index) => {
               const color = getColor(index);
               const isSelected = selectedTop === index;
               return (

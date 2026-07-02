@@ -91,6 +91,7 @@ describe('api session client', () => {
     expect(body.get('model')).toBe('qwen3:8b');
     expect(body.get('system_prompt')).toBe('Prompt');
     expect(body.get('remember_speakers')).toBe('true');
+    expect(body.get('skip_agenda_detection')).toBe('false');
     expect(body.get('audio')).toBeInstanceOf(File);
     expect(body.get('pdf')).toBeInstanceOf(File);
     expect(body.get('transcript')).toBeNull();

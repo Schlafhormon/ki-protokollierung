@@ -20,6 +20,8 @@ const defaultProps: UploadStepProps = {
   llmSettings: { model: 'qwen3:8b', systemPrompt: '' },
   rememberSpeakers: false,
   setRememberSpeakers: vi.fn(),
+  skipAgendaDetection: false,
+  setSkipAgendaDetection: vi.fn(),
 };
 
 function renderUploadStep(overrides: Partial<UploadStepProps> = {}) {
@@ -57,6 +59,8 @@ describe('UploadStep', () => {
         setPdfFile={vi.fn()}
         rememberSpeakers={false}
         setRememberSpeakers={vi.fn()}
+        skipAgendaDetection={false}
+        setSkipAgendaDetection={vi.fn()}
       />,
     );
 
@@ -82,6 +86,20 @@ describe('UploadStep', () => {
       expect(setPdfFile).toHaveBeenCalledWith(pdf);
     });
     expect(await screen.findByText(/2 TOPs erfolgreich extrahiert/i)).toBeInTheDocument();
+  });
+
+  it('can explicitly continue without TOPs or automatic TOP detection', async () => {
+    const user = userEvent.setup();
+    const setTops = vi.fn();
+    const setSkipAgendaDetection = vi.fn();
+    renderUploadStep({ tops: ['Begruessung'], setTops, setSkipAgendaDetection });
+
+    await user.click(screen.getByRole('checkbox', {
+      name: /ohne TOPs und ohne automatische TOP-Erkennung/i,
+    }));
+
+    expect(setSkipAgendaDetection).toHaveBeenCalledWith(true);
+    expect(setTops).toHaveBeenCalledWith([]);
   });
 
   it('keeps persistent speaker memory off until the user opts in', async () => {

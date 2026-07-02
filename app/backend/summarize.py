@@ -366,8 +366,14 @@ def _chat_completion_content(
                 break
             time.sleep(LLM_RETRY_BACKOFF_SECONDS * (2**attempt))
 
+    hint = ""
+    if last_info.category == "network":
+        hint = (
+            f" Prüfen Sie, ob der LLM-Dienst erreichbar ist "
+            f"(LLM_BASE_URL={LLM_BASE_URL})."
+        )
     raise LLMCallError(
-        f"LLM-Aufruf fehlgeschlagen ({last_info.category}): {last_error}",
+        f"LLM-Aufruf fehlgeschlagen ({last_info.category}): {last_error}.{hint}",
         category=last_info.category,
         transient=last_info.transient,
     )

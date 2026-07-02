@@ -10,6 +10,7 @@ import {
   updateSpeakerProfile,
 } from '../api';
 import type { SpeakerObservation, SpeakerProfile, TranscriptLine } from '../types';
+import AudioPlayer from './AudioPlayer';
 
 interface SpeakerNameEditorProps {
   transcript: TranscriptLine[];
@@ -18,6 +19,7 @@ interface SpeakerNameEditorProps {
   setSpeakerNames: (names: Record<string, string>) => void;
   sessionId?: string | null;
   rememberSpeakers?: boolean;
+  audioUrl?: string;
 }
 
 type ReviewStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -51,17 +53,18 @@ export default function SpeakerNameEditor({
   setSpeakerNames,
   sessionId,
   rememberSpeakers = false,
+  audioUrl,
 }: SpeakerNameEditorProps) {
   const speakerInfo = useMemo(() => {
-    const speakers = new Map<string, string>();
-    for (const line of transcript) {
+    const speakers = new Map<string, { sample: string; start: number; lineIndex: number }>();
+    for (const [lineIndex, line] of transcript.entries()) {
       if (!speakers.has(line.speaker)) {
         const sample =
           line.text.length > 60 ? `${line.text.substring(0, 60)}...` : line.text;
-        speakers.set(line.speaker, sample);
+        speakers.set(line.speaker, { sample, start: line.start, lineIndex });
       }
     }
-    return Array.from(speakers.entries()).map(([id, sample]) => ({ id, sample }));
+    return Array.from(speakers.entries()).map(([id, value]) => ({ id, ...value }));
   }, [transcript]);
 
   const [isExpanded, setIsExpanded] = useState(speakerInfo.length <= 3);
@@ -75,6 +78,7 @@ export default function SpeakerNameEditor({
   const [profileTargets, setProfileTargets] = useState<Record<string, string>>({});
   const [selectedProfileId, setSelectedProfileId] = useState('');
   const [profileNameDraft, setProfileNameDraft] = useState('');
+  const [sampleSeekTime, setSampleSeekTime] = useState<number | undefined>(undefined);
 
   useEffect(() => {
     if (!isExpanded || !sessionId) {
@@ -411,8 +415,15 @@ export default function SpeakerNameEditor({
           {actionMessage && (
             <div className="text-sm text-green-700">{actionMessage}</div>
           )}
+          {audioUrl && (
+            <AudioPlayer
+              audioUrl={audioUrl}
+              currentTime={sampleSeekTime}
+              playOnSeek
+            />
+          )}
 
-          {speakerInfo.map(({ id, sample }) => {
+          {speakerInfo.map(({ id, sample, start }) => {
             const suggestion = suggestionsBySpeaker.get(id);
             const accepted = acceptedBySpeaker.get(id);
             const selectedTarget = profileTargets[id] || '';
@@ -438,6 +449,15 @@ export default function SpeakerNameEditor({
                     <p className="mt-1 text-xs text-gray-400 italic truncate">
                       "{sample}"
                     </p>
+                    {audioUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setSampleSeekTime(start)}
+                        className="mt-2 rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                      >
+                        Ausschnitt anhören
+                      </button>
+                    )}
                     {accepted && (
                       <p className="mt-1 text-xs text-green-700">
                         Dauerhaft zugeordnet: {accepted.display_name}

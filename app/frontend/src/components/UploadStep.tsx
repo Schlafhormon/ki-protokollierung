@@ -13,6 +13,8 @@ export default function UploadStep({
   llmSettings,
   rememberSpeakers,
   setRememberSpeakers,
+  skipAgendaDetection,
+  setSkipAgendaDetection,
 }: UploadStepProps) {
   const audioInputRef = useRef<HTMLInputElement>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
@@ -100,6 +102,7 @@ export default function UploadStep({
       if (extractedTops.length > 0) {
         // Replace empty TOPs with extracted ones, but keep user-entered ones
         setTops(extractedTops);
+        setSkipAgendaDetection(false);
         setExtractedCount(extractedTops.length);
       } else {
         setExtractionError('Keine TOPs im PDF gefunden. Bitte manuell eingeben.');
@@ -114,7 +117,8 @@ export default function UploadStep({
 
   // TOP management
   const addTop = () => {
-    setTops([...tops, '']);
+    setTops([...(tops.length ? tops : []), '']);
+    setSkipAgendaDetection(false);
     setExtractedCount(null); // Clear success message when user modifies
   };
 
@@ -122,6 +126,9 @@ export default function UploadStep({
     const newTops = [...tops];
     newTops[index] = value;
     setTops(newTops);
+    if (value.trim()) {
+      setSkipAgendaDetection(false);
+    }
     setExtractedCount(null); // Clear success message when user modifies
   };
 
@@ -129,13 +136,15 @@ export default function UploadStep({
     if (tops.length > 1) {
       setTops(tops.filter((_, i) => i !== index));
     } else {
-      setTops(['']);
+      setTops([]);
+      setSkipAgendaDetection(true);
     }
     setExtractedCount(null); // Clear success message when user modifies
   };
 
   const clearAllTops = () => {
-    setTops(['']);
+    setTops([]);
+    setSkipAgendaDetection(true);
     setExtractedCount(null);
     setExtractionError(null);
   };
@@ -339,11 +348,42 @@ export default function UploadStep({
           <p className="mt-3 text-sm text-gray-500">
             TOPs können auch automatisch aus dem Transkript erkannt werden.
           </p>
+          <label className="mt-3 flex items-start gap-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
+            <input
+              type="checkbox"
+              checked={skipAgendaDetection}
+              onChange={(event) => {
+                const enabled = event.target.checked;
+                setSkipAgendaDetection(enabled);
+                if (enabled) {
+                  setTops([]);
+                  setPdfFile(null);
+                  setExtractedCount(null);
+                  setExtractionError(null);
+                } else if (tops.length === 0) {
+                  setTops(['']);
+                }
+              }}
+              className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            />
+            <span>
+              <span className="block font-medium text-gray-900">
+                Ohne TOPs und ohne automatische TOP-Erkennung fortfahren
+              </span>
+              <span className="block text-gray-600">
+                Für Sitzungen ohne Tagesordnung wird das gesamte Transkript als ein Gespräch zusammengefasst.
+              </span>
+            </span>
+          </label>
         </div>
 
         {/* TOPs List */}
         <div className="space-y-3">
-          {tops.map((top, index) => (
+          {skipAgendaDetection && tops.length === 0 ? (
+            <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+              Keine TOPs angelegt. Die automatische TOP-Erkennung ist deaktiviert.
+            </div>
+          ) : tops.map((top, index) => (
             <div key={index} className="flex items-center gap-3">
               <span className="text-gray-500 font-medium w-8 text-right">{index + 1}.</span>
               <input

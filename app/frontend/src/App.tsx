@@ -204,7 +204,7 @@ function hasReviewUncertainty(
 ): boolean {
   const transcriptLength = session.transcript?.length ?? 0;
   const assignments = session.assignments ?? [];
-  if (transcriptLength > 0) {
+  if (transcriptLength > 0 && !session.skipped_assignment) {
     if (assignments.length !== transcriptLength) {
       return true;
     }
@@ -269,6 +269,7 @@ export default function App() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [skippedAssignment, setSkippedAssignment] = useState(false);
+  const [skipAgendaDetection, setSkipAgendaDetection] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [pipelineJob, setPipelineJob] = useState<PipelineJob | null>(null);
@@ -371,6 +372,7 @@ export default function App() {
     setAgendaDetection(null);
     setAgendaDetectionError(null);
     setSpeakerNames(session.speaker_names ?? {});
+    setSkipAgendaDetection(Boolean(session.skipped_assignment));
     setSummaries(normalizeSummaries(session.summaries));
     setSummaryReviews(normalizeSummaryReviews(session.summary_reviews));
     setSummaryInputFingerprint(getSessionSummaryInputFingerprint(session));
@@ -429,7 +431,7 @@ export default function App() {
         ? "Automatische Verarbeitung abgeschlossen. Bitte prüfen Sie unsichere Zuordnungen vor dem Protokoll."
         : "Automatische Verarbeitung abgeschlossen. Sie können direkt zum Protokoll wechseln oder die Zuordnung prüfen."
     );
-    setCurrentStep(2);
+    setCurrentStep(result.session.skipped_assignment ? 3 : 2);
 
     try {
       localStorage.removeItem(ACTIVE_PIPELINE_KEY);
@@ -464,6 +466,7 @@ export default function App() {
     setAudioUrl(null);
     setSpeakerNames({});
     setSkippedAssignment(false);
+    setSkipAgendaDetection(false);
     setIsGeneratingSummary(false);
     setIsProcessing(false);
     setProcessingError(null);
@@ -676,7 +679,18 @@ export default function App() {
         setAudioUrl(withApiBase(completedJob.audio_url));
       }
 
-      const knownTops = tops.map((top) => top.trim()).filter(Boolean);
+      const knownTops = skipAgendaDetection
+        ? []
+        : tops.map((top) => top.trim()).filter(Boolean);
+      if (skipAgendaDetection) {
+        setSkippedAssignment(true);
+        setTops([]);
+        setAssignments(new Array(transcriptResult.length).fill(null));
+        setIsProcessing(false);
+        setCurrentStep(3);
+        generateSummaryForAll(transcriptResult, true);
+        return;
+      }
       setProcessingStatus("TOPs und Segmentgrenzen werden erkannt...");
 
       try {
@@ -880,9 +894,10 @@ export default function App() {
           current_step: 1,
           transcript: [],
           assignments: [],
-          tops,
+          tops: skipAgendaDetection ? [] : tops,
           summaries: {},
           summary_reviews: {},
+          skipped_assignment: skipAgendaDetection,
         })
       );
       const activeSessionId = preparedSession.session_id;
@@ -896,6 +911,7 @@ export default function App() {
         model: llmSettings.model,
         systemPrompt: llmSettings.systemPrompt,
         rememberSpeakers,
+        skipAgendaDetection,
       });
       updatePipelineProcessingState(pipeline);
       localStorage.setItem(ACTIVE_PIPELINE_KEY, pipeline.pipeline_id);
@@ -923,7 +939,10 @@ export default function App() {
   };
 
   // Generate summary for entire conversation (when no TOPs are defined)
-  const generateSummaryForAll = async (transcriptLines: TranscriptLine[]) => {
+  const generateSummaryForAll = async (
+    transcriptLines: TranscriptLine[],
+    noTopMode = false
+  ) => {
     setIsGeneratingSummary(true);
     setSummaries({ 0: "Zusammenfassung wird generiert..." });
     setSummaryReviews({});
@@ -950,9 +969,9 @@ export default function App() {
       });
       setSummaryInputFingerprint(
         buildSummaryInputFingerprint(
-          [DEFAULT_TOP_TITLE],
+          noTopMode ? [] : [DEFAULT_TOP_TITLE],
           transcriptLines,
-          new Array(transcriptLines.length).fill(0),
+          new Array(transcriptLines.length).fill(noTopMode ? null : 0),
           speakerNames
         )
       );
@@ -986,6 +1005,14 @@ export default function App() {
 
     // Generate summaries for each TOP with assigned lines
     const validTops = tops.filter((t) => t.trim() !== "");
+    if (validTops.length === 0) {
+      setSkippedAssignment(true);
+      setAssignments(new Array(transcript.length).fill(null));
+      await generateSummaryForAll(transcript, true);
+      setDirectProtocolAvailable(false);
+      setPipelineNotice(null);
+      return;
+    }
     const hasCurrentSummaries = summariesAreFresh && validTops.some((_, index) => {
       const summary = summaries[index];
       return typeof summary === "string" && summary.trim() !== "";
@@ -1100,14 +1127,17 @@ export default function App() {
     setIsGeneratingSummary(true);
 
     const validTops = tops.filter((t) => t.trim() !== "");
-    const topLines = transcript.filter((_, i) => assignments[i] === topIndex);
+    const noTopMode = validTops.length === 0;
+    const topLines = noTopMode
+      ? transcript
+      : transcript.filter((_, i) => assignments[i] === topIndex);
     const prompt = skippedAssignment
       ? GENERIC_SUMMARY_PROMPT
       : llmSettings.systemPrompt;
 
     try {
       const result = await generateSummary(
-        validTops[topIndex]!,
+        noTopMode ? DEFAULT_TOP_TITLE : validTops[topIndex]!,
         applySpeakerNames(topLines),
         {
           model: llmSettings.model,
@@ -1282,6 +1312,8 @@ export default function App() {
           llmSettings={llmSettings}
           rememberSpeakers={rememberSpeakers}
           setRememberSpeakers={setRememberSpeakers}
+          skipAgendaDetection={skipAgendaDetection}
+          setSkipAgendaDetection={setSkipAgendaDetection}
         />
       ) : currentStep === 2 ? (
         <AssignmentStep

@@ -1521,6 +1521,7 @@ def save_pipeline_session(
     summaries: dict[int, str] | None = None,
     summary_reviews: dict[int, Any] | None = None,
     current_step: int | None = None,
+    skipped_assignment: bool | None = None,
 ) -> dict[str, Any]:
     session = load_session(session_id) or {"session_id": session_id}
     state = dict(session)
@@ -1544,6 +1545,8 @@ def save_pipeline_session(
         state["summary_reviews"] = summary_reviews
     if current_step is not None:
         state["current_step"] = current_step
+    if skipped_assignment is not None:
+        state["skipped_assignment"] = skipped_assignment
     state.setdefault("speaker_names", {})
     state.setdefault("tops", [])
     state.setdefault("assignments", [])
@@ -1596,6 +1599,12 @@ def detect_pipeline_agenda(
     agenda_tops = [top.strip() for top in known_tops if top.strip()]
     model = options.get("agenda_model") or options.get("model")
     system_prompt = options.get("agenda_system_prompt") or options.get("system_prompt")
+    if options.get("skip_agenda_detection"):
+        return [], [None for _ in transcript], {
+            "strategy": "no_agenda_requested",
+            "segments": [],
+            "uncertain_count": 0,
+        }
 
     if pdf_path:
         try:
@@ -1660,6 +1669,59 @@ def summarize_pipeline_segments(
     summary_reviews: dict[int, Any] = {}
     model = options.get("summary_model") or options.get("model")
     system_prompt = options.get("summary_system_prompt") or options.get("system_prompt")
+    if not tops:
+        try:
+            transcript_text = "\n".join(
+                f"{line.get('speaker', '')}: {line.get('text', '')}"
+                for line in transcript
+            )
+            result = summarize_segment(
+                "Gesamtes Gespräch",
+                transcript_text,
+                model=model,
+                system_prompt=system_prompt,
+            )
+            review = build_summary_review(
+                structured=result.structured,
+                summary=result.summary,
+                lines=transcript,
+            )
+            return {
+                0: result.summary,
+            }, {
+                0: {
+                    "structured": (
+                        result.structured.to_dict() if result.structured is not None else None
+                    ),
+                    "source_links": [link.to_dict() for link in review.source_links],
+                    "review_warnings": [warning.to_dict() for warning in review.warnings],
+                    "fallback_used": result.fallback_used,
+                    "chunks_processed": result.chunks_processed,
+                    "duration_seconds": result.duration_seconds,
+                }
+            }
+        except Exception as exc:
+            message = (
+                "Zusammenfassung für das Gesamtgespräch fehlgeschlagen "
+                f"({safe_exception_label(exc)})."
+            )
+            append_pipeline_warning(pipeline_id, message)
+            return {}, {
+                0: {
+                    "structured": None,
+                    "source_links": [],
+                    "review_warnings": [
+                        {
+                            "kind": "summary_failed",
+                            "message": message,
+                            "severity": "error",
+                            "line_indices": [],
+                            "excerpt": "",
+                        }
+                    ],
+                    "error": safe_exception_label(exc),
+                }
+            }
 
     for top_index, top_title in enumerate(tops):
         lines = [
@@ -1830,6 +1892,7 @@ def run_pipeline_job(
             transcript=transcript,
             tops=tops,
             assignments=assignments,
+            skipped_assignment=not bool(tops),
             current_step=2,
         )
         save_pipeline_state(
@@ -1858,6 +1921,7 @@ def run_pipeline_job(
             assignments=assignments,
             summaries=summaries,
             summary_reviews=summary_reviews,
+            skipped_assignment=not bool(tops),
             current_step=3,
         )
 
@@ -1960,6 +2024,7 @@ async def start_pipeline(
     model: Optional[str] = Form(None),
     system_prompt: Optional[str] = Form(None),
     remember_speakers: bool = Form(False),
+    skip_agenda_detection: bool = Form(False),
 ):
     """Start an unattended upload-to-review pipeline job."""
     if (
@@ -1987,7 +2052,11 @@ async def start_pipeline(
         parsed_options["model"] = model
     if system_prompt:
         parsed_options["system_prompt"] = system_prompt
+    parsed_options["skip_agenda_detection"] = skip_agenda_detection
     known_tops = parse_pipeline_tops(tops)
+    if skip_agenda_detection:
+        known_tops = []
+        pdf = None
 
     safe_audio_filename = normalize_upload_filename(
         audio.filename,
@@ -2034,6 +2103,7 @@ async def start_pipeline(
         effective_session_id,
         job_id=transcription_job_id,
         tops=known_tops,
+        skipped_assignment=skip_agenda_detection,
         current_step=0,
     )
 

@@ -70,7 +70,7 @@ export default function SummaryStep({
   useEffect(() => {
     if (isAutoScroll && currentLineIndex >= 0 && transcriptContainerRef.current) {
       // Find position of current line within the filtered transcript
-      const topLines = getTranscriptForTop(selectedTop);
+      const topLines = tops.length > 0 ? getTranscriptForTop(selectedTop) : transcript;
       const filteredIndex = topLines.findIndex((line) => {
         const originalIndex = transcript.indexOf(line);
         return originalIndex === currentLineIndex;
@@ -82,7 +82,7 @@ export default function SummaryStep({
         }
       }
     }
-  }, [currentLineIndex, getTranscriptForTop, isAutoScroll, selectedTop, transcript]);
+  }, [currentLineIndex, getTranscriptForTop, isAutoScroll, selectedTop, tops.length, transcript]);
 
   // Helper to get display name for a speaker
   const getDisplayName = (speakerId: string) => speakerNames[speakerId] || speakerId;
@@ -135,7 +135,7 @@ export default function SummaryStep({
   };
 
   const handleCopy = async () => {
-    const text = summaries[selectedTop];
+    const text = summaries[selectedSummaryIndex];
     if (text) {
       await navigator.clipboard.writeText(text);
       setCopied(true);
@@ -151,12 +151,14 @@ export default function SummaryStep({
     setExportError(null);
     setExportingFormat(format);
     try {
+      const exportTops = hasTops ? tops : ['Gesamtes Gespräch'];
+      const exportAssignments = hasTops ? assignments : transcript.map(() => 0);
       const blob = await exportProtocol({
         format,
         metadata: exportMetadata,
-        tops,
+        tops: exportTops,
         transcript,
-        assignments,
+        assignments: exportAssignments,
         speakerNames,
         summaries,
         summaryReviews,
@@ -181,8 +183,10 @@ export default function SummaryStep({
     URL.revokeObjectURL(url);
   };
 
-  const topLines = getTranscriptForTop(selectedTop);
-  const selectedReview = summaryReviews[selectedTop];
+  const hasTops = tops.length > 0;
+  const selectedSummaryIndex = hasTops ? selectedTop : 0;
+  const topLines = hasTops ? getTranscriptForTop(selectedTop) : transcript;
+  const selectedReview = summaryReviews[selectedSummaryIndex];
   const selectedWarnings = selectedReview?.review_warnings ?? [];
   const structured = selectedReview?.structured ?? null;
 
@@ -205,7 +209,11 @@ export default function SummaryStep({
         <div className="w-72 bg-white rounded-lg border border-gray-200 p-4 overflow-y-auto">
           <h3 className="font-medium text-gray-900 mb-4">Tagesordnung</h3>
           <div className="space-y-2">
-            {tops.map((top, index) => {
+            {!hasTops ? (
+              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-600">
+                Keine TOPs vorhanden.
+              </div>
+            ) : tops.map((top, index) => {
               const isSelected = selectedTop === index;
               const hasSummary = summaries[index] && summaries[index].trim();
               return (
@@ -245,10 +253,10 @@ export default function SummaryStep({
           <div className="flex-1 bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
             <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
               <h3 className="font-medium text-gray-900">
-                TOP {selectedTop + 1}: {tops[selectedTop]}
+                {hasTops ? `TOP ${selectedTop + 1}: ${tops[selectedTop]}` : 'Gesamtes Gespräch'}
               </h3>
               <div className="flex gap-2">
-                {editingTop === selectedTop ? (
+                {editingTop === selectedSummaryIndex ? (
                   <>
                     <button
                       onClick={saveEdit}
@@ -267,7 +275,7 @@ export default function SummaryStep({
                   <>
                     <button
                       onClick={handleCopy}
-                      disabled={!summaries[selectedTop]}
+                      disabled={!summaries[selectedSummaryIndex]}
                       className="p-2 text-gray-600 hover:bg-gray-200 rounded disabled:opacity-50 disabled:cursor-not-allowed"
                       title={copied ? 'Kopiert!' : 'In Zwischenablage kopieren'}
                     >
@@ -282,7 +290,7 @@ export default function SummaryStep({
                       )}
                     </button>
                     <button
-                      onClick={() => startEditing(selectedTop)}
+                      onClick={() => startEditing(selectedSummaryIndex)}
                       className="p-2 text-gray-600 hover:bg-gray-200 rounded"
                       title="Bearbeiten"
                     >
@@ -291,7 +299,7 @@ export default function SummaryStep({
                       </svg>
                     </button>
                     <button
-                      onClick={() => onRegenerateSummary(selectedTop)}
+                      onClick={() => onRegenerateSummary(selectedSummaryIndex)}
                       disabled={isGenerating}
                       className="p-2 text-blue-600 hover:bg-blue-100 rounded disabled:opacity-50"
                       title="Neu generieren"
@@ -305,7 +313,7 @@ export default function SummaryStep({
               </div>
             </div>
             <div className="flex-1 p-4 overflow-y-auto">
-              {editingTop === selectedTop ? (
+              {editingTop === selectedSummaryIndex ? (
                 <textarea
                   value={editText}
                   onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setEditText(e.target.value)}
@@ -316,7 +324,7 @@ export default function SummaryStep({
                   <div className="animate-spin mr-2">⏳</div>
                   Zusammenfassung wird generiert...
                 </div>
-              ) : summaries[selectedTop] ? (
+              ) : summaries[selectedSummaryIndex] ? (
                 <div className="space-y-3">
                   {selectedWarnings.length > 0 && (
                     <div className="rounded-md border border-yellow-200 bg-yellow-50 px-3 py-2 text-sm text-yellow-900">
@@ -402,7 +410,7 @@ export default function SummaryStep({
                     </div>
                   ) : (
                     <div className="prose max-w-none text-gray-700 whitespace-pre-wrap">
-                      {summaries[selectedTop]}
+                      {summaries[selectedSummaryIndex]}
                     </div>
                   )}
                 </div>

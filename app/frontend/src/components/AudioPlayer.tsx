@@ -4,6 +4,7 @@ interface AudioPlayerProps {
   audioUrl: string;
   currentTime?: number;
   onTimeUpdate?: (time: number) => void;
+  playOnSeek?: boolean;
 }
 
 function formatTime(seconds: number): string {
@@ -16,6 +17,7 @@ export default function AudioPlayer({
   audioUrl,
   currentTime,
   onTimeUpdate,
+  playOnSeek = false,
 }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -27,8 +29,11 @@ export default function AudioPlayer({
   useEffect(() => {
     if (currentTime !== undefined && audioRef.current) {
       audioRef.current.currentTime = currentTime;
+      if (playOnSeek) {
+        void audioRef.current.play();
+      }
     }
-  }, [currentTime]);
+  }, [currentTime, playOnSeek]);
 
   const handleTimeUpdate = useCallback(() => {
     if (audioRef.current) {
