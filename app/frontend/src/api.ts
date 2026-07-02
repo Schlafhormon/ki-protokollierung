@@ -670,6 +670,24 @@ export async function rejectSpeakerObservation(
   return response.json();
 }
 
+export async function unassignSpeakerObservation(
+  sessionId: string,
+  observationId: number
+): Promise<SpeakerObservation> {
+  const response = await fetch(
+    `${API_BASE}/api/sessions/${sessionId}/speaker-observations/${observationId}/unassign`,
+    {
+      method: "POST",
+    }
+  );
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Lösen der Sprecher-Zuordnung");
+  }
+
+  return response.json();
+}
+
 export interface ManualSpeakerObservationPayload {
   localSpeakerId: string;
   profileId?: string | null;

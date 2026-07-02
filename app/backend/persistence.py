@@ -409,6 +409,47 @@ def delete_speaker_embeddings(
         return int(cursor.rowcount or 0)
 
 
+def delete_speaker_embeddings_for_source(
+    profile_id: str,
+    *,
+    job_id: str,
+    local_speaker_id: str,
+    observation_id: int | None = None,
+    db_path: Path | None = None,
+) -> int:
+    """Delete only profile embeddings copied from one local session speaker."""
+    delete_ids: list[int] = []
+    for embedding in load_speaker_embeddings(profile_id, db_path=db_path):
+        metadata = embedding.get("metadata") or {}
+        if metadata.get("source_job_id") != job_id:
+            continue
+        if metadata.get("source_local_speaker_id") != local_speaker_id:
+            continue
+        if observation_id is not None:
+            source_observation_id = metadata.get("source_observation_id")
+            if (
+                source_observation_id is not None
+                and source_observation_id != observation_id
+            ):
+                continue
+        delete_ids.append(int(embedding["embedding_id"]))
+
+    if not delete_ids:
+        return 0
+
+    placeholders = ",".join("?" for _ in delete_ids)
+    with connect(db_path) as db:
+        cursor = db.execute(
+            f"""
+            DELETE FROM speaker_embeddings
+            WHERE profile_id = ?
+              AND embedding_id IN ({placeholders})
+            """,
+            [profile_id, *delete_ids],
+        )
+        return int(cursor.rowcount or 0)
+
+
 def count_speaker_embeddings(
     profile_id: str,
     *,

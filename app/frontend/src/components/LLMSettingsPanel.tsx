@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import SpeakerProfileManager from './SpeakerProfileManager';
 
 export interface LLMSettings {
   model: string;
@@ -86,7 +87,7 @@ export default function LLMSettingsPanel({
       {/* Panel */}
       <div
         ref={panelRef}
-        className="fixed right-0 top-0 h-full w-96 bg-white shadow-xl z-50 flex flex-col transform transition-transform duration-200 ease-out"
+        className="fixed right-0 top-0 h-full w-full max-w-2xl bg-white shadow-xl z-50 flex flex-col transform transition-transform duration-200 ease-out"
         style={{ transform: isOpen ? 'translateX(0)' : 'translateX(100%)' }}
       >
         {/* Header */}
@@ -123,6 +124,7 @@ export default function LLMSettingsPanel({
             <textarea
               value={settings.systemPrompt}
               onChange={(e) => handlePromptChange(e.target.value)}
+              aria-label="System-Prompt"
               rows={16}
               className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none resize-none"
               placeholder="System-Prompt eingeben..."
@@ -131,6 +133,8 @@ export default function LLMSettingsPanel({
               Der System-Prompt definiert, wie die KI die Zusammenfassungen erstellt.
             </p>
           </div>
+
+          <SpeakerProfileManager />
         </div>
 
         {/* Footer */}

@@ -18,6 +18,7 @@ import {
   saveSession,
   startPipeline,
   startTranscription,
+  unassignSpeakerObservation,
   updateSpeakerProfile,
 } from './api';
 
@@ -507,6 +508,7 @@ describe('api session client', () => {
     await listSpeakerObservations('session-1');
     await listSpeakerMatchDiagnostics('session-1');
     await confirmSpeakerObservation('session-1', 7, { profileId: 'alice' });
+    await unassignSpeakerObservation('session-1', 7);
     await createManualSpeakerObservation('session-1', {
       localSpeakerId: 'SPEAKER_00',
       profileId: 'alice',
@@ -546,9 +548,13 @@ describe('api session client', () => {
       profile_id: 'alice',
     });
     expect(fetchMock.mock.calls[9]![0]).toBe(
+      '/api/sessions/session-1/speaker-observations/7/unassign'
+    );
+    expect(fetchMock.mock.calls[9]![1]!.method).toBe('POST');
+    expect(fetchMock.mock.calls[10]![0]).toBe(
       '/api/sessions/session-1/speaker-observations/manual'
     );
-    expect(JSON.parse(fetchMock.mock.calls[9]![1]!.body as string)).toMatchObject({
+    expect(JSON.parse(fetchMock.mock.calls[10]![1]!.body as string)).toMatchObject({
       local_speaker_id: 'SPEAKER_00',
       profile_id: 'alice',
       observation_id: 7,

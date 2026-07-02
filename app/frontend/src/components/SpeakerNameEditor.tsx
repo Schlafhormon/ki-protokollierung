@@ -9,6 +9,7 @@ import {
   listSpeakerObservations,
   listSpeakerProfiles,
   rejectSpeakerObservation,
+  unassignSpeakerObservation,
   updateSpeakerProfile,
 } from '../api';
 import type {
@@ -270,6 +271,33 @@ export default function SpeakerNameEditor({
     }
   };
 
+  const handleUnassignAccepted = async (accepted: SpeakerObservation) => {
+    if (!sessionId) {
+      return;
+    }
+    setActionSpeaker(accepted.local_speaker_id);
+    setActionMessage(null);
+    setReviewError(null);
+    try {
+      const updated = await unassignSpeakerObservation(
+        sessionId,
+        accepted.observation_id
+      );
+      setObservations((current) => upsertObservation(current, updated));
+      setActionMessage(
+        'Zuordnung wurde gelöst. Der Sprecher kann jetzt neu zugeordnet werden.'
+      );
+      await refreshProfiles();
+      await refreshDiagnostics();
+    } catch (error) {
+      setReviewError(
+        error instanceof Error ? error.message : 'Zuordnung konnte nicht gelöst werden'
+      );
+    } finally {
+      setActionSpeaker(null);
+    }
+  };
+
   const handleRememberNewProfile = (speakerId: string, suggestion?: SpeakerObservation) => {
     if (!sessionId || !rememberSpeakers) {
       return;
@@ -516,9 +544,19 @@ export default function SpeakerNameEditor({
                       </button>
                     )}
                     {accepted && (
-                      <p className="mt-1 text-xs text-green-700">
-                        Dauerhaft zugeordnet: {accepted.display_name}
-                      </p>
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                        <p className="text-xs text-green-700">
+                          Dauerhaft zugeordnet: {accepted.display_name}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => handleUnassignAccepted(accepted)}
+                          disabled={isBusy}
+                          className="rounded border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+                        >
+                          Zuordnung lösen
+                        </button>
+                      </div>
                     )}
                   </div>
                   {speakerInfo.length > 1 && (

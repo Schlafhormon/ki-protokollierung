@@ -32,6 +32,9 @@ vi.mock('./api', () => ({
   generateSummary: vi.fn(),
   extractTOPsFromPDF: vi.fn(),
   exportProtocol: vi.fn(),
+  listSpeakerProfiles: vi.fn(() => Promise.resolve([])),
+  deleteSpeakerProfileEmbeddings: vi.fn(),
+  archiveSpeakerProfile: vi.fn(),
 }));
 
 const startedPipeline: PipelineJob = {

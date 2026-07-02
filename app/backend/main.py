@@ -62,6 +62,7 @@ from persistence import (
     count_speaker_embeddings,
     create_speaker_profile,
     delete_speaker_embeddings,
+    delete_speaker_embeddings_for_source,
     init_db,
     load_job,
     load_job_speaker_embedding,
@@ -2778,6 +2779,39 @@ async def reject_session_speaker_observation(session_id: str, observation_id: in
     rejected = reject_speaker_observation(observation_id)
     if rejected is None:
         raise HTTPException(status_code=404, detail="Observation nicht gefunden")
+    return build_speaker_observation_response(rejected, session)
+
+
+@app.post(
+    "/api/sessions/{session_id}/speaker-observations/{observation_id}/unassign",
+    response_model=SpeakerObservationResponse,
+)
+async def unassign_session_speaker_observation(session_id: str, observation_id: int):
+    """Undo an accepted persistent speaker mapping so it can be corrected."""
+    session = get_required_session(session_id)
+    observation = get_observation_for_session(session_id, observation_id)
+    if observation.get("status") not in {"confirmed", "manual"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Nur bestätigte Zuordnungen können gelöst werden",
+        )
+
+    profile_id = observation.get("profile_id")
+    if profile_id:
+        delete_speaker_embeddings_for_source(
+            profile_id,
+            job_id=observation["job_id"],
+            local_speaker_id=observation["local_speaker_id"],
+            observation_id=observation_id,
+        )
+
+    rejected = reject_speaker_observation(observation_id)
+    if rejected is None:
+        raise HTTPException(status_code=404, detail="Observation nicht gefunden")
+    refresh_speaker_suggestions_for_session(
+        job_id=observation["job_id"],
+        session_id=session_id,
+    )
     return build_speaker_observation_response(rejected, session)
 
 

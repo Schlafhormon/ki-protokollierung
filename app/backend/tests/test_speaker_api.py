@@ -280,6 +280,64 @@ def test_manual_speaker_observation_can_link_existing_or_new_profile(
     )[0]["embedding"] == [0.0, 1.0]
 
 
+def test_accepted_speaker_observation_can_be_unassigned_and_corrected(
+    tmp_path, monkeypatch
+):
+    session_id = setup_speaker_session(tmp_path, monkeypatch)
+    rudolf = persistence.create_speaker_profile(
+        "Herr Rudolf",
+        profile_id="rudolf",
+    )
+    persistence.save_job_speaker_embedding(
+        job_id="job-speakers",
+        local_speaker_id="SPEAKER_01",
+        embedding=[0.0, 1.0],
+        model_name="test-embedding",
+        quality=0.9,
+        quality_metadata={
+            "reference_embeddings": [[0.0, 1.0], [0.05, 0.95]],
+        },
+    )
+    client = TestClient(main.app)
+
+    wrong = client.post(
+        f"/api/sessions/{session_id}/speaker-observations/manual",
+        json={"local_speaker_id": "SPEAKER_01", "display_name": "Speaker_02"},
+    )
+
+    assert wrong.status_code == 200
+    wrong_profile_id = wrong.json()["profile_id"]
+    assert wrong_profile_id != rudolf["profile_id"]
+    assert len(persistence.load_speaker_embeddings(wrong_profile_id)) == 2
+
+    blocked = client.post(
+        f"/api/sessions/{session_id}/speaker-observations/manual",
+        json={"local_speaker_id": "SPEAKER_01", "profile_id": rudolf["profile_id"]},
+    )
+    assert blocked.status_code == 409
+
+    unassigned = client.post(
+        f"/api/sessions/{session_id}/speaker-observations/"
+        f"{wrong.json()['observation_id']}/unassign"
+    )
+
+    assert unassigned.status_code == 200
+    assert unassigned.json()["status"] == "rejected"
+    assert persistence.load_speaker_embeddings(wrong_profile_id) == []
+
+    corrected = client.post(
+        f"/api/sessions/{session_id}/speaker-observations/manual",
+        json={"local_speaker_id": "SPEAKER_01", "profile_id": rudolf["profile_id"]},
+    )
+
+    assert corrected.status_code == 200
+    assert corrected.json()["status"] == "manual"
+    assert corrected.json()["profile_display_name"] == "Herr Rudolf"
+    assert persistence.load_session(session_id)["speaker_names"]["SPEAKER_01"] == (
+        "Herr Rudolf"
+    )
+
+
 def test_backfill_endpoint_copies_existing_job_embeddings_to_profiles(
     tmp_path, monkeypatch
 ):

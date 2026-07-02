@@ -202,6 +202,43 @@ describe('SpeakerNameEditor', () => {
     });
   });
 
+  it('unassigns an accepted persistent speaker mapping before correction', async () => {
+    const user = userEvent.setup();
+    const acceptedObservation = {
+      ...aliceSuggestion,
+      status: 'manual',
+      confidence: 1,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse([aliceProfile]))
+      .mockResolvedValueOnce(jsonResponse([acceptedObservation]))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(
+        jsonResponse({ ...acceptedObservation, status: 'rejected' })
+      )
+      .mockResolvedValueOnce(jsonResponse([aliceProfile]))
+      .mockResolvedValueOnce(jsonResponse([]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderEditor({ speakerNames: { SPEAKER_00: 'Alice Global' } });
+
+    await screen.findByText('Dauerhaft zugeordnet: Alice Global');
+    await user.click(screen.getByRole('button', { name: /zuordnung lösen/i }));
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls[3]![0]).toBe(
+        '/api/sessions/session-1/speaker-observations/7/unassign'
+      )
+    );
+    expect(await screen.findByText(/zuordnung wurde gelöst/i)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByText('Dauerhaft zugeordnet: Alice Global')
+      ).not.toBeInTheDocument()
+    );
+  });
+
   it('shows embedding warnings returned by persistent speaker actions', async () => {
     const user = userEvent.setup();
     const warning = 'Profil wurde zugeordnet, aber für diese Sitzung ist kein Sprecher-Embedding verfügbar.';
