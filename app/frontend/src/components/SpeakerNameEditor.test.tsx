@@ -24,6 +24,7 @@ const aliceProfile = {
   created_at: 1,
   updated_at: 1,
   archived: false,
+  embedding_count: 0,
 };
 
 const aliceSuggestion = {
@@ -178,7 +179,7 @@ describe('SpeakerNameEditor', () => {
 
     renderEditor({ setSpeakerNames });
 
-    await screen.findAllByText('Alice Global');
+    await screen.findAllByText('Alice Global (0)');
     await user.selectOptions(
       screen.getByLabelText('SPEAKER_00 bestehendem Profil zuordnen'),
       'alice'
@@ -199,6 +200,39 @@ describe('SpeakerNameEditor', () => {
     expect(setSpeakerNames).toHaveBeenCalledWith({
       SPEAKER_00: 'Alice Global',
     });
+  });
+
+  it('shows embedding warnings returned by persistent speaker actions', async () => {
+    const user = userEvent.setup();
+    const warning = 'Profil wurde zugeordnet, aber für diese Sitzung ist kein Sprecher-Embedding verfügbar.';
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse([aliceProfile]))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...aliceSuggestion,
+          status: 'manual',
+          embedding_warning: warning,
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse([aliceProfile]))
+      .mockResolvedValueOnce(jsonResponse([]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderEditor();
+
+    await screen.findAllByText('Alice Global (0)');
+    await user.selectOptions(
+      screen.getByLabelText('SPEAKER_00 bestehendem Profil zuordnen'),
+      'alice'
+    );
+    await user.click(
+      screen.getAllByRole('button', { name: /bestehendem profil zuordnen/i })[0]!
+    );
+
+    expect(await screen.findByText(warning)).toBeInTheDocument();
   });
 
   it('renames and archives saved profiles from the profile management area', async () => {
@@ -230,6 +264,39 @@ describe('SpeakerNameEditor', () => {
       display_name: 'Alice Umbenannt',
     });
     expect(fetchMock.mock.calls[4]![1]!.method).toBe('DELETE');
+  });
+
+  it('can request profile embedding backfill from profile management', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse([aliceProfile]))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          scanned_observation_count: 2,
+          processed_job_count: 1,
+          saved_embedding_count: 3,
+          skipped_count: 0,
+          errors: [],
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse([{ ...aliceProfile, embedding_count: 3 }]))
+      .mockResolvedValueOnce(jsonResponse([]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderEditor();
+
+    await screen.findByLabelText('Gespeichertes Profil auswählen');
+    await user.click(screen.getByRole('button', { name: /embeddings nachholen/i }));
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls[3]![0]).toBe(
+        '/api/speaker-embeddings/backfill?profile_id=alice'
+      )
+    );
+    expect(await screen.findByText(/3 Embeddings nachgeholt/i)).toBeInTheDocument();
   });
 
   it('shows the diagnostic reason when no automatic suggestion was created', async () => {

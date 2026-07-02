@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   archiveSpeakerProfile,
+  backfillSpeakerEmbeddings,
   confirmSpeakerObservation,
   createManualSpeakerObservation,
   deleteSpeakerProfileEmbeddings,
@@ -222,7 +223,7 @@ export default function SpeakerNameEditor({
       const updated = await action();
       setObservations((current) => upsertObservation(current, updated));
       applyObservationName(speakerId, updated);
-      setActionMessage(successMessage);
+      setActionMessage(updated.embedding_warning || successMessage);
       await refreshProfiles();
       await refreshDiagnostics();
     } catch (error) {
@@ -406,6 +407,31 @@ export default function SpeakerNameEditor({
     } catch (error) {
       setReviewError(
         error instanceof Error ? error.message : 'Embeddings konnten nicht gelöscht werden'
+      );
+    }
+  };
+
+  const handleBackfillProfileEmbeddings = async () => {
+    if (!selectedProfile) {
+      return;
+    }
+    setReviewError(null);
+    try {
+      const result = await backfillSpeakerEmbeddings(selectedProfile.profile_id);
+      await refreshProfiles();
+      await refreshDiagnostics();
+      setActionMessage(
+        `${result.saved_embedding_count} Embeddings nachgeholt, ` +
+          `${result.skipped_count} Zuordnungen übersprungen.`
+      );
+      if (result.errors.length > 0) {
+        setReviewError(result.errors.join('; '));
+      }
+    } catch (error) {
+      setReviewError(
+        error instanceof Error
+          ? error.message
+          : 'Embeddings konnten nicht nachgeholt werden'
       );
     }
   };
@@ -603,7 +629,7 @@ export default function SpeakerNameEditor({
                         <option value="">Gespeichertes Profil auswählen...</option>
                         {profiles.map((profile) => (
                           <option key={profile.profile_id} value={profile.profile_id}>
-                            {profile.display_name}
+                            {profile.display_name} ({profile.embedding_count ?? 0})
                           </option>
                         ))}
                       </select>
@@ -649,7 +675,7 @@ export default function SpeakerNameEditor({
                   >
                     {profiles.map((profile) => (
                       <option key={profile.profile_id} value={profile.profile_id}>
-                        {profile.display_name}
+                        {profile.display_name} ({profile.embedding_count ?? 0})
                       </option>
                     ))}
                   </select>
@@ -683,6 +709,14 @@ export default function SpeakerNameEditor({
                     className="px-3 py-1.5 text-sm bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100 disabled:opacity-50"
                   >
                     Embeddings löschen
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleBackfillProfileEmbeddings}
+                    disabled={!selectedProfile}
+                    className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+                  >
+                    Embeddings nachholen
                   </button>
                 </div>
               )}

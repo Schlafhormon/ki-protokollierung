@@ -8,10 +8,12 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_EMBEDDING_MODEL = "pyannote/embedding"
+DEFAULT_FALLBACK_EMBEDDING_MODELS = ("pyannote/wespeaker-voxceleb-resnet34-LM",)
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,7 @@ class SpeakerEmbeddingConfig:
     auto_threshold: float = 0.82
     suggest_threshold: float = 0.72
     match_top_k: int = 3
+    fallback_model_names: tuple[str, ...] = DEFAULT_FALLBACK_EMBEDDING_MODELS
     min_total_seconds: float = 8.0
     min_segment_seconds: float = 1.5
     max_segment_seconds: float = 12.0
@@ -72,6 +75,14 @@ class SpeakerMatchDiagnostic:
     profile_embedding_count: int = 0
 
 
+@dataclass(frozen=True)
+class SpeakerEmbeddingLoadResult:
+    inference: Any | None
+    model_name: str | None
+    attempted_model_names: tuple[str, ...]
+    error: str | None = None
+
+
 def _get_float_env(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw is None:
@@ -101,6 +112,13 @@ def _get_bool_env(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _get_csv_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
 def speaker_embedding_config_from_env() -> SpeakerEmbeddingConfig:
     auto_threshold = _get_float_env("SPEAKER_MATCH_AUTO_THRESHOLD", 0.82)
     suggest_threshold = _get_float_env("SPEAKER_MATCH_SUGGEST_THRESHOLD", 0.72)
@@ -116,6 +134,10 @@ def speaker_embedding_config_from_env() -> SpeakerEmbeddingConfig:
         auto_threshold=auto_threshold,
         suggest_threshold=suggest_threshold,
         match_top_k=max(1, _get_int_env("SPEAKER_MATCH_TOP_K", 3)),
+        fallback_model_names=_get_csv_env(
+            "SPEAKER_EMBEDDING_FALLBACK_MODELS",
+            DEFAULT_FALLBACK_EMBEDDING_MODELS,
+        ),
         min_total_seconds=max(
             0.1, _get_float_env("SPEAKER_EMBEDDING_MIN_SECONDS", 8.0)
         ),
@@ -409,44 +431,81 @@ def load_pyannote_embedding_inference(
     config: SpeakerEmbeddingConfig | None = None,
 ) -> Any | None:
     """Load PyAnnote's speaker embedding model if available."""
+    return load_pyannote_embedding_inference_result(
+        device=device,
+        config=config,
+    ).inference
+
+
+def load_pyannote_embedding_inference_result(
+    *,
+    device: str,
+    config: SpeakerEmbeddingConfig | None = None,
+) -> SpeakerEmbeddingLoadResult:
+    """Load PyAnnote speaker embeddings with fallback models and diagnostics."""
     config = config or speaker_embedding_config_from_env()
     if not config.enabled:
         logger.info("Speaker embedding extraction disabled")
-        return None
+        return SpeakerEmbeddingLoadResult(
+            inference=None,
+            model_name=None,
+            attempted_model_names=(),
+            error="speaker embedding extraction disabled",
+        )
 
     try:
-        from pyannote.audio import Inference
+        from pyannote.audio import Inference, Model
         import torch
     except Exception as exc:
         logger.warning("PyAnnote embedding inference is unavailable: %s", exc)
-        return None
-
-    try:
-        hf_token = os.environ.get("HF_TOKEN") or None
-        torch_device = torch.device(device)
-        inference = Inference(
-            config.model_name,
-            window="whole",
-            device=torch_device,
-            use_auth_token=hf_token,
+        return SpeakerEmbeddingLoadResult(
+            inference=None,
+            model_name=None,
+            attempted_model_names=(),
+            error=f"PyAnnote embedding inference is unavailable: {exc}",
         )
-        logger.info("Speaker embedding model loaded: %s", config.model_name)
-        return inference
-    except TypeError:
+
+    hf_token = os.environ.get("HF_TOKEN") or None
+    torch_device = torch.device(device)
+    attempted = tuple(
+        dict.fromkeys((config.model_name, *config.fallback_model_names))
+    )
+    errors: list[str] = []
+
+    for model_name in attempted:
         try:
+            try:
+                model = Model.from_pretrained(model_name, use_auth_token=hf_token)
+            except TypeError:
+                model = Model.from_pretrained(model_name)
+            if model is None:
+                raise RuntimeError(
+                    "model could not be downloaded or access is not granted"
+                )
             inference = Inference(
-                config.model_name,
+                model,
                 window="whole",
-                device=torch.device(device),
+                device=torch_device,
             )
-            logger.info("Speaker embedding model loaded: %s", config.model_name)
-            return inference
+            setattr(inference, "_speaker_embedding_model_name", model_name)
+            logger.info("Speaker embedding model loaded: %s", model_name)
+            return SpeakerEmbeddingLoadResult(
+                inference=inference,
+                model_name=model_name,
+                attempted_model_names=attempted,
+                error=None,
+            )
         except Exception as exc:
-            logger.warning("Failed to load speaker embedding model: %s", exc)
-            return None
-    except Exception as exc:
-        logger.warning("Failed to load speaker embedding model: %s", exc)
-        return None
+            message = f"{model_name}: {exc}"
+            errors.append(message)
+            logger.warning("Failed to load speaker embedding model %s: %s", model_name, exc)
+
+    return SpeakerEmbeddingLoadResult(
+        inference=None,
+        model_name=None,
+        attempted_model_names=attempted,
+        error="; ".join(errors) if errors else "no speaker embedding model configured",
+    )
 
 
 def _segment_duration(segment: Any) -> float:
@@ -498,6 +557,9 @@ def extract_local_speaker_embeddings(
     config = config or speaker_embedding_config_from_env()
     if embedding_inference is None or not config.enabled:
         return []
+    model_name = str(
+        getattr(embedding_inference, "_speaker_embedding_model_name", config.model_name)
+    )
 
     try:
         import torch
@@ -590,7 +652,7 @@ def extract_local_speaker_embeddings(
             LocalSpeakerEmbedding(
                 local_speaker_id=speaker,
                 embedding=speaker_embedding,
-                model_name=config.model_name,
+                model_name=model_name,
                 quality=round(quality, 4),
                 reference_embeddings=reference_embeddings,
                 quality_metadata={
@@ -602,7 +664,7 @@ def extract_local_speaker_embeddings(
                     "min_segment_seconds": config.min_segment_seconds,
                     "excluded_short_count": excluded_short_by_speaker.get(speaker, 0),
                     "excluded_overlap_count": excluded_overlap_by_speaker.get(speaker, 0),
-                    "model_name": config.model_name,
+                    "model_name": model_name,
                 },
             )
         )

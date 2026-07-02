@@ -184,6 +184,15 @@ entsteht, liefert die Sprecherprüfung Diagnosegründe wie fehlende
 Profil-Embeddings, zu wenig Sprecher-Audio, ein nicht verfügbares
 Embedding-Modell oder Scores unterhalb des Schwellwerts.
 
+`pyannote/embedding` ist ein gated HuggingFace-Modell. Der verwendete
+`HF_TOKEN` muss Leserechte haben und die Nutzungsbedingungen auf der
+Modellseite müssen akzeptiert sein. Wenn dieses Modell nicht geladen werden
+kann, versucht das Backend standardmäßig
+`pyannote/wespeaker-voxceleb-resnet34-LM` als Fallback. Bereits manuell
+zugeordnete Profile ohne Embeddings können in der Sprecherprüfung über
+"Embeddings nachholen" nachträglich befüllt werden, sofern die Audiodatei noch
+vorhanden ist.
+
 ## Konfiguration
 
 Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
@@ -200,6 +209,8 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `LLM_TIMEOUT_SECONDS` | Timeout je LLM-Anfrage | `120` |
 | `LLM_CHUNK_CHARS` | Chunk-Größe für lange TOP-Texte | `12000` |
 | `SPEAKER_EMBEDDING_ENABLED` | lokale Sprecher-Embeddings für prüfbare Matches erzeugen | `true` |
+| `SPEAKER_EMBEDDING_MODEL` | primäres Embedding-Modell | `pyannote/embedding` |
+| `SPEAKER_EMBEDDING_FALLBACK_MODELS` | kommagetrennte Fallback-Modelle, falls das primäre Modell nicht lädt | `pyannote/wespeaker-voxceleb-resnet34-LM` |
 | `SPEAKER_MATCH_AUTO_THRESHOLD` | Schwelle für starke Sprecherprofil-Matches | `0.82` |
 | `SPEAKER_MATCH_SUGGEST_THRESHOLD` | Mindestschwelle für Vorschläge | `0.72` |
 | `SPEAKER_MATCH_TOP_K` | Anzahl der besten Profilreferenzen für Top-k-Matching | `3` |

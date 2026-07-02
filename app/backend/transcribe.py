@@ -36,7 +36,7 @@ from whisperx.diarize import DiarizationPipeline
 from speaker_recognition import (
     LocalSpeakerEmbedding,
     extract_local_speaker_embeddings,
-    load_pyannote_embedding_inference,
+    load_pyannote_embedding_inference_result,
     speaker_embedding_config_from_env,
 )
 
@@ -64,6 +64,9 @@ class TranscriptionModels:
     diarize_pipeline: Any
     device: str
     speaker_embedding_inference: Any | None = None
+    speaker_embedding_model_name: str | None = None
+    speaker_embedding_attempted_models: tuple[str, ...] = ()
+    speaker_embedding_error: str | None = None
 
 
 def load_models() -> TranscriptionModels:
@@ -139,10 +142,15 @@ def load_models() -> TranscriptionModels:
     logger.info("[3/3] Diarization pipeline loaded successfully")
 
     speaker_embedding_config = speaker_embedding_config_from_env()
-    speaker_embedding_inference = load_pyannote_embedding_inference(
+    speaker_embedding_result = load_pyannote_embedding_inference_result(
         device=device,
         config=speaker_embedding_config,
     )
+    if speaker_embedding_result.error:
+        logger.warning(
+            "Speaker embedding model unavailable: %s",
+            speaker_embedding_result.error,
+        )
 
     logger.info("=" * 60)
     logger.info("ALL MODELS LOADED SUCCESSFULLY - Server ready for requests")
@@ -154,7 +162,10 @@ def load_models() -> TranscriptionModels:
         align_metadata=align_metadata,
         diarize_pipeline=diarize_pipeline,
         device=device,
-        speaker_embedding_inference=speaker_embedding_inference,
+        speaker_embedding_inference=speaker_embedding_result.inference,
+        speaker_embedding_model_name=speaker_embedding_result.model_name,
+        speaker_embedding_attempted_models=speaker_embedding_result.attempted_model_names,
+        speaker_embedding_error=speaker_embedding_result.error,
     )
 
 

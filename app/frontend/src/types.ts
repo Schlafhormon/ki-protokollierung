@@ -24,6 +24,7 @@ export interface SpeakerProfile {
   updated_at: number;
   archived_at?: number | null;
   archived: boolean;
+  embedding_count: number;
 }
 
 export interface SpeakerObservation {
@@ -38,8 +39,17 @@ export interface SpeakerObservation {
   confidence?: number | null;
   status: 'suggested' | 'confirmed' | 'rejected' | 'manual' | string;
   display_name: string;
+  embedding_warning?: string | null;
   created_at: number;
   updated_at: number;
+}
+
+export interface SpeakerEmbeddingBackfillResult {
+  scanned_observation_count: number;
+  processed_job_count: number;
+  saved_embedding_count: number;
+  skipped_count: number;
+  errors: string[];
 }
 
 export interface SpeakerMatchDiagnostic {

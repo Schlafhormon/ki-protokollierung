@@ -248,6 +248,7 @@ def test_manual_speaker_observation_can_link_existing_or_new_profile(
     assert manual.status_code == 200
     assert manual.json()["status"] == "manual"
     assert manual.json()["profile_display_name"] == "Alice Global"
+    assert "kein Sprecher-Embedding verfügbar" in manual.json()["embedding_warning"]
     assert persistence.load_session(session_id)["speaker_names"]["SPEAKER_00"] == (
         "Alice Global"
     )
@@ -277,6 +278,47 @@ def test_manual_speaker_observation_can_link_existing_or_new_profile(
         created_profile_id,
         model_name="test-embedding",
     )[0]["embedding"] == [0.0, 1.0]
+
+
+def test_backfill_endpoint_copies_existing_job_embeddings_to_profiles(
+    tmp_path, monkeypatch
+):
+    session_id = setup_speaker_session(tmp_path, monkeypatch)
+    profile = persistence.create_speaker_profile("Alice Global", profile_id="alice")
+    persistence.save_job_speaker_embedding(
+        job_id="job-speakers",
+        local_speaker_id="SPEAKER_00",
+        embedding=[1.0, 0.0],
+        model_name="test-embedding",
+        quality=0.9,
+        quality_metadata={"reference_embeddings": [[1.0, 0.0], [0.98, 0.02]]},
+    )
+    persistence.save_speaker_observation(
+        job_id="job-speakers",
+        session_id=session_id,
+        local_speaker_id="SPEAKER_00",
+        profile_id=profile["profile_id"],
+        confidence=1.0,
+        status="manual",
+    )
+    main.app.state.models = object()
+    monkeypatch.setattr(
+        main,
+        "speaker_embedding_diagnostics",
+        lambda: main.SpeakerEmbeddingDiagnosticsResponse(
+            enabled=True,
+            loaded=True,
+            model_name="test-embedding",
+            profile_embedding_count=0,
+        ),
+    )
+    client = TestClient(main.app)
+
+    response = client.post("/api/speaker-embeddings/backfill?profile_id=alice")
+
+    assert response.status_code == 200
+    assert response.json()["saved_embedding_count"] == 2
+    assert len(persistence.load_speaker_embeddings("alice")) == 2
 
 
 def test_global_embedding_copy_requires_opt_in_or_explicit_action(

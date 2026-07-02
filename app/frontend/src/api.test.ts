@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   archiveSpeakerProfile,
+  backfillSpeakerEmbeddings,
   getPipelineResult,
   pollPipeline,
   confirmSpeakerObservation,
@@ -392,10 +393,11 @@ describe('api session client', () => {
               display_name: 'Alice Global',
               scope: null,
               created_at: 1,
-              updated_at: 1,
-              archived: false,
-            },
-          ]),
+            updated_at: 1,
+            archived: false,
+            embedding_count: 0,
+          },
+        ]),
       })
       .mockResolvedValueOnce({
         ok: true,
@@ -407,6 +409,7 @@ describe('api session client', () => {
             created_at: 1,
             updated_at: 2,
             archived: false,
+            embedding_count: 1,
           }),
       })
       .mockResolvedValueOnce({
@@ -420,6 +423,7 @@ describe('api session client', () => {
             updated_at: 3,
             archived: true,
             archived_at: 3,
+            embedding_count: 1,
           }),
       })
       .mockResolvedValueOnce({
@@ -434,12 +438,24 @@ describe('api session client', () => {
         ok: true,
         json: () =>
           Promise.resolve({
+            scanned_observation_count: 2,
+            processed_job_count: 1,
+            saved_embedding_count: 3,
+            skipped_count: 0,
+            errors: [],
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
             profile_id: 'bob',
             display_name: 'Bob Global',
             scope: 'committee-1',
             created_at: 1,
             updated_at: 1,
             archived: false,
+            embedding_count: 0,
           }),
       })
       .mockResolvedValueOnce({
@@ -486,6 +502,7 @@ describe('api session client', () => {
     await updateSpeakerProfile('alice', { displayName: 'Alice Lokal' });
     await archiveSpeakerProfile('alice');
     await deleteSpeakerProfileEmbeddings('alice');
+    await backfillSpeakerEmbeddings('alice');
     await createSpeakerProfile({ displayName: 'Bob Global', scope: 'committee-1' });
     await listSpeakerObservations('session-1');
     await listSpeakerMatchDiagnostics('session-1');
@@ -508,28 +525,30 @@ describe('api session client', () => {
     expect(fetchMock.mock.calls[2]![1]!.method).toBe('DELETE');
     expect(fetchMock.mock.calls[3]![0]).toBe('/api/speaker-profiles/alice/embeddings');
     expect(fetchMock.mock.calls[3]![1]!.method).toBe('DELETE');
-    expect(fetchMock.mock.calls[4]![0]).toBe('/api/speaker-profiles');
+    expect(fetchMock.mock.calls[4]![0]).toBe('/api/speaker-embeddings/backfill?profile_id=alice');
     expect(fetchMock.mock.calls[4]![1]!.method).toBe('POST');
-    expect(JSON.parse(fetchMock.mock.calls[4]![1]!.body as string)).toMatchObject({
+    expect(fetchMock.mock.calls[5]![0]).toBe('/api/speaker-profiles');
+    expect(fetchMock.mock.calls[5]![1]!.method).toBe('POST');
+    expect(JSON.parse(fetchMock.mock.calls[5]![1]!.body as string)).toMatchObject({
       display_name: 'Bob Global',
       scope: 'committee-1',
     });
-    expect(fetchMock.mock.calls[5]![0]).toBe(
+    expect(fetchMock.mock.calls[6]![0]).toBe(
       '/api/sessions/session-1/speaker-observations'
     );
-    expect(fetchMock.mock.calls[6]![0]).toBe(
+    expect(fetchMock.mock.calls[7]![0]).toBe(
       '/api/sessions/session-1/speaker-match-diagnostics'
     );
-    expect(fetchMock.mock.calls[7]![0]).toBe(
+    expect(fetchMock.mock.calls[8]![0]).toBe(
       '/api/sessions/session-1/speaker-observations/7/confirm'
     );
-    expect(JSON.parse(fetchMock.mock.calls[7]![1]!.body as string)).toMatchObject({
+    expect(JSON.parse(fetchMock.mock.calls[8]![1]!.body as string)).toMatchObject({
       profile_id: 'alice',
     });
-    expect(fetchMock.mock.calls[8]![0]).toBe(
+    expect(fetchMock.mock.calls[9]![0]).toBe(
       '/api/sessions/session-1/speaker-observations/manual'
     );
-    expect(JSON.parse(fetchMock.mock.calls[8]![1]!.body as string)).toMatchObject({
+    expect(JSON.parse(fetchMock.mock.calls[9]![1]!.body as string)).toMatchObject({
       local_speaker_id: 'SPEAKER_00',
       profile_id: 'alice',
       observation_id: 7,

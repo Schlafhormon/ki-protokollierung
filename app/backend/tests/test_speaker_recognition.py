@@ -13,6 +13,7 @@ from speaker_recognition import (
     normalize_embedding,
     SpeakerEmbeddingConfig,
     extract_local_speaker_embeddings,
+    load_pyannote_embedding_inference_result,
 )
 
 
@@ -266,3 +267,44 @@ def test_extract_local_embeddings_keeps_multiple_quality_filtered_references(
     assert embeddings[0].quality_metadata["excluded_short_count"] == 1
     assert embeddings[0].quality_metadata["excluded_overlap_count"] == 1
     assert inference.calls == [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0)]
+
+
+def test_embedding_loader_uses_fallback_when_primary_model_is_unavailable(
+    monkeypatch,
+):
+    class FakeModel:
+        @staticmethod
+        def from_pretrained(model_name, use_auth_token=None):
+            if model_name == "primary":
+                return None
+            return {"model_name": model_name}
+
+    class FakeInference:
+        def __init__(self, model, window, device):
+            self.model = model
+            self.window = window
+            self.device = device
+
+    fake_pyannote_audio = types.SimpleNamespace(
+        Model=FakeModel,
+        Inference=FakeInference,
+    )
+    fake_torch = types.SimpleNamespace(
+        Tensor=type("Tensor", (), {}),
+        device=lambda value: f"device:{value}",
+    )
+    monkeypatch.setitem(sys.modules, "pyannote.audio", fake_pyannote_audio)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    result = load_pyannote_embedding_inference_result(
+        device="cpu",
+        config=SpeakerEmbeddingConfig(
+            model_name="primary",
+            fallback_model_names=("fallback",),
+        ),
+    )
+
+    assert result.inference is not None
+    assert result.model_name == "fallback"
+    assert result.attempted_model_names == ("primary", "fallback")
+    assert getattr(result.inference, "_speaker_embedding_model_name") == "fallback"

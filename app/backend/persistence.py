@@ -409,6 +409,38 @@ def delete_speaker_embeddings(
         return int(cursor.rowcount or 0)
 
 
+def count_speaker_embeddings(
+    profile_id: str,
+    *,
+    model_name: str | None = None,
+    db_path: Path | None = None,
+) -> int:
+    conditions = ["profile_id = ?"]
+    params: list[Any] = [profile_id]
+    if model_name is not None:
+        conditions.append("model_name = ?")
+        params.append(model_name)
+
+    with connect(db_path) as db:
+        row = db.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM speaker_embeddings
+            WHERE {' AND '.join(conditions)}
+            """,
+            params,
+        ).fetchone()
+    return int(row["count"] if row else 0)
+
+
+def count_all_speaker_embeddings(db_path: Path | None = None) -> int:
+    with connect(db_path) as db:
+        row = db.execute(
+            "SELECT COUNT(*) AS count FROM speaker_embeddings"
+        ).fetchone()
+    return int(row["count"] if row else 0)
+
+
 def prune_speaker_embeddings(
     profile_id: str,
     *,

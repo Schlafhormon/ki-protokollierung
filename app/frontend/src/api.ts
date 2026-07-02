@@ -13,6 +13,7 @@ import type {
   PipelineStartOptions,
   SessionResponse,
   SessionSavePayload,
+  SpeakerEmbeddingBackfillResult,
   SpeakerMatchDiagnostic,
   SpeakerObservation,
   SpeakerProfile,
@@ -35,7 +36,13 @@ const MAX_CLIENT_LLM_TEXT_CHARS =
 async function readApiError(response: Response, fallback: string): Promise<Error> {
   try {
     const error = await response.json();
-    return new Error(error.detail || fallback);
+    if (typeof error.detail === "string") {
+      return new Error(error.detail);
+    }
+    if (error.detail?.message) {
+      return new Error(error.detail.message);
+    }
+    return new Error(fallback);
   } catch {
     return new Error(fallback);
   }
@@ -553,6 +560,31 @@ export async function deleteSpeakerProfileEmbeddings(
 
   if (!response.ok) {
     throw await readApiError(response, "Fehler beim Löschen der Sprecher-Embeddings");
+  }
+
+  return response.json();
+}
+
+export async function backfillSpeakerEmbeddings(
+  profileId?: string | null
+): Promise<SpeakerEmbeddingBackfillResult> {
+  const params = new URLSearchParams();
+  if (profileId) {
+    params.set("profile_id", profileId);
+  }
+  const query = params.toString();
+  const response = await fetch(
+    `${API_BASE}/api/speaker-embeddings/backfill${query ? `?${query}` : ""}`,
+    {
+      method: "POST",
+    }
+  );
+
+  if (!response.ok) {
+    throw await readApiError(
+      response,
+      "Fehler beim Nachholen der Sprecher-Embeddings"
+    );
   }
 
   return response.json();

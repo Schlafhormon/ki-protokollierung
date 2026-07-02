@@ -16,6 +16,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import (
@@ -57,6 +58,8 @@ from persistence import (
     anonymize_speaker_observations_for_profile,
     archive_speaker_profile,
     confirm_speaker_observation,
+    count_all_speaker_embeddings,
+    count_speaker_embeddings,
     create_speaker_profile,
     delete_speaker_embeddings,
     init_db,
@@ -87,6 +90,7 @@ from speaker_recognition import (
     LocalSpeakerEmbedding,
     build_profile_references,
     diagnose_speaker_matches,
+    extract_local_speaker_embeddings,
     match_speaker_embeddings,
     speaker_embedding_config_from_env,
 )
@@ -896,6 +900,7 @@ class SpeakerProfileResponse(BaseModel):
     updated_at: float
     archived_at: Optional[float] = None
     archived: bool = False
+    embedding_count: int = 0
 
 
 class SpeakerObservationResponse(BaseModel):
@@ -910,8 +915,26 @@ class SpeakerObservationResponse(BaseModel):
     confidence: Optional[float] = None
     status: str
     display_name: str
+    embedding_warning: Optional[str] = None
     created_at: float
     updated_at: float
+
+
+class SpeakerEmbeddingDiagnosticsResponse(BaseModel):
+    enabled: bool
+    loaded: bool
+    model_name: Optional[str] = None
+    attempted_model_names: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
+    profile_embedding_count: int = 0
+
+
+class SpeakerEmbeddingBackfillResponse(BaseModel):
+    scanned_observation_count: int
+    processed_job_count: int
+    saved_embedding_count: int
+    skipped_count: int
+    errors: List[str] = Field(default_factory=list)
 
 
 class SpeakerMatchDiagnosticResponse(BaseModel):
@@ -1188,12 +1211,15 @@ def build_speaker_profile_response(profile: dict[str, Any]) -> SpeakerProfileRes
         updated_at=profile["updated_at"],
         archived_at=profile.get("archived_at"),
         archived=profile.get("archived_at") is not None,
+        embedding_count=count_speaker_embeddings(profile["profile_id"]),
     )
 
 
 def build_speaker_observation_response(
     observation: dict[str, Any],
     session: dict[str, Any],
+    *,
+    embedding_warning: str | None = None,
 ) -> SpeakerObservationResponse:
     profile = None
     if observation.get("profile_id"):
@@ -1221,6 +1247,7 @@ def build_speaker_observation_response(
         confidence=observation.get("confidence"),
         status=observation["status"],
         display_name=display_name,
+        embedding_warning=embedding_warning,
         created_at=observation["created_at"],
         updated_at=observation["updated_at"],
     )
@@ -1438,7 +1465,7 @@ def add_job_embedding_to_profile(
     profile_id: str,
     observation_id: int | None = None,
     storage_reason: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     if storage_reason not in {"opt_in", "confirm", "manual"}:
         raise HTTPException(
             status_code=403,
@@ -1449,7 +1476,10 @@ def add_job_embedding_to_profile(
         )
     local_embedding = load_job_speaker_embedding(job_id, local_speaker_id)
     if local_embedding is None:
-        return
+        return {
+            "saved_count": 0,
+            "skipped_reason": "no_job_embedding",
+        }
 
     metadata = dict(local_embedding.get("quality_metadata") or {})
     reference_embeddings = metadata.pop("reference_embeddings", None) or []
@@ -1474,8 +1504,12 @@ def add_job_embedding_to_profile(
             existing_metadata.get("source_job_id") == job_id
             and existing_metadata.get("source_local_speaker_id") == local_speaker_id
         ):
-            return
+            return {
+                "saved_count": 0,
+                "skipped_reason": "already_stored",
+            }
 
+    saved_count = 0
     for reference_index, reference_embedding in enumerate(reference_embeddings):
         reference_metadata = dict(metadata)
         reference_metadata["source_reference_index"] = reference_index
@@ -1488,12 +1522,144 @@ def add_job_embedding_to_profile(
             quality=local_embedding.get("quality"),
             metadata=reference_metadata,
         )
+        saved_count += 1
 
     config = speaker_embedding_config_from_env()
     prune_speaker_embeddings(
         profile_id,
         model_name=local_embedding["model_name"],
         max_count=config.max_profile_embeddings_per_model,
+    )
+    return {
+        "saved_count": saved_count,
+        "skipped_reason": None,
+    }
+
+
+def speaker_embedding_storage_warning(result: dict[str, Any] | None) -> str | None:
+    if not result:
+        return None
+    reason = result.get("skipped_reason")
+    if reason == "no_job_embedding":
+        return (
+            "Profil wurde zugeordnet, aber für diese Sitzung ist kein "
+            "Sprecher-Embedding verfügbar. Automatische Wiedererkennung wird "
+            "erst nach erfolgreicher Embedding-Erzeugung funktionieren."
+        )
+    return None
+
+
+class TranscriptDiarization:
+    def __init__(self, transcript: list[dict[str, Any]]):
+        self.transcript = transcript
+
+    def itertracks(self, yield_label: bool = False):
+        for line in self.transcript:
+            speaker = str(line.get("speaker") or "")
+            if not speaker:
+                continue
+            segment = SimpleNamespace(
+                start=float(line.get("start", 0)),
+                end=float(line.get("end", 0)),
+            )
+            if yield_label:
+                yield segment, None, speaker
+            else:
+                yield segment, None
+
+
+def extract_job_speaker_embeddings_from_transcript(
+    job: dict[str, Any],
+    *,
+    models: Any,
+) -> list[LocalSpeakerEmbedding]:
+    embedding_inference = getattr(models, "speaker_embedding_inference", None)
+    if embedding_inference is None:
+        raise RuntimeError("Embedding-Modell nicht verfügbar")
+    transcript = job.get("transcript") or []
+    if not transcript:
+        raise RuntimeError("Job hat kein Transkript")
+    audio_path = job.get("audio_path") or job.get("file_path")
+    if not audio_path or not Path(audio_path).exists():
+        raise RuntimeError("Audiodatei für Backfill nicht verfügbar")
+
+    try:
+        import whisperx
+    except Exception as exc:
+        raise RuntimeError(f"WhisperX zum Laden der Audiodatei nicht verfügbar: {exc}") from exc
+
+    audio = whisperx.load_audio(audio_path)
+    return extract_local_speaker_embeddings(
+        audio=audio,
+        diarize_segments=TranscriptDiarization(transcript),
+        embedding_inference=embedding_inference,
+    )
+
+
+def backfill_speaker_profile_embeddings(
+    *,
+    profile_id: str | None = None,
+    session_id: str | None = None,
+) -> SpeakerEmbeddingBackfillResponse:
+    diagnostics = speaker_embedding_diagnostics()
+    if not diagnostics.loaded:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Embedding-Modell nicht verfügbar",
+                "diagnostics": model_to_dict(diagnostics),
+            },
+        )
+
+    observations = [
+        observation
+        for observation in load_speaker_observations(session_id=session_id)
+        if observation.get("status") in {"confirmed", "manual"}
+        and observation.get("profile_id")
+        and (profile_id is None or observation.get("profile_id") == profile_id)
+    ]
+    models = getattr(app.state, "models", None)
+    processed_jobs: set[str] = set()
+    saved_count = 0
+    skipped_count = 0
+    errors: list[str] = []
+
+    for observation in observations:
+        job_id = observation["job_id"]
+        try:
+            if not load_job_speaker_embeddings(job_id) and job_id not in processed_jobs:
+                job = load_job(job_id)
+                if job is None:
+                    raise RuntimeError("Job nicht gefunden")
+                embeddings = extract_job_speaker_embeddings_from_transcript(
+                    job,
+                    models=models,
+                )
+                persist_job_speaker_embeddings(job_id, embeddings)
+                processed_jobs.add(job_id)
+
+            result = add_job_embedding_to_profile(
+                job_id=job_id,
+                local_speaker_id=observation["local_speaker_id"],
+                profile_id=observation["profile_id"],
+                observation_id=observation["observation_id"],
+                storage_reason="manual",
+            )
+            saved_count += int(result.get("saved_count") or 0)
+            if result.get("skipped_reason"):
+                skipped_count += 1
+        except Exception as exc:
+            skipped_count += 1
+            errors.append(
+                f"{job_id}/{observation['local_speaker_id']}: {safe_exception_label(exc)}"
+            )
+
+    return SpeakerEmbeddingBackfillResponse(
+        scanned_observation_count=len(observations),
+        processed_job_count=len(processed_jobs),
+        saved_embedding_count=saved_count,
+        skipped_count=skipped_count,
+        errors=errors,
     )
 
 
@@ -1564,6 +1730,26 @@ def model_to_dict(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
+
+
+def speaker_embedding_diagnostics() -> SpeakerEmbeddingDiagnosticsResponse:
+    config = speaker_embedding_config_from_env()
+    models = getattr(app.state, "models", None)
+    attempted = list(getattr(models, "speaker_embedding_attempted_models", ()) or ())
+    model_name = getattr(models, "speaker_embedding_model_name", None)
+    error = getattr(models, "speaker_embedding_error", None)
+    loaded = bool(getattr(models, "speaker_embedding_inference", None))
+    if not attempted and config.enabled:
+        attempted = [config.model_name, *config.fallback_model_names]
+
+    return SpeakerEmbeddingDiagnosticsResponse(
+        enabled=config.enabled,
+        loaded=loaded,
+        model_name=model_name,
+        attempted_model_names=attempted,
+        error=error,
+        profile_embedding_count=count_all_speaker_embeddings(),
+    )
 
 
 def parse_pipeline_tops(raw_tops: str | None) -> list[str]:
@@ -2164,7 +2350,21 @@ async def health_check():
         raise HTTPException(
             status_code=503, detail="Models not loaded yet - server starting up"
         )
-    return {"status": "healthy", "models_loaded": True, "version": "0.1.0"}
+    return {
+        "status": "healthy",
+        "models_loaded": True,
+        "version": "0.1.0",
+        "speaker_embeddings": model_to_dict(speaker_embedding_diagnostics()),
+    }
+
+
+@app.get(
+    "/api/speaker-embeddings/diagnostics",
+    response_model=SpeakerEmbeddingDiagnosticsResponse,
+)
+async def speaker_embedding_diagnostics_endpoint():
+    """Report whether persistent speaker recognition can create embeddings."""
+    return speaker_embedding_diagnostics()
 
 
 @app.get("/api/llm/diagnostics", response_model=LLMDiagnosticsResponse)
@@ -2469,6 +2669,25 @@ async def delete_speaker_profile_embeddings_endpoint(profile_id: str):
     return {"profile_id": profile_id, "deleted_count": deleted_count}
 
 
+@app.post(
+    "/api/speaker-embeddings/backfill",
+    response_model=SpeakerEmbeddingBackfillResponse,
+)
+async def backfill_speaker_embeddings_endpoint(
+    profile_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+):
+    """Create missing profile embeddings for explicit speaker assignments."""
+    if profile_id is not None:
+        get_required_active_profile(profile_id)
+    if session_id is not None:
+        get_required_session(session_id)
+    return backfill_speaker_profile_embeddings(
+        profile_id=profile_id,
+        session_id=session_id,
+    )
+
+
 @app.get(
     "/api/sessions/{session_id}/speaker-observations",
     response_model=List[SpeakerObservationResponse],
@@ -2525,7 +2744,7 @@ async def confirm_session_speaker_observation(
         observation["local_speaker_id"],
         profile,
     )
-    add_job_embedding_to_profile(
+    embedding_result = add_job_embedding_to_profile(
         job_id=observation["job_id"],
         local_speaker_id=observation["local_speaker_id"],
         profile_id=profile_id,
@@ -2536,7 +2755,11 @@ async def confirm_session_speaker_observation(
         job_id=observation["job_id"],
         session_id=session_id,
     )
-    return build_speaker_observation_response(confirmed, updated_session)
+    return build_speaker_observation_response(
+        confirmed,
+        updated_session,
+        embedding_warning=speaker_embedding_storage_warning(embedding_result),
+    )
 
 
 @app.post(
@@ -2627,7 +2850,7 @@ async def create_manual_speaker_observation(
         local_speaker_id,
         profile,
     )
-    add_job_embedding_to_profile(
+    embedding_result = add_job_embedding_to_profile(
         job_id=job_id,
         local_speaker_id=local_speaker_id,
         profile_id=profile["profile_id"],
@@ -2638,7 +2861,11 @@ async def create_manual_speaker_observation(
         job_id=job_id,
         session_id=session_id,
     )
-    return build_speaker_observation_response(manual, updated_session)
+    return build_speaker_observation_response(
+        manual,
+        updated_session,
+        embedding_warning=speaker_embedding_storage_warning(embedding_result),
+    )
 
 
 @app.get(
