@@ -40,6 +40,7 @@ from summarize import (
     LLMCallError,
     StructuredOutputError,
     build_summary_review,
+    llm_diagnostics,
     summarize_segment,
 )
 from extract_tops import extract_tops_from_pdf
@@ -975,6 +976,17 @@ class SummarizeResponse(BaseModel):
     chunks_processed: int = 1
 
 
+class LLMDiagnosticsResponse(BaseModel):
+    ok: bool
+    base_url: str
+    model: str
+    base_url_source: str
+    service_reachable: bool
+    model_available: bool
+    available_models: List[str] = Field(default_factory=list)
+    message: str
+
+
 class ExtractTOPsResponse(BaseModel):
     tops: List[str]
 
@@ -1701,10 +1713,13 @@ def summarize_pipeline_segments(
                 }
             }
         except Exception as exc:
-            message = (
-                "Zusammenfassung für das Gesamtgespräch fehlgeschlagen "
-                f"({safe_exception_label(exc)})."
-            )
+            if isinstance(exc, LLMCallError):
+                message = str(exc)
+            else:
+                message = (
+                    "Zusammenfassung für das Gesamtgespräch fehlgeschlagen "
+                    f"({safe_exception_label(exc)})."
+                )
             append_pipeline_warning(pipeline_id, message)
             return {}, {
                 0: {
@@ -1773,10 +1788,13 @@ def summarize_pipeline_segments(
                 "duration_seconds": result.duration_seconds,
             }
         except Exception as exc:
-            message = (
-                f"Zusammenfassung für TOP {top_index + 1} fehlgeschlagen "
-                f"({safe_exception_label(exc)})."
-            )
+            if isinstance(exc, LLMCallError):
+                message = str(exc)
+            else:
+                message = (
+                    f"Zusammenfassung für TOP {top_index + 1} fehlgeschlagen "
+                    f"({safe_exception_label(exc)})."
+                )
             append_pipeline_warning(pipeline_id, message)
             summaries[top_index] = ""
             summary_reviews[top_index] = {
@@ -2012,6 +2030,17 @@ async def health_check():
             status_code=503, detail="Models not loaded yet - server starting up"
         )
     return {"status": "healthy", "models_loaded": True, "version": "0.1.0"}
+
+
+@app.get("/api/llm/diagnostics", response_model=LLMDiagnosticsResponse)
+async def llm_diagnostics_endpoint(model: Optional[str] = None):
+    """Check the configured OpenAI-compatible LLM endpoint and model."""
+
+    diagnostics = llm_diagnostics(model=model)
+    status_code = 200 if diagnostics.ok else 503
+    if diagnostics.ok:
+        return LLMDiagnosticsResponse(**diagnostics.to_dict())
+    raise HTTPException(status_code=status_code, detail=diagnostics.to_dict())
 
 
 @app.post("/api/pipeline/start", response_model=PipelineStartResponse)

@@ -5,7 +5,8 @@ Extracts agenda items (Tagesordnungspunkte/TOPs) from PDF invitation documents
 using pdfplumber for text extraction and Ollama LLM for intelligent parsing.
 
 Configuration via environment variables:
-- LLM_BASE_URL: API endpoint (default: http://localhost:11434/v1 for Ollama)
+- LLM_BASE_URL: API endpoint (local default: http://localhost:11434/v1,
+  Docker default: http://ollama:11434/v1)
 - LLM_MODEL: Model name (default: qwen3:8b)
 """
 
@@ -14,12 +15,14 @@ import os
 import re
 from typing import Optional
 
+from summarize import get_llm_config
+
 logger = logging.getLogger(__name__)
 
 # LLM server configuration (same as summarize.py)
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
+LLM_BASE_URL = get_llm_config().base_url
+LLM_API_KEY = get_llm_config().api_key
 
 # Default system prompt for TOP extraction
 DEFAULT_EXTRACTION_PROMPT = """Du bist ein Experte für deutsche Kommunalverwaltung und analysierst Einladungen zu Ausschusssitzungen.
@@ -114,14 +117,15 @@ def extract_tops_from_text(
             "OpenAI client nicht installiert. Installieren Sie mit: uv add openai"
         )
 
-    actual_model = model or LLM_MODEL
+    config = get_llm_config(model)
+    actual_model = config.model
     actual_system_prompt = system_prompt or DEFAULT_EXTRACTION_PROMPT
 
     logger.info(f"Extracting TOPs using model: {actual_model}")
 
     client = OpenAI(
-        base_url=LLM_BASE_URL,
-        api_key=LLM_API_KEY,
+        base_url=config.base_url,
+        api_key=config.api_key,
     )
 
     user_prompt = f"""Extrahiere alle Tagesordnungspunkte aus diesem Einladungsdokument:

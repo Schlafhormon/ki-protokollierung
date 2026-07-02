@@ -24,13 +24,14 @@ from assignment_suggestions import (
     normalize_text,
     suggest_assignments,
 )
+from summarize import get_llm_config
 
 
 logger = logging.getLogger(__name__)
 
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
+LLM_BASE_URL = get_llm_config().base_url
+LLM_API_KEY = get_llm_config().api_key
 AGENDA_DETECTION_USE_LLM = (
     os.environ.get("AGENDA_DETECTION_USE_LLM", "false").lower() == "true"
 )
@@ -349,11 +350,12 @@ def _detect_with_llm(
     except ImportError as exc:
         raise RuntimeError("OpenAI client nicht installiert") from exc
 
-    actual_model = model or LLM_MODEL
+    config = get_llm_config(model)
+    actual_model = config.model
     actual_system_prompt = system_prompt or DEFAULT_AGENDA_DETECTION_PROMPT
     client = OpenAI(
-        base_url=LLM_BASE_URL,
-        api_key=LLM_API_KEY,
+        base_url=config.base_url,
+        api_key=config.api_key,
         timeout=AGENDA_DETECTION_TIMEOUT_SECONDS,
     )
 

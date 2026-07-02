@@ -54,10 +54,26 @@ def fake_openai_module(monkeypatch):
                 ]
             )
 
+    class FakeModels:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def list(self):
+            response = type(self.owner).models_response
+            if isinstance(response, Exception):
+                raise response
+            return types.SimpleNamespace(
+                data=[
+                    types.SimpleNamespace(id=model_id)
+                    for model_id in response
+                ]
+            )
+
     class FakeOpenAI:
         instances = []
         content = ""
         responses = []
+        models_response = ["qwen3:8b", "test-model"]
 
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -66,11 +82,13 @@ def fake_openai_module(monkeypatch):
             self.chat = types.SimpleNamespace(
                 completions=FakeCompletions(self),
             )
+            self.models = FakeModels(self)
             type(self).instances.append(self)
 
     FakeOpenAI.instances = []
     FakeOpenAI.content = ""
     FakeOpenAI.responses = []
+    FakeOpenAI.models_response = ["qwen3:8b", "test-model"]
     module = types.ModuleType("openai")
     module.OpenAI = FakeOpenAI
     monkeypatch.setitem(sys.modules, "openai", module)

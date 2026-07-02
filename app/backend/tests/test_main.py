@@ -500,6 +500,17 @@ def test_agenda_detection_endpoint_detects_tops_without_pdf_or_manual_list():
     assert data["strategy"] == "heuristic_transcript_fallback"
 
 
+def test_llm_diagnostics_endpoint_reports_configured_model(fake_openai_module):
+    with TestClient(main.app) as client:
+        response = client.get("/api/llm/diagnostics?model=test-model")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["model"] == "test-model"
+    assert data["model_available"] is True
+
+
 def test_pipeline_runs_to_reviewable_result_and_persists_status_after_cache_clear(
     tmp_path, monkeypatch
 ):

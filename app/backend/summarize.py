@@ -6,7 +6,8 @@ summarization. The public API still exposes an editable text summary, while
 the backend internally works with structured minutes fields.
 
 Configuration via environment variables:
-- LLM_BASE_URL: API endpoint (default: http://localhost:11434/v1 for Ollama)
+- LLM_BASE_URL: API endpoint (local default: http://localhost:11434/v1,
+  Docker default: http://ollama:11434/v1)
 - LLM_MODEL: Model name (default: qwen3:8b)
 - LLM_TIMEOUT_SECONDS: request timeout per LLM call (default: 120)
 - LLM_MAX_RETRIES: retry count for transient LLM errors (default: 2)
@@ -20,9 +21,14 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 # LLM server configuration (Ollama)
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
+LOCAL_OLLAMA_BASE_URL = "http://localhost:11434/v1"
+DOCKER_OLLAMA_BASE_URL = "http://ollama:11434/v1"
+LOCAL_LLM_HOSTS = {"localhost", "127.0.0.1", "::1"}
+INTERNAL_LLM_HOSTS = {"ollama"}
+
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")
 LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "120"))
@@ -32,6 +38,116 @@ LLM_CHUNK_CHARS = int(os.environ.get("LLM_CHUNK_CHARS", "12000"))
 LLM_STRUCTURED_FALLBACK = (
     os.environ.get("LLM_STRUCTURED_FALLBACK", "true").lower() != "false"
 )
+
+
+def _is_truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_docker_runtime() -> bool:
+    """Return whether the backend is running inside the Compose/container setup."""
+
+    app_runtime = (os.environ.get("APP_RUNTIME") or "").strip().lower()
+    return (
+        app_runtime == "docker"
+        or _is_truthy(os.environ.get("RUNNING_IN_DOCKER"))
+        or os.path.exists("/.dockerenv")
+    )
+
+
+def _base_url_host(base_url: str) -> str:
+    parsed = urlparse(base_url)
+    return (parsed.hostname or "").lower()
+
+
+def _normalize_base_url(base_url: str) -> str:
+    return base_url.rstrip("/")
+
+
+def resolve_llm_base_url(raw_base_url: str | None = None) -> tuple[str, str]:
+    """
+    Resolve the effective LLM endpoint and describe where it came from.
+
+    A copied root .env used to contain LLM_BASE_URL=http://localhost:11434/v1,
+    which is correct for local backend development but wrong inside Docker.
+    In Docker, localhost points at the backend container, so local Ollama values
+    are treated as the internal Compose default unless a non-local URL is set.
+    """
+
+    if raw_base_url is None:
+        raw_base_url = os.environ.get("LLM_BASE_URL")
+
+    configured = (raw_base_url or "").strip()
+    docker_runtime = is_docker_runtime()
+
+    if not configured:
+        if docker_runtime:
+            return DOCKER_OLLAMA_BASE_URL, "internal_docker_default"
+        return LOCAL_OLLAMA_BASE_URL, "local_development_default"
+
+    normalized = _normalize_base_url(configured)
+    host = _base_url_host(normalized)
+    if docker_runtime and host in LOCAL_LLM_HOSTS:
+        return DOCKER_OLLAMA_BASE_URL, "internal_docker_default_from_local_value"
+    if host in INTERNAL_LLM_HOSTS:
+        return normalized, "internal_configured"
+    if host in LOCAL_LLM_HOSTS:
+        return normalized, "local_development_configured"
+    return normalized, "external_configured"
+
+
+LLM_BASE_URL, LLM_BASE_URL_SOURCE = resolve_llm_base_url()
+
+
+@dataclass(frozen=True)
+class LLMConfig:
+    """Effective LLM configuration for one request."""
+
+    base_url: str
+    model: str
+    api_key: str
+    timeout_seconds: float
+    base_url_source: str
+
+    @property
+    def uses_internal_ollama(self) -> bool:
+        return _base_url_host(self.base_url) in INTERNAL_LLM_HOSTS
+
+    @property
+    def uses_local_ollama(self) -> bool:
+        return _base_url_host(self.base_url) in LOCAL_LLM_HOSTS
+
+    @property
+    def uses_ollama(self) -> bool:
+        return self.uses_internal_ollama or self.uses_local_ollama
+
+
+@dataclass
+class LLMAvailability:
+    """Diagnostics result for the configured LLM endpoint and model."""
+
+    ok: bool
+    base_url: str
+    model: str
+    base_url_source: str
+    service_reachable: bool
+    model_available: bool
+    available_models: list[str] = field(default_factory=list)
+    message: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def get_llm_config(model: str | None = None) -> LLMConfig:
+    base_url, source = resolve_llm_base_url()
+    return LLMConfig(
+        base_url=base_url,
+        model=model or os.environ.get("LLM_MODEL", LLM_MODEL),
+        api_key=os.environ.get("LLM_API_KEY", LLM_API_KEY),
+        timeout_seconds=float(os.environ.get("LLM_TIMEOUT_SECONDS", str(LLM_TIMEOUT_SECONDS))),
+        base_url_source=source,
+    )
 
 
 @dataclass
@@ -292,7 +408,7 @@ def build_structured_system_prompt(system_prompt: str | None) -> str:
     )
 
 
-def _load_openai_client() -> Any:
+def _load_openai_client(config: LLMConfig | None = None) -> Any:
     try:
         from openai import OpenAI
     except ImportError:
@@ -300,10 +416,11 @@ def _load_openai_client() -> Any:
             "OpenAI client nicht installiert. Installieren Sie mit: uv add openai"
         )
 
+    config = config or get_llm_config()
     return OpenAI(
-        base_url=LLM_BASE_URL,
-        api_key=LLM_API_KEY,
-        timeout=LLM_TIMEOUT_SECONDS,
+        base_url=config.base_url,
+        api_key=config.api_key,
+        timeout=config.timeout_seconds,
     )
 
 
@@ -327,6 +444,125 @@ def classify_llm_error(error: Exception) -> LLMErrorInfo:
     if isinstance(status_code, int) and 400 <= status_code < 500:
         return LLMErrorInfo("client", False)
     return LLMErrorInfo("unknown", False)
+
+
+def _extract_model_ids(models_response: Any) -> list[str]:
+    raw_models = getattr(models_response, "data", models_response)
+    if raw_models is None:
+        return []
+
+    model_ids = []
+    for item in raw_models:
+        if isinstance(item, dict):
+            model_id = item.get("id") or item.get("name")
+        else:
+            model_id = getattr(item, "id", None) or getattr(item, "name", None)
+        if model_id:
+            model_ids.append(str(model_id))
+    return sorted(set(model_ids))
+
+
+def _model_matches_configured(available_model: str, configured_model: str) -> bool:
+    if available_model == configured_model:
+        return True
+    # Accept untagged configuration only when the endpoint returns a tagged ID.
+    if ":" not in configured_model and available_model.split(":", 1)[0] == configured_model:
+        return True
+    return False
+
+
+def _llm_hint(config: LLMConfig, *, model_missing: bool = False) -> str:
+    if config.uses_internal_ollama:
+        pull_hint = (
+            f" Starten Sie Ollama mit Docker Compose und laden Sie das Modell: "
+            f"docker compose exec ollama ollama pull {config.model}."
+        )
+    elif config.uses_local_ollama:
+        pull_hint = (
+            f" Starten Sie lokal Ollama und laden Sie das Modell: "
+            f"ollama pull {config.model}."
+        )
+    else:
+        pull_hint = " Prüfen Sie die externe OpenAI-kompatible LLM-Konfiguration."
+
+    model_hint = (
+        f" Prüfen Sie LLM_MODEL={config.model}."
+        if model_missing
+        else f" Prüfen Sie LLM_BASE_URL={config.base_url} und LLM_MODEL={config.model}."
+    )
+    return pull_hint + model_hint
+
+
+def check_llm_availability(
+    *,
+    client: Any | None = None,
+    model: str | None = None,
+) -> LLMAvailability:
+    """Check whether the configured LLM endpoint is reachable and has the model."""
+
+    config = get_llm_config(model)
+    client = client or _load_openai_client(config)
+
+    try:
+        models_response = client.models.list()
+    except Exception as error:
+        info = classify_llm_error(error)
+        message = (
+            f"Der konfigurierte LLM-Dienst ist nicht erreichbar "
+            f"(LLM_BASE_URL={config.base_url}, LLM_MODEL={config.model})."
+            f"{_llm_hint(config)}"
+        )
+        raise LLMCallError(
+            message,
+            category=info.category if info.category != "unknown" else "network",
+            transient=True,
+        ) from error
+
+    available_models = _extract_model_ids(models_response)
+    model_available = any(
+        _model_matches_configured(available_model, config.model)
+        for available_model in available_models
+    )
+    if not model_available:
+        message = (
+            f"Das konfigurierte LLM-Modell '{config.model}' ist unter "
+            f"LLM_BASE_URL={config.base_url} nicht verfügbar."
+            f"{_llm_hint(config, model_missing=True)}"
+        )
+        raise LLMCallError(
+            message,
+            category="model_missing",
+            transient=False,
+        )
+
+    return LLMAvailability(
+        ok=True,
+        base_url=config.base_url,
+        model=config.model,
+        base_url_source=config.base_url_source,
+        service_reachable=True,
+        model_available=True,
+        available_models=available_models,
+        message="LLM-Dienst ist erreichbar und das Modell ist verfügbar.",
+    )
+
+
+def llm_diagnostics(model: str | None = None) -> LLMAvailability:
+    """Return diagnostics without raising for API endpoints and tests."""
+
+    config = get_llm_config(model)
+    try:
+        return check_llm_availability(model=model)
+    except LLMCallError as error:
+        return LLMAvailability(
+            ok=False,
+            base_url=config.base_url,
+            model=config.model,
+            base_url_source=config.base_url_source,
+            service_reachable=error.category == "model_missing",
+            model_available=False,
+            message=str(error),
+        )
 
 
 def _chat_completion_content(
@@ -370,7 +606,7 @@ def _chat_completion_content(
     if last_info.category == "network":
         hint = (
             f" Prüfen Sie, ob der LLM-Dienst erreichbar ist "
-            f"(LLM_BASE_URL={LLM_BASE_URL})."
+            f"(LLM_BASE_URL={get_llm_config(model).base_url})."
         )
     raise LLMCallError(
         f"LLM-Aufruf fehlgeschlagen ({last_info.category}): {last_error}.{hint}",
@@ -904,8 +1140,10 @@ def summarize_segment(
     is enabled, a chunked free-text summarization path is used.
     """
 
-    client = _load_openai_client()
-    actual_model = model or LLM_MODEL
+    config = get_llm_config(model)
+    client = _load_openai_client(config)
+    check_llm_availability(client=client, model=config.model)
+    actual_model = config.model
     actual_system_prompt = build_structured_system_prompt(system_prompt)
 
     start_time = time.time()
@@ -930,7 +1168,9 @@ def summarize_segment(
             fallback_used=False,
             chunks_processed=chunks_processed,
         )
-    except (StructuredOutputError, LLMCallError):
+    except LLMCallError:
+        raise
+    except StructuredOutputError:
         if not LLM_STRUCTURED_FALLBACK:
             raise
 

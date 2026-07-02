@@ -186,7 +186,7 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `WHISPER_DEVICE` | Gerät für WhisperX (`cpu`, `cuda`, `auto`) | Compose: `cpu` |
 | `WHISPER_BATCH_SIZE` | Batch-Größe für Transkription | `16` |
 | `WHISPER_LANGUAGE` | Sprache | `de` |
-| `LLM_BASE_URL` | OpenAI-kompatibler LLM-Endpunkt | `http://ollama:11434/v1` |
+| `LLM_BASE_URL` | OpenAI-kompatibler LLM-Endpunkt | Compose: `http://ollama:11434/v1`, lokale Backend-Entwicklung: `http://localhost:11434/v1` |
 | `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `qwen3:8b` |
 | `LLM_TIMEOUT_SECONDS` | Timeout je LLM-Anfrage | `120` |
 | `LLM_CHUNK_CHARS` | Chunk-Größe für lange TOP-Texte | `12000` |
@@ -199,7 +199,12 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `TRANSCRIPTION_CONCURRENCY` | parallele Transkriptionsjobs | `1` |
 | `PIPELINE_CONCURRENCY` | parallele End-to-End-Pipelinejobs | `1` |
 
-Weitere Optionen stehen in `.env.example`.
+Weitere Optionen stehen in `.env.example`. In Docker Compose sollte
+`LLM_BASE_URL` normalerweise nicht gesetzt werden; der Backend-Container nutzt
+dann automatisch den internen Ollama-Service. Ein `localhost`-Wert ist nur für
+lokale Backend-Entwicklung außerhalb von Docker sinnvoll. Externe
+OpenAI-kompatible Endpunkte müssen explizit mit vollständiger `/v1`-URL
+konfiguriert werden.
 
 ## GPU-Modus
 
@@ -227,6 +232,24 @@ Wenn lokale Images ohne vorinstallierte Modelle gebaut wurden, setzen Sie in
 ```text
 HF_TOKEN=hf_...
 ```
+
+### Zusammenfassung meldet LLM-/Ollama-Fehler
+
+Docker Compose startet einen internen Ollama-Dienst und lädt standardmäßig
+`LLM_MODEL=qwen3:8b`. Prüfen Sie die LLM-Diagnose mit:
+
+```bash
+curl http://localhost:8010/api/llm/diagnostics
+```
+
+Wenn das Modell fehlt, laden Sie es nach:
+
+```bash
+docker compose exec ollama ollama pull qwen3:8b
+```
+
+Für lokale Backend-Entwicklung ohne Docker muss Ollama lokal laufen und
+`LLM_BASE_URL=http://localhost:11434/v1` gesetzt sein.
 
 Danach neu starten:
 
@@ -364,6 +387,7 @@ und `HF_TOKEN` als BuildKit-Secret bereitstellen.
 | `/api/extract-tops` | POST | TOPs aus PDF extrahieren |
 | `/api/agenda-detection` | POST | TOPs und Segmentgrenzen erkennen |
 | `/api/summarize` | POST | Zusammenfassung erzeugen |
+| `/api/llm/diagnostics` | GET | LLM-Endpunkt und Modell prüfen |
 | `/api/export` | POST | Protokoll als TXT, DOCX oder PDF exportieren |
 | `/api/speaker-profiles` | GET/POST | Sprecherprofile listen/anlegen |
 | `/api/speaker-profiles/{profile_id}` | PUT/DELETE | Profil ändern oder archivieren |
