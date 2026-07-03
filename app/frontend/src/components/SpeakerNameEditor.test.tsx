@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ComponentProps } from 'react';
+import { useState, type ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TranscriptLine } from '../types';
 import SpeakerNameEditor from './SpeakerNameEditor';
@@ -56,6 +56,37 @@ function renderEditor(overrides: Partial<ComponentProps<typeof SpeakerNameEditor
   );
 }
 
+function renderEditorWithSpeakerState(
+  overrides: Partial<ComponentProps<typeof SpeakerNameEditor>> = {}
+) {
+  const setSpeakerNamesSpy = vi.fn();
+
+  function Wrapper() {
+    const [names, setNames] = useState<Record<string, string>>(
+      overrides.speakerNames ?? {}
+    );
+    const trackedSetNames: typeof setNames = (value) => {
+      setSpeakerNamesSpy(value);
+      setNames(value);
+    };
+
+    return (
+      <SpeakerNameEditor
+        {...overrides}
+        transcript={transcript}
+        setTranscript={vi.fn()}
+        speakerNames={names}
+        setSpeakerNames={trackedSetNames}
+        sessionId="session-1"
+        rememberSpeakers
+      />
+    );
+  }
+
+  const rendered = render(<Wrapper />);
+  return { ...rendered, setSpeakerNamesSpy };
+}
+
 describe('SpeakerNameEditor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -67,7 +98,6 @@ describe('SpeakerNameEditor', () => {
 
   it('confirms an automatic speaker suggestion after review', async () => {
     const user = userEvent.setup();
-    const setSpeakerNames = vi.fn();
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse([aliceProfile]))
@@ -80,15 +110,13 @@ describe('SpeakerNameEditor', () => {
       .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetchMock);
 
-    renderEditor({ setSpeakerNames });
+    renderEditorWithSpeakerState();
 
     await screen.findByText('Vorschlag: Alice Global');
     await user.click(screen.getByRole('button', { name: /vorschlag übernehmen/i }));
 
-    await waitFor(() =>
-      expect(setSpeakerNames).toHaveBeenCalledWith({
-        SPEAKER_00: 'Alice Global',
-      })
+    expect(await screen.findByLabelText('SPEAKER_00 lokal benennen')).toHaveValue(
+      'Alice Global'
     );
       expect(fetchMock.mock.calls[3]![0]).toBe(
       '/api/sessions/session-1/speaker-observations/7/confirm'
@@ -121,7 +149,6 @@ describe('SpeakerNameEditor', () => {
 
   it('stores a new profile only through the explicit remember action', async () => {
     const user = userEvent.setup();
-    const setSpeakerNames = vi.fn();
     const manualObservation = {
       ...aliceSuggestion,
       profile_id: 'charlie',
@@ -142,18 +169,17 @@ describe('SpeakerNameEditor', () => {
       .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetchMock);
 
-    renderEditor({
+    renderEditorWithSpeakerState({
       speakerNames: { SPEAKER_00: 'Charlie Global' },
-      setSpeakerNames,
     });
 
     await screen.findAllByText(/kein automatischer profilvorschlag/i);
     await user.click(screen.getAllByRole('button', { name: /neues profil merken/i })[0]!);
 
     await waitFor(() =>
-      expect(setSpeakerNames).toHaveBeenCalledWith({
-        SPEAKER_00: 'Charlie Global',
-      })
+      expect(screen.getByLabelText('SPEAKER_00 lokal benennen')).toHaveValue(
+        'Charlie Global'
+      )
     );
     expect(fetchMock.mock.calls[3]![0]).toBe(
       '/api/sessions/session-1/speaker-observations/manual'
@@ -166,7 +192,6 @@ describe('SpeakerNameEditor', () => {
 
   it('assigns a local speaker to an existing profile', async () => {
     const user = userEvent.setup();
-    const setSpeakerNames = vi.fn();
     const updatedProfile = { ...aliceProfile, embedding_count: 2 };
     const fetchMock = vi
       .fn()
@@ -178,7 +203,7 @@ describe('SpeakerNameEditor', () => {
       .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetchMock);
 
-    renderEditor({ setSpeakerNames });
+    renderEditorWithSpeakerState();
 
     await screen.findAllByText('Alice Global (0)');
     await user.selectOptions(
@@ -198,10 +223,47 @@ describe('SpeakerNameEditor', () => {
       local_speaker_id: 'SPEAKER_00',
       profile_id: 'alice',
     });
-    expect(setSpeakerNames).toHaveBeenCalledWith({
-      SPEAKER_00: 'Alice Global',
-    });
+    expect(screen.getByLabelText('SPEAKER_00 lokal benennen')).toHaveValue(
+      'Alice Global'
+    );
     expect(await screen.findAllByText('Alice Global (2)')).not.toHaveLength(0);
+  });
+
+  it('applies an already accepted profile name when the local name is still the speaker id', async () => {
+    const rudolfProfile = {
+      ...aliceProfile,
+      profile_id: 'rudolf',
+      display_name: 'Herr Rudolf',
+      embedding_count: 3,
+    };
+    const acceptedObservation = {
+      ...aliceSuggestion,
+      observation_id: 8,
+      profile_id: 'rudolf',
+      profile_display_name: 'Herr Rudolf',
+      local_speaker_id: 'SPEAKER_00',
+      local_display_name: 'SPEAKER_00',
+      status: 'manual',
+      display_name: 'Herr Rudolf',
+      confidence: 1,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse([rudolfProfile]))
+      .mockResolvedValueOnce(jsonResponse([acceptedObservation]))
+      .mockResolvedValueOnce(jsonResponse([]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderEditorWithSpeakerState({
+      speakerNames: { SPEAKER_00: 'SPEAKER_00' },
+    });
+
+    expect(await screen.findByText('Dauerhaft zugeordnet: Herr Rudolf')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByLabelText('SPEAKER_00 lokal benennen')).toHaveValue(
+        'Herr Rudolf'
+      )
+    );
   });
 
   it('unassigns an accepted persistent speaker mapping before correction', async () => {

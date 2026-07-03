@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react';
 import {
   archiveSpeakerProfile,
   backfillSpeakerEmbeddings,
@@ -24,7 +24,7 @@ interface SpeakerNameEditorProps {
   transcript: TranscriptLine[];
   setTranscript: (transcript: TranscriptLine[]) => void;
   speakerNames: Record<string, string>;
-  setSpeakerNames: (names: Record<string, string>) => void;
+  setSpeakerNames: Dispatch<SetStateAction<Record<string, string>>>;
   sessionId?: string | null;
   rememberSpeakers?: boolean;
   audioUrl?: string;
@@ -52,6 +52,14 @@ function upsertObservation(
   return observations.map((observation) =>
     observation.observation_id === updated.observation_id ? updated : observation
   );
+}
+
+function shouldApplyAcceptedProfileName(
+  currentName: string | undefined,
+  localSpeakerId: string
+): boolean {
+  const trimmed = currentName?.trim() ?? '';
+  return !trimmed || trimmed.toLowerCase() === localSpeakerId.toLowerCase();
 }
 
 export default function SpeakerNameEditor({
@@ -169,6 +177,37 @@ export default function SpeakerNameEditor({
     return grouped;
   }, [observations]);
 
+  useEffect(() => {
+    if (!rememberSpeakers || observations.length === 0) {
+      return;
+    }
+
+    setSpeakerNames((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const observation of observations) {
+        if (observation.status !== 'confirmed' && observation.status !== 'manual') {
+          continue;
+        }
+        const displayName =
+          observation.profile_display_name?.trim() || observation.display_name?.trim();
+        if (!displayName) {
+          continue;
+        }
+        if (
+          shouldApplyAcceptedProfileName(
+            next[observation.local_speaker_id],
+            observation.local_speaker_id
+          )
+        ) {
+          next[observation.local_speaker_id] = displayName;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [observations, rememberSpeakers, setSpeakerNames]);
+
   const diagnosticsBySpeaker = useMemo(() => {
     const grouped = new Map<string, SpeakerMatchDiagnostic>();
     for (const diagnostic of diagnostics) {
@@ -199,17 +238,17 @@ export default function SpeakerNameEditor({
   };
 
   const handleNameChange = (speakerId: string, name: string) => {
-    setSpeakerNames({
-      ...speakerNames,
+    setSpeakerNames((current) => ({
+      ...current,
       [speakerId]: name,
-    });
+    }));
   };
 
   const applyObservationName = (speakerId: string, observation: SpeakerObservation) => {
-    setSpeakerNames({
-      ...speakerNames,
+    setSpeakerNames((current) => ({
+      ...current,
       [speakerId]: observation.display_name,
-    });
+    }));
   };
 
   const runSpeakerAction = async (

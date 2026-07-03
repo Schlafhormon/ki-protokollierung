@@ -1,3 +1,5 @@
+import type { Dispatch, SetStateAction } from 'react';
+
 /**
  * Shared type definitions for the Protokollierungsassistenz
  */
@@ -307,7 +309,7 @@ export interface AssignmentStepProps {
   agendaDetectionError?: string | null;
   audioUrl?: string;  // URL to stream audio for playback
   speakerNames: Record<string, string>;
-  setSpeakerNames: (names: Record<string, string>) => void;
+  setSpeakerNames: Dispatch<SetStateAction<Record<string, string>>>;
   sessionId?: string | null;
   hasSummaries?: boolean;
   rememberSpeakers?: boolean;
