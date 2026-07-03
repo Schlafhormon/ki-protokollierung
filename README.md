@@ -99,24 +99,25 @@ Copy-Item .env.example .env
 # Danach .env bearbeiten und HF_TOKEN setzen, falls erforderlich.
 ```
 
-### 4. Setup starten
+### 4. Setup bauen und starten
 
 Windows:
 
 ```powershell
-.\setup.ps1
+.\setup.ps1 build
 ```
 
 macOS/Linux:
 
 ```bash
 chmod +x ./setup.sh
-./setup.sh
+./setup.sh build
 ```
 
-Das Setup prüft Docker, erkennt optional eine NVIDIA-GPU, baut in diesem Fork bei
-einem lokalen Repository standardmäßig lokale Docker-Images und startet
-Frontend, Backend und Ollama per Docker Compose.
+Der Build-Befehl prüft Docker, erkennt optional eine NVIDIA-GPU, baut lokale
+Docker-Images aus diesem Repository und startet Frontend, Backend und Ollama per
+Docker Compose. Wenn bereits Container vorhanden sind, fragt das Skript vor dem
+Neuerstellen nach.
 
 Nach erfolgreichem Start ist die Anwendung erreichbar unter:
 
@@ -124,16 +125,40 @@ Nach erfolgreichem Start ist die Anwendung erreichbar unter:
 http://localhost:3000
 ```
 
+Für spätere Starts ohne Neubau verwenden Sie:
+
+```powershell
+.\setup.ps1 start
+```
+
+oder unter macOS/Linux:
+
+```bash
+./setup.sh start
+```
+
 ## Setup-Befehle
 
 | Befehl | Windows | macOS/Linux |
 | --- | --- | --- |
-| Starten/Fortsetzen | `.\setup.ps1` | `./setup.sh` |
+| Lokale Images bauen und Container neu erstellen | `.\setup.ps1 build` | `./setup.sh build` |
+| Vorhandene Container ohne Neubau starten | `.\setup.ps1 start` oder `.\setup.ps1` | `./setup.sh start` oder `./setup.sh` |
 | Stoppen | `.\setup.ps1 stop` | `./setup.sh stop` |
 | Status prüfen | `.\setup.ps1 status` | `./setup.sh status` |
 | Neustart | `.\setup.ps1 restart` | `./setup.sh restart` |
 | Logs anzeigen | `.\setup.ps1 logs` | `./setup.sh logs` |
 | Daten löschen und neu starten | `.\setup.ps1 cleanup` | `./setup.sh cleanup` |
+
+Nach Änderungen im Repository führen Sie `build` aus. Das baut Frontend und
+Backend neu und erstellt die Container neu. Die Modell-Volumes bleiben
+standardmäßig erhalten; fehlende Modelle oder Modelle, die sich durch geänderte
+Konfiguration ergeben, werden beim Start nachgeladen. Nur wenn Sie die Frage zum
+Behalten der Modell-Volumes ausdrücklich mit `n` beantworten, werden die Modelle
+gelöscht und anschließend erneut heruntergeladen.
+
+Wenn Sie nur eine vorhandene Installation starten möchten, verwenden Sie
+`start`. Dieser Befehl baut keine Images und meldet einen Fehler, wenn noch keine
+Container existieren.
 
 Wichtige Setup-Variablen:
 
@@ -146,8 +171,10 @@ Wichtige Setup-Variablen:
 | `PROTOKOLL_PULL_POLICY` | Pull-Verhalten für Images (`missing`, `always`, `never`) | `missing` |
 | `FRONTEND_IMAGE`, `BACKEND_IMAGE`, `BACKEND_GPU_IMAGE` | explizite Image-Referenzen verwenden | leer |
 
-Wenn `PROTOKOLL_IMAGE_TAG` oder explizite Image-Variablen gesetzt sind, nutzt
-das Setup diese Images statt automatisch lokale Images zu bauen.
+`build` verwendet immer die lokalen Image-Namen
+`ki-protokollierung-frontend:local`, `ki-protokollierung-backend:local` bzw.
+`ki-protokollierung-backend:gpu-local`. Die Image-Variablen sind vor allem für
+manuelle Compose-Aufrufe oder veröffentlichte Images relevant.
 
 ## Datenschutz und Sprecherprofile
 
@@ -157,6 +184,7 @@ Sprecherinformationen lokal in der Docker-Umgebung. Persistente Daten liegen in:
 - `./data/sessions.sqlite3` für Sitzungen, Jobs, TOPs, Zuordnungen, Sprecherprofile und Export-Metadaten
 - `./uploads` für gespeicherte Audiodateien zur Wiedergabe und Sitzungswiederherstellung
 - Docker-Volume `ollama_data` für lokale Ollama-Modelle
+- Docker-Volumes `backend_hf_cache` und `backend_torch_cache` für lokal geladene WhisperX-, HuggingFace- und Torch-Modelle
 
 Das dauerhafte Merken von Sprechern ist standardmäßig ausgeschaltet. Ohne Opt-in
 werden keine globalen Sprecherprofile vorgeschlagen oder automatisch dauerhaft
@@ -250,6 +278,37 @@ Der GPU-Override nutzt `docker-compose.gpu.yml` und setzt das Backend auf
 
 Docker Desktop bzw. Docker Engine starten und das Setup erneut ausführen.
 
+### Nach Änderungen im Repository neu bauen
+
+```bash
+./setup.sh build
+```
+
+Windows:
+
+```powershell
+.\setup.ps1 build
+```
+
+Das Skript fragt, wenn bereits Container vorhanden sind. Modell-Volumes werden
+standardmäßig behalten, damit Ollama-, HuggingFace- und Torch-Modelle nicht bei
+jedem Backend-/Frontend-Build erneut heruntergeladen werden.
+
+### Vorhandene Container nur starten
+
+```bash
+./setup.sh start
+```
+
+Windows:
+
+```powershell
+.\setup.ps1 start
+```
+
+Dieser Befehl baut keine Images. Wenn noch keine Container vorhanden sind,
+führen Sie zuerst `build` aus.
+
 ### Backend meldet fehlenden HuggingFace-Token
 
 Wenn lokale Images ohne vorinstallierte Modelle gebaut wurden, setzen Sie in
@@ -310,9 +369,9 @@ oder über das Setup:
 ### Cleanup
 
 Das entfernt Container und Docker-Volumes, insbesondere heruntergeladene
-Ollama-Modelle. Die lokalen Bind-Mounts `uploads/` und `data/` bleiben bestehen;
-löschen Sie diese Ordner nur bewusst, wenn auch hochgeladene Dateien und
-gespeicherte Sitzungen entfernt werden sollen.
+Ollama-, HuggingFace- und Torch-Modelle. Die lokalen Bind-Mounts `uploads/` und
+`data/` bleiben bestehen; löschen Sie diese Ordner nur bewusst, wenn auch
+hochgeladene Dateien und gespeicherte Sitzungen entfernt werden sollen.
 
 ```bash
 ./setup.sh cleanup
@@ -380,6 +439,20 @@ npm run lint
 ```
 
 ### Lokale Docker-Images bauen
+
+Der empfohlene Weg für lokale Repo-Änderungen ist:
+
+```bash
+./setup.sh build
+```
+
+Windows:
+
+```powershell
+.\setup.ps1 build
+```
+
+Die folgenden Docker-Befehle sind nur für manuelle Spezialfälle gedacht.
 
 CPU:
 

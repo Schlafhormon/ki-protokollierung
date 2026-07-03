@@ -4,7 +4,8 @@
 # Intelligentes Setup-Skript fuer nicht-technische Benutzer
 #
 # Verwendung:
-# ./setup.sh           # Anwendung starten (Standard)
+# ./setup.sh build     # Lokale Images bauen und Container neu erstellen
+# ./setup.sh start     # Vorhandene Container starten
 # ./setup.sh stop      # Anwendung stoppen
 # ./setup.sh status    # Status anzeigen
 # ./setup.sh restart   # Anwendung neu starten
@@ -127,7 +128,9 @@ show_help() {
     echo "Verwendung: ./setup.sh [BEFEHL]"
     echo ""
     echo "Befehle:"
-    echo "  (ohne)      Anwendung starten oder fortsetzen"
+    echo "  (ohne)      Vorhandene Container starten"
+    echo "  start       Vorhandene Container starten, ohne neu zu bauen"
+    echo "  build       Lokale Images neu bauen und Container neu erstellen"
     echo "  stop        Anwendung stoppen"
     echo "  status      Status der Dienste anzeigen"
     echo "  restart     Anwendung neu starten"
@@ -144,11 +147,111 @@ show_help() {
     echo "  FRONTEND_IMAGE/BACKEND_IMAGE/... Vollstaendige Image-Referenzen setzen"
     echo ""
     echo "Beispiele:"
-    echo "  ./setup.sh          # Normale Installation/Start"
-    echo "  PROTOKOLL_IMAGE_TAG=v1.2.3 ./setup.sh"
+    echo "  ./setup.sh build    # Nach Code-Aenderungen neu bauen"
+    echo "  ./setup.sh start    # Vorhandene Container nur starten"
+    echo "  PROTOKOLL_BUILD_NO_CACHE=true ./setup.sh build"
     echo "  ./setup.sh status   # Pruefen ob alles laeuft"
     echo "  ./setup.sh logs     # Fehlersuche mit Logs"
     echo ""
+}
+
+########################################
+# Use the local image names produced by this repository
+########################################
+set_local_application_images() {
+    BUILD_LOCAL_IMAGES=true
+    PROTOKOLL_PULL_POLICY="missing"
+    FRONTEND_IMAGE="ki-protokollierung-frontend:local"
+    BACKEND_CPU_IMAGE="ki-protokollierung-backend:local"
+    BACKEND_GPU_IMAGE="ki-protokollierung-backend:gpu-local"
+    BACKEND_IMAGE="$BACKEND_CPU_IMAGE"
+    export FRONTEND_IMAGE BACKEND_IMAGE BACKEND_GPU_IMAGE
+}
+
+project_volume_name() {
+    printf '%s_%s' "$(basename "$SCRIPT_DIR")" "$1"
+}
+
+volume_exists() {
+    docker volume inspect "$1" >/dev/null 2>&1
+}
+
+confirm_rebuild_existing_containers() {
+    local containers
+    containers=$(docker compose ps -a -q 2>/dev/null)
+    if [ -z "$containers" ]; then
+        return 0
+    fi
+
+    echo ""
+    warn "Es sind bereits Container fuer diese Anwendung vorhanden."
+    echo ""
+    docker compose ps -a 2>/dev/null
+    echo ""
+    echo "Beim Build werden die Container neu erstellt. Modell-Volumes bleiben erhalten,"
+    echo "solange Sie spaeter nicht ausdruecklich das Neuladen der Modelle waehlen."
+    read -p "Container neu erstellen? (j/N): " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Jj]$ ]]; then
+        echo "Abgebrochen."
+        return 1
+    fi
+
+    info "Stoppe und entferne vorhandene Container (Volumes bleiben erhalten)..."
+    docker compose down --remove-orphans >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        error "Vorhandene Container konnten nicht entfernt werden."
+        return 1
+    fi
+    return 0
+}
+
+confirm_model_cache_handling() {
+    local volume_names=(
+        "$(project_volume_name ollama_data)"
+        "$(project_volume_name backend_hf_cache)"
+        "$(project_volume_name backend_torch_cache)"
+    )
+    local existing_volumes=()
+    local volume
+
+    for volume in "${volume_names[@]}"; do
+        if volume_exists "$volume"; then
+            existing_volumes+=("$volume")
+        fi
+    done
+
+    if [ ${#existing_volumes[@]} -eq 0 ]; then
+        info "Keine Modell-Volumes gefunden; fehlende Modelle werden beim Start geladen."
+        return 0
+    fi
+
+    echo ""
+    info "Vorhandene Modell-Volumes gefunden:"
+    for volume in "${existing_volumes[@]}"; do
+        echo "  - $volume"
+    done
+    echo ""
+    echo "Standard: Modelle behalten. Fehlende oder durch Modellwechsel neue Modelle"
+    echo "werden automatisch nachgeladen. Nur bei defektem Cache oder bewusstem"
+    echo "Komplett-Refresh sollten die Modell-Volumes geloescht werden."
+    read -p "Modell-Volumes behalten? (J/n): " -n 1 -r
+    echo ""
+
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+        warn "Loesche Modell-Volumes. Modelle werden danach erneut heruntergeladen."
+        for volume in "${existing_volumes[@]}"; do
+            docker volume rm "$volume" >/dev/null 2>&1
+            if [ $? -ne 0 ]; then
+                error "Volume konnte nicht geloescht werden: $volume"
+                return 1
+            fi
+        done
+    else
+        success "Modell-Volumes bleiben erhalten"
+    fi
+
+    return 0
 }
 
 ########################################
@@ -768,29 +871,33 @@ open_browser() {
 }
 
 ########################################
-# Start the application
+# Build/recreate the application from this repository
 ########################################
-do_start() {
+do_build() {
     echo ""
     echo -e "${CYAN}=============================================="
-    echo "  Protokollierungsassistenz - Setup"
+    echo "  Protokollierungsassistenz - Build"
     echo -e "==============================================${NC}"
     echo ""
 
+    set_local_application_images
+    PROTOKOLL_PRECACHE_MODELS="${PROTOKOLL_PRECACHE_MODELS:-0}"
+
     # Pre-flight checks
     check_docker || exit 1
-    check_existing_installation || exit 1
+    confirm_rebuild_existing_containers || exit 1
     check_disk_space || exit 1
     check_ram
     check_ports || exit 1
     check_gpu
+    confirm_model_cache_handling || exit 1
 
     # Create uploads directory
     mkdir -p uploads
 
     # Start the application
     echo ""
-    info "Starte die Anwendung..."
+    info "Baue und starte die Anwendung..."
 
     if [ ${#MISSING_ITEMS[@]} -gt 0 ]; then
         echo "Downloads koennen einige Minuten dauern."
@@ -808,10 +915,41 @@ do_start() {
 
     if [ "$USE_GPU" = true ]; then
         info "Starte im GPU-Modus..."
-        docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+        docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --force-recreate
     else
         info "Starte im CPU-Modus..."
-        docker compose up -d
+        docker compose up -d --force-recreate
+    fi
+
+    wait_for_services
+}
+
+########################################
+# Start existing containers without rebuilding
+########################################
+do_start() {
+    echo ""
+    echo -e "${CYAN}=============================================="
+    echo "  Protokollierungsassistenz - Start"
+    echo -e "==============================================${NC}"
+    echo ""
+
+    check_docker || exit 1
+
+    if ! docker compose ps -a -q 2>/dev/null | grep -q .; then
+        error "Keine vorhandenen Container gefunden."
+        echo ""
+        echo "Fuehren Sie zuerst aus:"
+        echo "  ./setup.sh build"
+        echo ""
+        exit 1
+    fi
+
+    info "Starte vorhandene Container ohne Neubau..."
+    docker compose start
+    if [ $? -ne 0 ]; then
+        error "Container konnten nicht gestartet werden."
+        exit 1
     fi
 
     wait_for_services
@@ -842,7 +980,8 @@ do_status() {
     if ! docker compose ps -q 2>/dev/null | grep -q .; then
         echo "Die Anwendung ist nicht gestartet."
         echo ""
-        echo "Starten mit: ./setup.sh"
+        echo "Erst bauen mit: ./setup.sh build"
+        echo "Danach starten mit: ./setup.sh start"
         return
     fi
 
@@ -928,7 +1067,7 @@ do_cleanup() {
     echo ""
 
     if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-        do_start
+        do_build
     fi
 }
 
@@ -939,6 +1078,9 @@ main() {
     local command="${1:-start}"
 
     case "$command" in
+        build)
+            do_build
+            ;;
         start|"")
             do_start
             ;;

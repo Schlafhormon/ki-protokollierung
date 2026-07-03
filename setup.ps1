@@ -3,7 +3,8 @@
 # Intelligentes Setup-Skript fuer nicht-technische Benutzer
 #
 # Verwendung:
-#   .\setup.ps1           # Anwendung starten (Standard)
+#   .\setup.ps1 build     # Lokale Images bauen und Container neu erstellen
+#   .\setup.ps1 start     # Vorhandene Container starten
 #   .\setup.ps1 stop      # Anwendung stoppen
 #   .\setup.ps1 status    # Status anzeigen
 #   .\setup.ps1 restart   # Anwendung neu starten
@@ -111,7 +112,9 @@ function Show-Help {
     Write-Host "Verwendung: .\setup.ps1 [BEFEHL]"
     Write-Host ""
     Write-Host "Befehle:"
-    Write-Host "  (ohne)     Anwendung starten oder fortsetzen"
+    Write-Host "  (ohne)     Vorhandene Container starten"
+    Write-Host "  start      Vorhandene Container starten, ohne neu zu bauen"
+    Write-Host "  build      Lokale Images neu bauen und Container neu erstellen"
     Write-Host "  stop       Anwendung stoppen"
     Write-Host "  status     Status der Dienste anzeigen"
     Write-Host "  restart    Anwendung neu starten"
@@ -128,11 +131,105 @@ function Show-Help {
     Write-Host "  FRONTEND_IMAGE/BACKEND_IMAGE/... Vollstaendige Image-Referenzen setzen"
     Write-Host ""
     Write-Host "Beispiele:"
-    Write-Host "  .\setup.ps1           # Normale Installation/Start"
-    Write-Host "  `$env:PROTOKOLL_IMAGE_TAG='v1.2.3'; .\setup.ps1"
+    Write-Host "  .\setup.ps1 build     # Nach Code-Aenderungen neu bauen"
+    Write-Host "  .\setup.ps1 start     # Vorhandene Container nur starten"
+    Write-Host "  `$env:PROTOKOLL_BUILD_NO_CACHE='true'; .\setup.ps1 build"
     Write-Host "  .\setup.ps1 status    # Pruefen ob alles laeuft"
     Write-Host "  .\setup.ps1 logs      # Fehlersuche mit Logs"
     Write-Host ""
+}
+
+#######################################
+# Use the local image names produced by this repository
+#######################################
+function Set-LocalApplicationImages {
+    $script:BUILD_LOCAL_IMAGES = $true
+    $script:PROTOKOLL_PULL_POLICY = "missing"
+    $script:FRONTEND_IMAGE = "ki-protokollierung-frontend:local"
+    $script:BACKEND_CPU_IMAGE = "ki-protokollierung-backend:local"
+    $script:BACKEND_GPU_IMAGE = "ki-protokollierung-backend:gpu-local"
+    $env:FRONTEND_IMAGE = $script:FRONTEND_IMAGE
+    $env:BACKEND_IMAGE = $script:BACKEND_CPU_IMAGE
+    $env:BACKEND_GPU_IMAGE = $script:BACKEND_GPU_IMAGE
+}
+
+function Get-ProjectVolumeName {
+    param([string]$Suffix)
+    return "$(Split-Path -Leaf $ScriptDir)_$Suffix"
+}
+
+function Test-VolumeExists {
+    param([string]$VolumeName)
+    $null = docker volume inspect $VolumeName 2>&1
+    return $LASTEXITCODE -eq 0
+}
+
+function Confirm-RebuildExistingContainers {
+    $containers = docker compose ps -a -q 2>&1
+    if (-not $containers -or $containers.Count -eq 0) {
+        return $true
+    }
+
+    Write-Host ""
+    Write-Warn "Es sind bereits Container fuer diese Anwendung vorhanden."
+    Write-Host ""
+    docker compose ps -a 2>&1
+    Write-Host ""
+    Write-Host "Beim Build werden die Container neu erstellt. Modell-Volumes bleiben erhalten,"
+    Write-Host "solange Sie spaeter nicht ausdruecklich das Neuladen der Modelle waehlen."
+    $response = Read-Host "Container neu erstellen? (j/N)"
+    if ($response -notmatch "^[Jj]$") {
+        Write-Host "Abgebrochen."
+        return $false
+    }
+
+    Write-Info "Stoppe und entferne vorhandene Container (Volumes bleiben erhalten)..."
+    docker compose down --remove-orphans 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Vorhandene Container konnten nicht entfernt werden."
+        return $false
+    }
+    return $true
+}
+
+function Confirm-ModelCacheHandling {
+    $volumeNames = @(
+        (Get-ProjectVolumeName "ollama_data"),
+        (Get-ProjectVolumeName "backend_hf_cache"),
+        (Get-ProjectVolumeName "backend_torch_cache")
+    )
+    $existingVolumes = @($volumeNames | Where-Object { Test-VolumeExists $_ })
+
+    if ($existingVolumes.Count -eq 0) {
+        Write-Info "Keine Modell-Volumes gefunden; fehlende Modelle werden beim Start geladen."
+        return $true
+    }
+
+    Write-Host ""
+    Write-Info "Vorhandene Modell-Volumes gefunden:"
+    foreach ($volume in $existingVolumes) {
+        Write-Host "  - $volume"
+    }
+    Write-Host ""
+    Write-Host "Standard: Modelle behalten. Fehlende oder durch Modellwechsel neue Modelle"
+    Write-Host "werden automatisch nachgeladen. Nur bei defektem Cache oder bewusstem"
+    Write-Host "Komplett-Refresh sollten die Modell-Volumes geloescht werden."
+    $response = Read-Host "Modell-Volumes behalten? (J/n)"
+
+    if ($response -match "^[Nn]$") {
+        Write-Warn "Loesche Modell-Volumes. Modelle werden danach erneut heruntergeladen."
+        foreach ($volume in $existingVolumes) {
+            docker volume rm $volume 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Err "Volume konnte nicht geloescht werden: $volume"
+                return $false
+            }
+        }
+    } else {
+        Write-Success "Modell-Volumes bleiben erhalten"
+    }
+
+    return $true
 }
 
 #######################################
@@ -740,14 +837,19 @@ function Show-SuccessMessage {
 }
 
 #######################################
-# Start the application
+# Build/recreate the application from this repository
 #######################################
-function Invoke-Start {
+function Invoke-Build {
     Write-Host ""
     Write-Host "==============================================" -ForegroundColor Cyan
-    Write-Host "  Protokollierungsassistenz - Setup" -ForegroundColor Cyan
+    Write-Host "  Protokollierungsassistenz - Build" -ForegroundColor Cyan
     Write-Host "==============================================" -ForegroundColor Cyan
     Write-Host ""
+
+    Set-LocalApplicationImages
+    if (-not $env:PROTOKOLL_PRECACHE_MODELS) {
+        $script:PROTOKOLL_PRECACHE_MODELS = "0"
+    }
 
     # Pre-flight checks
     if (-not (Test-Docker)) {
@@ -755,7 +857,7 @@ function Invoke-Start {
         exit 1
     }
 
-    if (-not (Test-ExistingInstallation)) {
+    if (-not (Confirm-RebuildExistingContainers)) {
         exit 1
     }
 
@@ -773,12 +875,17 @@ function Invoke-Start {
 
     Test-GPU
 
+    if (-not (Confirm-ModelCacheHandling)) {
+        Read-Host "Druecken Sie Enter zum Beenden"
+        exit 1
+    }
+
     # Create uploads directory
     New-Item -ItemType Directory -Force -Path "uploads" | Out-Null
 
     # Start the application
     Write-Host ""
-    Write-Info "Starte die Anwendung..."
+    Write-Info "Baue und starte die Anwendung..."
 
     if ($script:MissingItems.Count -gt 0) {
         Write-Host "Downloads koennen einige Minuten dauern."
@@ -802,16 +909,51 @@ function Invoke-Start {
 
     if ($script:USE_GPU) {
         Write-Info "Starte im GPU-Modus..."
-        docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+        docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --force-recreate
     } else {
         Write-Info "Starte im CPU-Modus..."
-        docker compose up -d
+        docker compose up -d --force-recreate
     }
 
     $success = Wait-ForServices
 
     Write-Host ""
     Read-Host "Druecken Sie Enter zum Schliessen"
+}
+
+#######################################
+# Start existing containers without rebuilding
+#######################################
+function Invoke-Start {
+    Write-Host ""
+    Write-Host "==============================================" -ForegroundColor Cyan
+    Write-Host "  Protokollierungsassistenz - Start" -ForegroundColor Cyan
+    Write-Host "==============================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    if (-not (Test-Docker)) {
+        Read-Host "Druecken Sie Enter zum Beenden"
+        exit 1
+    }
+
+    $containers = docker compose ps -a -q 2>&1
+    if (-not $containers -or $containers.Count -eq 0) {
+        Write-Err "Keine vorhandenen Container gefunden."
+        Write-Host ""
+        Write-Host "Fuehren Sie zuerst aus:"
+        Write-Host "  .\setup.ps1 build"
+        Write-Host ""
+        exit 1
+    }
+
+    Write-Info "Starte vorhandene Container ohne Neubau..."
+    docker compose start
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Container konnten nicht gestartet werden."
+        exit 1
+    }
+
+    Wait-ForServices | Out-Null
 }
 
 #######################################
@@ -840,7 +982,8 @@ function Show-Status {
     if (-not $containers -or $containers.Count -eq 0) {
         Write-Host "Die Anwendung ist nicht gestartet."
         Write-Host ""
-        Write-Host "Starten mit: .\setup.ps1"
+        Write-Host "Erst bauen mit: .\setup.ps1 build"
+        Write-Host "Danach starten mit: .\setup.ps1 start"
         return
     }
 
@@ -931,7 +1074,7 @@ function Invoke-Cleanup {
     $response = Read-Host "Moechten Sie die Anwendung jetzt neu installieren? (J/n)"
 
     if ($response -notmatch "^[Nn]$") {
-        Invoke-Start
+        Invoke-Build
     }
 }
 
@@ -939,6 +1082,9 @@ function Invoke-Cleanup {
 # Main entry point
 #######################################
 switch ($Command.ToLower()) {
+    "build" {
+        Invoke-Build
+    }
     "start" {
         Invoke-Start
     }
