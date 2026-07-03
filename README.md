@@ -237,6 +237,10 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `WHISPER_MODEL` | Whisper-Modell | `large-v2` |
 | `WHISPER_DEVICE` | Gerät für WhisperX (`cpu`, `cuda`, `auto`) | Compose: `cpu` |
 | `WHISPER_BATCH_SIZE` | Batch-Größe für Transkription | `16` |
+| `WHISPER_CPU_THREADS` | CPU-Threads pro WhisperX/CTranslate2-Worker | `4` |
+| `TORCH_NUM_THREADS` | optionale PyTorch-CPU-Threads, falls CPU-Server getunt wird | leer |
+| `TORCH_NUM_INTEROP_THREADS` | optionale PyTorch-Inter-op-Threads | leer |
+| `OMP_NUM_THREADS` / `MKL_NUM_THREADS` | optionale OpenMP/MKL-Threadlimits | leer |
 | `WHISPER_LANGUAGE` | Sprache | `de` |
 | `LLM_BASE_URL` | OpenAI-kompatibler LLM-Endpunkt | Compose: `http://ollama:11434/v1`, lokale Backend-Entwicklung: `http://localhost:11434/v1` |
 | `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `qwen3:8b` |

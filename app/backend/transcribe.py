@@ -26,6 +26,31 @@ import gc
 # This env var is the official workaround until WhisperX updates its dependency.
 # See: https://github.com/m-bain/whisperX/issues/1304
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+
+
+def _optional_positive_int_env(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _set_default_thread_env(name: str, value: int) -> None:
+    if not os.environ.get(name):
+        os.environ[name] = str(value)
+
+
+_configured_whisper_cpu_threads = _optional_positive_int_env("WHISPER_CPU_THREADS")
+_configured_torch_num_threads = _optional_positive_int_env("TORCH_NUM_THREADS")
+_thread_env_default = _configured_torch_num_threads or _configured_whisper_cpu_threads
+if _thread_env_default is not None:
+    _set_default_thread_env("OMP_NUM_THREADS", _thread_env_default)
+    _set_default_thread_env("MKL_NUM_THREADS", _thread_env_default)
+
 import re
 import logging
 from dataclasses import dataclass
@@ -54,6 +79,33 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v2")
 WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "auto")
 WHISPER_BATCH_SIZE = int(os.environ.get("WHISPER_BATCH_SIZE", "16"))
 WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "de")
+WHISPER_CPU_THREADS = _configured_whisper_cpu_threads or 4
+TORCH_NUM_THREADS = _configured_torch_num_threads
+TORCH_NUM_INTEROP_THREADS = _optional_positive_int_env("TORCH_NUM_INTEROP_THREADS")
+
+
+def _configure_torch_threading(device: str) -> None:
+    """Apply optional CPU thread settings before heavy PyTorch work starts."""
+    if device != "cpu":
+        return
+
+    target_torch_threads = TORCH_NUM_THREADS or _configured_whisper_cpu_threads
+    if target_torch_threads is not None:
+        try:
+            torch.set_num_threads(target_torch_threads)
+            logger.info("Using PyTorch CPU threads: %s", target_torch_threads)
+        except Exception as exc:
+            logger.warning("Could not set PyTorch CPU threads: %s", exc)
+
+    if TORCH_NUM_INTEROP_THREADS is not None:
+        try:
+            torch.set_num_interop_threads(TORCH_NUM_INTEROP_THREADS)
+            logger.info(
+                "Using PyTorch CPU inter-op threads: %s",
+                TORCH_NUM_INTEROP_THREADS,
+            )
+        except Exception as exc:
+            logger.warning("Could not set PyTorch CPU inter-op threads: %s", exc)
 
 
 @dataclass
@@ -100,14 +152,20 @@ def load_models() -> TranscriptionModels:
 
     compute_type = "float16" if device == "cuda" else "int8"
     logger.info(f"Using device: {device}, compute_type: {compute_type}")
+    _configure_torch_threading(device)
 
     # Load WhisperX model
     logger.info(f"[1/3] Loading WhisperX model: {WHISPER_MODEL}...")
+    load_model_kwargs: dict[str, Any] = {}
+    if device == "cpu":
+        load_model_kwargs["threads"] = WHISPER_CPU_THREADS
+        logger.info("Using WhisperX CPU threads per worker: %s", WHISPER_CPU_THREADS)
     whisper_model = whisperx.load_model(
         WHISPER_MODEL,
         device,
         compute_type=compute_type,
         language=WHISPER_LANGUAGE,
+        **load_model_kwargs,
     )
     logger.info(f"[1/3] WhisperX model loaded successfully")
 
