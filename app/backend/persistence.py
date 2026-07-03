@@ -482,6 +482,25 @@ def count_all_speaker_embeddings(db_path: Path | None = None) -> int:
     return int(row["count"] if row else 0)
 
 
+def count_job_speaker_embeddings(
+    job_id: str | None = None,
+    db_path: Path | None = None,
+) -> int:
+    conditions = []
+    params: list[Any] = []
+    if job_id is not None:
+        conditions.append("job_id = ?")
+        params.append(job_id)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    with connect(db_path) as db:
+        row = db.execute(
+            f"SELECT COUNT(*) AS count FROM job_speaker_embeddings {where}",
+            params,
+        ).fetchone()
+    return int(row["count"] if row else 0)
+
+
 def prune_speaker_embeddings(
     profile_id: str,
     *,

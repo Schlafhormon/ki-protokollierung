@@ -59,6 +59,7 @@ from persistence import (
     archive_speaker_profile,
     confirm_speaker_observation,
     count_all_speaker_embeddings,
+    count_job_speaker_embeddings,
     count_speaker_embeddings,
     create_speaker_profile,
     delete_speaker_embeddings,
@@ -921,13 +922,37 @@ class SpeakerObservationResponse(BaseModel):
     updated_at: float
 
 
+class SpeakerEmbeddingProfileDiagnosticResponse(BaseModel):
+    profile_id: str
+    display_name: str
+    embedding_count: int
+
+
+class LocalSpeakerEmbeddingDiagnosticResponse(BaseModel):
+    local_speaker_id: str
+    embedding_available: bool
+    model_name: Optional[str] = None
+    quality: Optional[float] = None
+    total_seconds: Optional[float] = None
+    selected_segment_count: int = 0
+    candidate_segment_count: int = 0
+    excluded_short_count: int = 0
+    excluded_overlap_count: int = 0
+
+
 class SpeakerEmbeddingDiagnosticsResponse(BaseModel):
     enabled: bool
     loaded: bool
     model_name: Optional[str] = None
     attempted_model_names: List[str] = Field(default_factory=list)
     error: Optional[str] = None
+    torch_force_no_weights_only_load: Optional[str] = None
+    job_speaker_embedding_count: int = 0
     profile_embedding_count: int = 0
+    profiles: List[SpeakerEmbeddingProfileDiagnosticResponse] = Field(default_factory=list)
+    session_id: Optional[str] = None
+    job_id: Optional[str] = None
+    local_speakers: List[LocalSpeakerEmbeddingDiagnosticResponse] = Field(default_factory=list)
 
 
 class SpeakerEmbeddingBackfillResponse(BaseModel):
@@ -1698,6 +1723,7 @@ def build_speaker_match_diagnostic_responses(
     local_audio_seconds = speaker_audio_seconds_from_transcript(
         session.get("transcript") or job.get("transcript")
     )
+    embedding_model_available = speaker_embedding_diagnostics().loaded
     for model_name in model_names:
         model_local_embeddings = [
             embedding
@@ -1718,6 +1744,7 @@ def build_speaker_match_diagnostic_responses(
             profile_references=references,
             config=config,
             local_audio_seconds=local_audio_seconds,
+            embedding_model_available=embedding_model_available,
         ):
             diagnostics_by_speaker.setdefault(
                 diagnostic.local_speaker_id,
@@ -1733,7 +1760,9 @@ def model_to_dict(model: BaseModel) -> dict[str, Any]:
     return model.dict()
 
 
-def speaker_embedding_diagnostics() -> SpeakerEmbeddingDiagnosticsResponse:
+def speaker_embedding_diagnostics(
+    session_id: str | None = None,
+) -> SpeakerEmbeddingDiagnosticsResponse:
     config = speaker_embedding_config_from_env()
     models = getattr(app.state, "models", None)
     attempted = list(getattr(models, "speaker_embedding_attempted_models", ()) or ())
@@ -1743,13 +1772,65 @@ def speaker_embedding_diagnostics() -> SpeakerEmbeddingDiagnosticsResponse:
     if not attempted and config.enabled:
         attempted = [config.model_name, *config.fallback_model_names]
 
+    profiles = [
+        SpeakerEmbeddingProfileDiagnosticResponse(
+            profile_id=profile["profile_id"],
+            display_name=profile["display_name"],
+            embedding_count=count_speaker_embeddings(profile["profile_id"]),
+        )
+        for profile in load_speaker_profiles()
+    ]
+
+    job_id = None
+    local_speakers: list[LocalSpeakerEmbeddingDiagnosticResponse] = []
+    session = load_session(session_id) if session_id else None
+    if session is not None:
+        job_id = session.get("job_id")
+        if job_id:
+            local_embeddings_by_speaker = {
+                embedding["local_speaker_id"]: embedding
+                for embedding in load_job_speaker_embeddings(job_id)
+            }
+            for local_speaker_id in sorted(known_local_speaker_ids(session)):
+                embedding = local_embeddings_by_speaker.get(local_speaker_id)
+                metadata = (embedding or {}).get("quality_metadata") or {}
+                local_speakers.append(
+                    LocalSpeakerEmbeddingDiagnosticResponse(
+                        local_speaker_id=local_speaker_id,
+                        embedding_available=embedding is not None,
+                        model_name=(embedding or {}).get("model_name"),
+                        quality=(embedding or {}).get("quality"),
+                        total_seconds=metadata.get("total_seconds"),
+                        selected_segment_count=int(
+                            metadata.get("selected_segment_count") or 0
+                        ),
+                        candidate_segment_count=int(
+                            metadata.get("candidate_segment_count") or 0
+                        ),
+                        excluded_short_count=int(
+                            metadata.get("excluded_short_count") or 0
+                        ),
+                        excluded_overlap_count=int(
+                            metadata.get("excluded_overlap_count") or 0
+                        ),
+                    )
+                )
+
     return SpeakerEmbeddingDiagnosticsResponse(
         enabled=config.enabled,
         loaded=loaded,
         model_name=model_name,
         attempted_model_names=attempted,
         error=error,
+        torch_force_no_weights_only_load=os.environ.get(
+            "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"
+        ),
+        job_speaker_embedding_count=count_job_speaker_embeddings(job_id),
         profile_embedding_count=count_all_speaker_embeddings(),
+        profiles=profiles,
+        session_id=session_id if session is not None else None,
+        job_id=job_id,
+        local_speakers=local_speakers,
     )
 
 
@@ -2363,9 +2444,11 @@ async def health_check():
     "/api/speaker-embeddings/diagnostics",
     response_model=SpeakerEmbeddingDiagnosticsResponse,
 )
-async def speaker_embedding_diagnostics_endpoint():
+async def speaker_embedding_diagnostics_endpoint(session_id: Optional[str] = None):
     """Report whether persistent speaker recognition can create embeddings."""
-    return speaker_embedding_diagnostics()
+    if session_id is not None and load_session(session_id) is None:
+        raise HTTPException(status_code=404, detail="Session nicht gefunden")
+    return speaker_embedding_diagnostics(session_id=session_id)
 
 
 @app.get("/api/llm/diagnostics", response_model=LLMDiagnosticsResponse)

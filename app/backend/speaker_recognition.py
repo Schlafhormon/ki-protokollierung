@@ -119,6 +119,10 @@ def _get_csv_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
+def get_huggingface_token() -> str | None:
+    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN") or None
+
+
 def speaker_embedding_config_from_env() -> SpeakerEmbeddingConfig:
     auto_threshold = _get_float_env("SPEAKER_MATCH_AUTO_THRESHOLD", 0.82)
     suggest_threshold = _get_float_env("SPEAKER_MATCH_SUGGEST_THRESHOLD", 0.72)
@@ -321,6 +325,7 @@ def diagnose_speaker_matches(
     profile_references: Iterable[ProfileReference],
     config: SpeakerEmbeddingConfig,
     local_audio_seconds: dict[str, float] | None = None,
+    embedding_model_available: bool = True,
 ) -> list[SpeakerMatchDiagnostic]:
     references = list(profile_references)
     embeddings_by_speaker = {
@@ -347,11 +352,12 @@ def diagnose_speaker_matches(
             continue
 
         if local_embedding is None:
-            reason_code = "insufficient_speaker_audio"
-            reason = "zu wenig Sprecher-Audio"
-            if audio_seconds is None or audio_seconds >= config.min_total_seconds:
+            if not embedding_model_available:
                 reason_code = "embedding_model_unavailable"
                 reason = "Embedding-Modell nicht verfügbar"
+            else:
+                reason_code = "insufficient_speaker_audio"
+                reason = "zu wenig qualifiziertes Sprecher-Audio"
             diagnostics.append(
                 SpeakerMatchDiagnostic(
                     local_speaker_id=local_speaker_id,
@@ -465,7 +471,7 @@ def load_pyannote_embedding_inference_result(
             error=f"PyAnnote embedding inference is unavailable: {exc}",
         )
 
-    hf_token = os.environ.get("HF_TOKEN") or None
+    hf_token = get_huggingface_token()
     torch_device = torch.device(device)
     attempted = tuple(
         dict.fromkeys((config.model_name, *config.fallback_model_names))
@@ -475,9 +481,12 @@ def load_pyannote_embedding_inference_result(
     for model_name in attempted:
         try:
             try:
-                model = Model.from_pretrained(model_name, use_auth_token=hf_token)
+                model = Model.from_pretrained(model_name, token=hf_token)
             except TypeError:
-                model = Model.from_pretrained(model_name)
+                try:
+                    model = Model.from_pretrained(model_name, use_auth_token=hf_token)
+                except TypeError:
+                    model = Model.from_pretrained(model_name)
             if model is None:
                 raise RuntimeError(
                     "model could not be downloaded or access is not granted"
@@ -546,6 +555,93 @@ def _extract_vector(value: Any) -> list[float] | None:
         return None
 
 
+def _row_value(row: Any, *names: str) -> Any:
+    for name in names:
+        try:
+            value = row.get(name)  # pandas Series and dict-like rows
+        except Exception:
+            value = None
+        if value is not None:
+            return value
+        try:
+            value = row[name]
+        except Exception:
+            value = None
+        if value is not None:
+            return value
+        value = getattr(row, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _coerce_diarization_segment(row: Any) -> tuple[Any, str] | None:
+    segment = _row_value(row, "segment")
+    speaker = _row_value(row, "speaker", "label")
+
+    if segment is not None:
+        start = getattr(segment, "start", None)
+        end = getattr(segment, "end", None)
+    else:
+        start = _row_value(row, "start")
+        end = _row_value(row, "end", "stop")
+
+    if start is None or end is None or speaker is None:
+        return None
+
+    try:
+        start_float = float(start)
+        end_float = float(end)
+    except (TypeError, ValueError):
+        return None
+
+    if end_float <= start_float:
+        return None
+
+    return (
+        type("DiarizationSegment", (), {"start": start_float, "end": end_float})(),
+        str(speaker),
+    )
+
+
+def iter_diarization_speaker_segments(diarize_segments: Any) -> list[tuple[Any, str]]:
+    """Return (segment, speaker) pairs from pyannote annotations or WhisperX frames."""
+    if diarize_segments is None:
+        return []
+
+    if hasattr(diarize_segments, "itertracks"):
+        try:
+            return [
+                (segment, str(label))
+                for segment, _, label in diarize_segments.itertracks(yield_label=True)
+            ]
+        except Exception as exc:
+            logger.warning("Could not iterate pyannote diarization segments: %s", exc)
+            return []
+
+    rows: list[Any] = []
+    if hasattr(diarize_segments, "iterrows"):
+        try:
+            rows = [row for _, row in diarize_segments.iterrows()]
+        except Exception as exc:
+            logger.warning("Could not iterate dataframe diarization segments: %s", exc)
+            return []
+    elif isinstance(diarize_segments, dict):
+        rows = [diarize_segments]
+    else:
+        try:
+            rows = list(diarize_segments)
+        except TypeError:
+            rows = []
+
+    pairs = []
+    for row in rows:
+        coerced = _coerce_diarization_segment(row)
+        if coerced is not None:
+            pairs.append(coerced)
+    return pairs
+
+
 def extract_local_speaker_embeddings(
     *,
     audio: Any,
@@ -582,13 +678,10 @@ def extract_local_speaker_embeddings(
     excluded_short_by_speaker: dict[str, int] = {}
     excluded_overlap_by_speaker: dict[str, int] = {}
 
-    try:
-        iterator = diarize_segments.itertracks(yield_label=True)
-    except Exception as exc:
-        logger.warning("Could not iterate diarization segments for embeddings: %s", exc)
+    raw_segments = iter_diarization_speaker_segments(diarize_segments)
+    if not raw_segments:
+        logger.warning("No diarization segments available for speaker embeddings")
         return []
-
-    raw_segments = [(segment, str(label)) for segment, _, label in iterator]
     for segment, label in raw_segments:
         intervals.append((float(segment.start), float(segment.end), label))
 

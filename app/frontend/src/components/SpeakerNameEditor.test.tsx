@@ -167,13 +167,14 @@ describe('SpeakerNameEditor', () => {
   it('assigns a local speaker to an existing profile', async () => {
     const user = userEvent.setup();
     const setSpeakerNames = vi.fn();
+    const updatedProfile = { ...aliceProfile, embedding_count: 2 };
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse([aliceProfile]))
       .mockResolvedValueOnce(jsonResponse([]))
       .mockResolvedValueOnce(jsonResponse([]))
       .mockResolvedValueOnce(jsonResponse({ ...aliceSuggestion, status: 'manual' }))
-      .mockResolvedValueOnce(jsonResponse([aliceProfile]))
+      .mockResolvedValueOnce(jsonResponse([updatedProfile]))
       .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -200,6 +201,7 @@ describe('SpeakerNameEditor', () => {
     expect(setSpeakerNames).toHaveBeenCalledWith({
       SPEAKER_00: 'Alice Global',
     });
+    expect(await screen.findAllByText('Alice Global (2)')).not.toHaveLength(0);
   });
 
   it('unassigns an accepted persistent speaker mapping before correction', async () => {

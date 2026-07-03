@@ -269,6 +269,71 @@ def test_extract_local_embeddings_keeps_multiple_quality_filtered_references(
     assert inference.calls == [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0)]
 
 
+def test_extract_local_embeddings_accepts_whisperx_dataframe_segments(monkeypatch):
+    class FakeTensor:
+        ndim = 1
+
+        def unsqueeze(self, _dimension):
+            self.ndim = 2
+            return self
+
+    fake_torch = types.SimpleNamespace(
+        Tensor=type("Tensor", (), {}),
+        float32="float32",
+        as_tensor=lambda _audio, dtype=None: FakeTensor(),
+    )
+
+    class FakeSegment:
+        def __init__(self, start, end):
+            self.start = start
+            self.end = end
+
+    fake_pyannote_core = types.SimpleNamespace(Segment=FakeSegment)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "pyannote.core", fake_pyannote_core)
+
+    class FakeDataFrame:
+        def iterrows(self):
+            return iter(
+                [
+                    (0, {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}),
+                    (1, {"start": 2.0, "end": 4.0, "speaker": "SPEAKER_00"}),
+                    (2, {"start": 4.0, "end": 6.0, "speaker": "SPEAKER_00"}),
+                ]
+            )
+
+    class FakeInference:
+        _speaker_embedding_model_name = "test-model"
+
+        def __init__(self):
+            self.calls = []
+
+        def crop(self, _audio_file, segment):
+            self.calls.append((segment.start, segment.end))
+            return [1.0, segment.start + 1.0]
+
+    inference = FakeInference()
+
+    embeddings = extract_local_speaker_embeddings(
+        audio=[0.0, 0.0],
+        diarize_segments=FakeDataFrame(),
+        embedding_inference=inference,
+        config=SpeakerEmbeddingConfig(
+            model_name="test-model",
+            min_total_seconds=4.0,
+            min_segment_seconds=1.0,
+            max_segment_seconds=3.0,
+        ),
+    )
+
+    assert len(embeddings) == 1
+    assert embeddings[0].local_speaker_id == "SPEAKER_00"
+    assert embeddings[0].model_name == "test-model"
+    assert len(embeddings[0].reference_embeddings) == 3
+    assert embeddings[0].quality_metadata["total_seconds"] == 6.0
+    assert inference.calls == [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0)]
+
+
 def test_embedding_loader_uses_fallback_when_primary_model_is_unavailable(
     monkeypatch,
 ):

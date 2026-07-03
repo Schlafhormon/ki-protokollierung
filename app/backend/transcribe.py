@@ -36,6 +36,7 @@ from whisperx.diarize import DiarizationPipeline
 from speaker_recognition import (
     LocalSpeakerEmbedding,
     extract_local_speaker_embeddings,
+    get_huggingface_token,
     load_pyannote_embedding_inference_result,
     speaker_embedding_config_from_env,
 )
@@ -119,7 +120,7 @@ def load_models() -> TranscriptionModels:
     logger.info("[2/3] Alignment model loaded successfully")
 
     # Load diarization pipeline
-    hf_token = os.environ.get("HF_TOKEN")
+    hf_token = get_huggingface_token()
     models_precached = os.environ.get("MODELS_PRECACHED") == "1"
 
     # When models are pre-cached (Docker image with bundled models), HF_TOKEN is not required

@@ -213,7 +213,7 @@ Profil-Embeddings, zu wenig Sprecher-Audio, ein nicht verfügbares
 Embedding-Modell oder Scores unterhalb des Schwellwerts.
 
 `pyannote/embedding` ist ein gated HuggingFace-Modell. Der verwendete
-`HF_TOKEN` muss Leserechte haben und die Nutzungsbedingungen auf der
+`HF_TOKEN` oder `HUGGINGFACE_TOKEN` muss Leserechte haben und die Nutzungsbedingungen auf der
 Modellseite müssen akzeptiert sein. Wenn dieses Modell nicht geladen werden
 kann, versucht das Backend standardmäßig
 `pyannote/wespeaker-voxceleb-resnet34-LM` als Fallback. Bereits manuell
@@ -221,13 +221,19 @@ zugeordnete Profile ohne Embeddings können in der Sprecherprüfung über
 "Embeddings nachholen" nachträglich befüllt werden, sofern die Audiodatei noch
 vorhanden ist.
 
+Der Laufzeitstatus ist unter `/api/speaker-embeddings/diagnostics` sichtbar.
+Mit `?session_id=<id>` zeigt der Endpoint zusätzlich lokale Sprecher pro
+Sitzung, qualifizierte Sekunden, Segmentfilterung, lokale
+`job_speaker_embeddings`, globale `speaker_embeddings` und Counts pro Profil.
+
 ## Konfiguration
 
 Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 
 | Variable | Beschreibung | Standard |
 | --- | --- | --- |
-| `HF_TOKEN` | HuggingFace-Token für PyAnnote, wenn Modelle nicht vorinstalliert sind | leer |
+| `HF_TOKEN` / `HUGGINGFACE_TOKEN` | HuggingFace-Token für PyAnnote, wenn Modelle nicht vorinstalliert sind | leer |
+| `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD` | PyTorch-2.6+-Kompatibilität für WhisperX/pyannote-Checkpoints | `1` |
 | `WHISPER_MODEL` | Whisper-Modell | `large-v2` |
 | `WHISPER_DEVICE` | Gerät für WhisperX (`cpu`, `cuda`, `auto`) | Compose: `cpu` |
 | `WHISPER_BATCH_SIZE` | Batch-Größe für Transkription | `16` |

@@ -206,6 +206,7 @@ def test_speaker_observation_confirm_and_reject_flow(tmp_path, monkeypatch):
         "SPEAKER_00"
     )
     assert profile_embeddings[0]["metadata"]["storage_reason"] == "confirm"
+    assert confirmed.json()["profile"]["embedding_count"] == 1
 
     duplicate_response = client.post(
         f"/api/sessions/{session_id}/speaker-observations/"
@@ -274,10 +275,75 @@ def test_manual_speaker_observation_can_link_existing_or_new_profile(
         "display_name"
     ] == "Charlie Global"
     created_profile_id = new_profile.json()["profile_id"]
+    assert new_profile.json()["profile"]["embedding_count"] == 1
     assert persistence.load_speaker_embeddings(
         created_profile_id,
         model_name="test-embedding",
     )[0]["embedding"] == [0.0, 1.0]
+
+
+def test_persist_job_speaker_embeddings_stores_local_references(tmp_path, monkeypatch):
+    setup_speaker_session(tmp_path, monkeypatch)
+
+    main.persist_job_speaker_embeddings(
+        "job-speakers",
+        [
+            main.LocalSpeakerEmbedding(
+                local_speaker_id="SPEAKER_00",
+                embedding=[1.0, 0.0],
+                model_name="test-embedding",
+                quality=0.75,
+                reference_embeddings=[[1.0, 0.0], [0.98, 0.02]],
+                quality_metadata={"total_seconds": 12.0},
+            )
+        ],
+    )
+
+    stored = persistence.load_job_speaker_embedding(
+        "job-speakers",
+        "SPEAKER_00",
+        model_name="test-embedding",
+    )
+    assert stored["embedding"] == [1.0, 0.0]
+    assert stored["quality"] == 0.75
+    assert stored["quality_metadata"]["total_seconds"] == 12.0
+    assert stored["quality_metadata"]["reference_embeddings"] == [
+        [1.0, 0.0],
+        [0.98, 0.02],
+    ]
+
+
+def test_new_session_matches_against_stored_profile_embeddings(tmp_path, monkeypatch):
+    session_id = setup_speaker_session(tmp_path, monkeypatch, session_id="session-new")
+    profile = persistence.create_speaker_profile("Alice Global", profile_id="alice")
+    persistence.save_speaker_embedding(
+        profile["profile_id"],
+        [1.0, 0.0],
+        model_name="test-embedding",
+        quality=0.9,
+    )
+
+    main.create_speaker_suggestion_observations(
+        job_id="job-speakers",
+        session_id=session_id,
+        speaker_memory_opt_in=True,
+        local_embeddings=[
+            main.LocalSpeakerEmbedding(
+                local_speaker_id="SPEAKER_00",
+                embedding=[0.99, 0.01],
+                model_name="test-embedding",
+                quality=0.8,
+            )
+        ],
+    )
+
+    observations = persistence.load_speaker_observations(
+        session_id=session_id,
+        status="suggested",
+    )
+    assert len(observations) == 1
+    assert observations[0]["local_speaker_id"] == "SPEAKER_00"
+    assert observations[0]["profile_id"] == "alice"
 
 
 def test_accepted_speaker_observation_can_be_unassigned_and_corrected(
@@ -524,6 +590,99 @@ def test_speaker_match_diagnostics_report_no_profile_and_below_threshold(
     assert by_speaker["SPEAKER_00"]["reason_code"] == "below_threshold"
     assert by_speaker["SPEAKER_00"]["best_profile_id"] == "alice"
     assert by_speaker["SPEAKER_01"]["reason_code"] == "embedding_model_unavailable"
+
+
+def test_speaker_match_diagnostics_report_insufficient_audio_when_model_is_loaded(
+    tmp_path, monkeypatch
+):
+    session_id = setup_speaker_session(tmp_path, monkeypatch)
+    monkeypatch.setenv("SPEAKER_EMBEDDING_MIN_SECONDS", "8.0")
+    monkeypatch.setattr(
+        main,
+        "speaker_embedding_diagnostics",
+        lambda session_id=None: main.SpeakerEmbeddingDiagnosticsResponse(
+            enabled=True,
+            loaded=True,
+            model_name="test-embedding",
+            profile_embedding_count=0,
+        ),
+    )
+    client = TestClient(main.app)
+
+    response = client.get(
+        f"/api/sessions/{session_id}/speaker-match-diagnostics"
+    )
+
+    assert response.status_code == 200
+    by_speaker = {item["local_speaker_id"]: item for item in response.json()}
+    assert by_speaker["SPEAKER_00"]["reason_code"] == "insufficient_speaker_audio"
+    assert by_speaker["SPEAKER_00"]["reason"] == "zu wenig qualifiziertes Sprecher-Audio"
+
+
+def test_speaker_embedding_diagnostics_include_counts_and_session_quality(
+    tmp_path, monkeypatch
+):
+    session_id = setup_speaker_session(tmp_path, monkeypatch)
+    persistence.create_speaker_profile("Alice Global", profile_id="alice")
+    persistence.save_speaker_embedding(
+        "alice",
+        [1.0, 0.0],
+        model_name="test-embedding",
+        quality=0.9,
+    )
+    persistence.save_job_speaker_embedding(
+        job_id="job-speakers",
+        local_speaker_id="SPEAKER_00",
+        embedding=[1.0, 0.0],
+        model_name="test-embedding",
+        quality=0.8,
+        quality_metadata={
+            "total_seconds": 12.5,
+            "selected_segment_count": 3,
+            "candidate_segment_count": 4,
+            "excluded_short_count": 1,
+            "excluded_overlap_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        main.app.state,
+        "models",
+        type(
+            "Models",
+            (),
+            {
+                "speaker_embedding_inference": object(),
+                "speaker_embedding_model_name": "test-embedding",
+                "speaker_embedding_attempted_models": ("test-embedding",),
+                "speaker_embedding_error": None,
+            },
+        )(),
+        raising=False,
+    )
+    client = TestClient(main.app)
+
+    response = client.get(
+        f"/api/speaker-embeddings/diagnostics?session_id={session_id}"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    assert body["loaded"] is True
+    assert body["model_name"] == "test-embedding"
+    assert body["job_speaker_embedding_count"] == 1
+    assert body["profile_embedding_count"] == 1
+    assert body["profiles"] == [
+        {
+            "profile_id": "alice",
+            "display_name": "Alice Global",
+            "embedding_count": 1,
+        }
+    ]
+    by_speaker = {item["local_speaker_id"]: item for item in body["local_speakers"]}
+    assert by_speaker["SPEAKER_00"]["embedding_available"] is True
+    assert by_speaker["SPEAKER_00"]["total_seconds"] == 12.5
+    assert by_speaker["SPEAKER_01"]["embedding_available"] is False
 
 
 def test_speaker_observation_errors_are_reported_cleanly(tmp_path, monkeypatch):
