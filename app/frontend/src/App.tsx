@@ -635,12 +635,15 @@ export default function App() {
     setPipelineJob(null);
 
     try {
+      const submittedTops = skipAgendaDetection
+        ? []
+        : tops.map((top) => top.trim()).filter(Boolean);
       const preparedSession = await saveSession(
         buildSessionPayload({
           current_step: 1,
           transcript: [],
           assignments: [],
-          tops: skipAgendaDetection || autoDetectTopsFromPdf ? [] : tops,
+          tops: submittedTops,
           summaries: {},
           summary_reviews: {},
         })
@@ -685,9 +688,7 @@ export default function App() {
         setAudioUrl(withApiBase(completedJob.audio_url));
       }
 
-      const knownTops = skipAgendaDetection || autoDetectTopsFromPdf
-        ? []
-        : tops.map((top) => top.trim()).filter(Boolean);
+      const knownTops = submittedTops;
       if (skipAgendaDetection) {
         setSkippedAssignment(true);
         setTops([]);
@@ -899,12 +900,17 @@ export default function App() {
     setDirectProtocolAvailable(false);
 
     try {
+      const submittedTops = skipAgendaDetection
+        ? []
+        : tops.map((top) => top.trim()).filter(Boolean);
+      const shouldAutoDetectTopsFromPdf =
+        autoDetectTopsFromPdf && submittedTops.length === 0;
       const preparedSession = await saveSession(
         buildSessionPayload({
           current_step: 1,
           transcript: [],
           assignments: [],
-          tops: skipAgendaDetection || autoDetectTopsFromPdf ? [] : tops,
+          tops: submittedTops,
           summaries: {},
           summary_reviews: {},
           skipped_assignment: skipAgendaDetection,
@@ -916,9 +922,9 @@ export default function App() {
 
       const pipeline = await apiStartPipeline(audioFile, {
         sessionId: activeSessionId,
-        tops: skipAgendaDetection || autoDetectTopsFromPdf ? [] : tops,
+        tops: submittedTops,
         pdfFile,
-        autoDetectTopsFromPdf,
+        autoDetectTopsFromPdf: shouldAutoDetectTopsFromPdf,
         model: llmSettings.model,
         systemPrompt: llmSettings.systemPrompt,
         rememberSpeakers,

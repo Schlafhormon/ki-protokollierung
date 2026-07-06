@@ -171,7 +171,7 @@ describe('App pipeline flow', () => {
         expect.any(File),
         expect.objectContaining({
           sessionId: 'session-1',
-          tops: ['', '', ''],
+          tops: [],
           pdfFile: null,
           model: expect.any(String),
         })
@@ -203,6 +203,32 @@ describe('App pipeline flow', () => {
           pdfFile: pdf,
           autoDetectTopsFromPdf: true,
           skipAgendaDetection: false,
+        })
+      );
+    });
+  });
+
+  it('sends PDF-extracted TOPs to the pipeline instead of re-detecting them', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const audioInput = container.querySelector<HTMLInputElement>('input[type="file"][accept="audio/*"]');
+    const pdfInput = container.querySelector<HTMLInputElement>('input[accept=".pdf,application/pdf"]');
+    const pdf = new File(['pdf'], 'agenda.pdf', { type: 'application/pdf' });
+    vi.mocked(extractTOPsFromPDF).mockResolvedValue(['Eröffnung', 'Haushalt']);
+
+    await user.upload(audioInput!, new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
+    await user.upload(pdfInput!, pdf);
+    await screen.findByDisplayValue('Eröffnung');
+    await screen.findByDisplayValue('Haushalt');
+    await user.click(screen.getByRole('button', { name: /automatisch verarbeiten/i }));
+
+    await waitFor(() => {
+      expect(startPipeline).toHaveBeenCalledWith(
+        expect.any(File),
+        expect.objectContaining({
+          tops: ['Eröffnung', 'Haushalt'],
+          pdfFile: pdf,
+          autoDetectTopsFromPdf: false,
         })
       );
     });

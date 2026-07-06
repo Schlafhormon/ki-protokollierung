@@ -2024,7 +2024,7 @@ def detect_pipeline_agenda(
             "uncertain_count": 0,
         }
 
-    if pdf_path and options.get("auto_detect_tops_from_pdf"):
+    if not agenda_tops and pdf_path and options.get("auto_detect_tops_from_pdf"):
         try:
             extracted_tops = extract_tops_from_pdf(
                 pdf_path,

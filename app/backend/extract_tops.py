@@ -13,6 +13,7 @@ Configuration via environment variables:
 import logging
 import os
 import re
+import unicodedata
 from typing import Optional
 
 from summarize import get_llm_config
@@ -179,6 +180,7 @@ def parse_tops_response(response_text: str) -> list[str]:
     numbering_pattern = re.compile(
         r"^\s*(?:"
         r"(\d+\.)+|"  # Arabic numerals: 1., 1.1., 1.2.3.
+        r"(\d{1,3})\s+|"  # Arabic numerals without punctuation: 01 Title
         r"([IVX]+\.)|"  # Roman numerals: I., II., III., IV.
         r"(\d+\))|"  # Parenthetical: 1), 2)
         r"([a-z]\))"  # Letter: a), b)
@@ -189,25 +191,49 @@ def parse_tops_response(response_text: str) -> list[str]:
         line = line.strip()
         if not line:
             continue
+        if is_agenda_section_heading(line):
+            continue
 
         # Check if line starts with numbering
         match = numbering_pattern.match(line)
         if match:
             # Extract the title after the numbering
             title = line[match.end():].strip()
-            if title:
+            if title and not is_agenda_section_heading(title):
                 tops.append(title)
         elif line and not line.startswith(("●", "•", "-", "*", "–")):
             # Include non-numbered lines that aren't bullet points
             # (in case LLM returns titles without numbers)
             # But only if they look like titles (not too short, not metadata)
-            if len(line) > 5 and not any(
-                skip in line.lower()
-                for skip in ["beschlussvorlage", "antrag:", "drucksache", "seite"]
+            if (
+                len(line) > 5
+                and not is_agenda_section_heading(line)
+                and not any(
+                    skip in line.lower()
+                    for skip in ["beschlussvorlage", "antrag:", "drucksache", "seite"]
+                )
             ):
                 tops.append(line)
 
     return tops
+
+
+def is_agenda_section_heading(value: str) -> bool:
+    """Return true for agenda section labels, not actual agenda items."""
+    normalized = unicodedata.normalize("NFKD", value.lower().replace("ß", "ss"))
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^a-z0-9]+", " ", ascii_text).strip()
+    text = re.sub(r"^(?:top\s*)?(?:[ivx]+|\d+)\s+", "", text).strip()
+    return text in {
+        "offentlicher teil",
+        "offentliche teil",
+        "oeffentlicher teil",
+        "oeffentliche teil",
+        "nichtoffentlicher teil",
+        "nichtoffentliche teil",
+        "nichtoeffentlicher teil",
+        "nichtoeffentliche teil",
+    }
 
 
 def extract_tops_from_pdf(

@@ -16,7 +16,11 @@ from extract_tops import (
         ),
         (
             "I. Oeffentlicher Teil\nII. Nichtoeffentlicher Teil\n1) Verschiedenes",
-            ["Oeffentlicher Teil", "Nichtoeffentlicher Teil", "Verschiedenes"],
+            ["Verschiedenes"],
+        ),
+        (
+            "TOP I. Öffentlicher Teil\n01 Eröffnung\nTOP II. Nichtöffentlicher Teil\n02 Bestätigung",
+            ["Eröffnung", "Bestätigung"],
         ),
         (
             "Beschlussvorlage: 123/2026\nUnnummerierter TOP\n- nur ein Unterpunkt",
