@@ -49,7 +49,10 @@ def fake_openai_module(monkeypatch):
             return types.SimpleNamespace(
                 choices=[
                     types.SimpleNamespace(
-                        message=types.SimpleNamespace(content=content)
+                        message=types.SimpleNamespace(
+                            content=content,
+                            reasoning=self.owner.reasoning,
+                        )
                     )
                 ]
             )
@@ -72,6 +75,7 @@ def fake_openai_module(monkeypatch):
     class FakeOpenAI:
         instances = []
         content = ""
+        reasoning = ""
         responses = []
         models_response = ["qwen3:8b", "test-model"]
 
@@ -87,6 +91,7 @@ def fake_openai_module(monkeypatch):
 
     FakeOpenAI.instances = []
     FakeOpenAI.content = ""
+    FakeOpenAI.reasoning = ""
     FakeOpenAI.responses = []
     FakeOpenAI.models_response = ["qwen3:8b", "test-model"]
     module = types.ModuleType("openai")

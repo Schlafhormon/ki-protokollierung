@@ -105,7 +105,33 @@ def test_llm_invalid_boundaries_are_repaired(fake_openai_module):
     assert result.segments[0].uncertain
     assert result.segments[1].uncertain
     request = fake_openai_module.instances[0].calls[0]
-    assert request["messages"][0]["content"].startswith("/no_think\n")
+    assert not request["messages"][0]["content"].startswith("/no_think")
+
+
+def test_llm_reasoning_field_is_used_when_content_is_empty(fake_openai_module):
+    fake_openai_module.content = ""
+    fake_openai_module.reasoning = """
+    {"tops": [
+      {
+        "top_title": "Haushalt",
+        "start_index": 0,
+        "end_index": 1,
+        "confidence": 0.91,
+        "evidence_text": "TOP 1 Haushalt.",
+        "uncertain": false
+      }
+    ]}
+    """
+    transcript = [
+        TranscriptUtterance("MOD", "TOP 1 Haushalt."),
+        TranscriptUtterance("A", "Der Haushalt wird beraten."),
+    ]
+
+    result = detect_agenda_from_transcript(transcript, model="test-model")
+
+    assert result.strategy == "heuristic_transcript_llm"
+    assert result.tops == ["Haushalt"]
+    assert result.assignments == [0, 0]
 
 
 def test_fallback_without_llm_returns_reviewable_assignments():
@@ -161,8 +187,5 @@ def test_unknown_agenda_llm_detection_chunks_long_transcripts(
     assert "2: MOD" not in calls[0]["messages"][1]["content"]
 
 
-def test_build_agenda_detection_system_prompt_does_not_duplicate_no_think():
-    assert (
-        build_agenda_detection_system_prompt("/no_think\nNur JSON")
-        == "/no_think\nNur JSON"
-    )
+def test_build_agenda_detection_system_prompt_does_not_force_no_think():
+    assert build_agenda_detection_system_prompt("Nur JSON") == "Nur JSON"

@@ -45,7 +45,12 @@ AGENDA_DETECTION_CHUNK_LINES = int(
 AGENDA_DETECTION_CHUNK_OVERLAP_LINES = int(
     os.environ.get("AGENDA_DETECTION_CHUNK_OVERLAP_LINES", "12")
 )
-NO_THINK_DIRECTIVE = "/no_think"
+AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE = int(
+    os.environ.get("AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE", "4")
+)
+AGENDA_DETECTION_CONTEXT_WINDOW_AFTER = int(
+    os.environ.get("AGENDA_DETECTION_CONTEXT_WINDOW_AFTER", "8")
+)
 
 DEFAULT_AGENDA_DETECTION_PROMPT = """Du erkennst Tagesordnungspunkte (TOPs) und Segmentgrenzen in deutschen Sitzungstranskripten.
 
@@ -72,10 +77,7 @@ Regeln:
 
 
 def build_agenda_detection_system_prompt(system_prompt: str | None = None) -> str:
-    prompt = (system_prompt or DEFAULT_AGENDA_DETECTION_PROMPT).strip()
-    if prompt.startswith(NO_THINK_DIRECTIVE):
-        return prompt
-    return f"{NO_THINK_DIRECTIVE}\n{prompt}"
+    return (system_prompt or DEFAULT_AGENDA_DETECTION_PROMPT).strip()
 
 
 @dataclass(frozen=True)
@@ -377,8 +379,19 @@ def _detect_with_llm(
         temperature=0.1,
         max_tokens=2048,
     )
-    raw_response = response.choices[0].message.content or ""
+    raw_response = _llm_message_text(response.choices[0].message)
     return _parse_llm_segments(raw_response)
+
+
+def _llm_message_text(message: Any) -> str:
+    content = str(getattr(message, "content", "") or "").strip()
+    if content:
+        return content
+    for attribute in ("reasoning", "reasoning_content"):
+        value = str(getattr(message, attribute, "") or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _build_llm_user_prompt(
@@ -386,8 +399,10 @@ def _build_llm_user_prompt(
     tops: list[str] | None,
     heuristic_segments: list[AssignmentSegment],
 ) -> str:
-    indexed_transcript = "\n".join(
-        f"{index}: {line.speaker}: {line.text}" for index, line in enumerate(transcript)
+    indexed_transcript, compacted = _indexed_transcript_for_llm(
+        transcript,
+        tops=tops,
+        heuristic_segments=heuristic_segments,
     )
     heuristic_json = [
         {
@@ -403,8 +418,15 @@ def _build_llm_user_prompt(
 
     if tops:
         agenda = "\n".join(f"{index}: {top}" for index, top in enumerate(tops))
+        compact_note = (
+            "Das Transkript ist auf relevante Kontextfenster gekuerzt; "
+            "die angezeigten Indizes bleiben die originalen Transkriptindizes. "
+            if compacted
+            else ""
+        )
         task = (
             "Bekannte TOP-Liste. Pruefe und verbessere die Segmentgrenzen. "
+            f"{compact_note}"
             "Gib genau einen Eintrag pro TOP in derselben Reihenfolge zurueck.\n\n"
             f"TOPs:\n{agenda}"
         )
@@ -419,6 +441,65 @@ def _build_llm_user_prompt(
         f"Heuristische Voranalyse:\n{json.dumps(heuristic_json, ensure_ascii=False)}\n\n"
         f"Transkript:\n{indexed_transcript}"
     )
+
+
+def _indexed_transcript_for_llm(
+    transcript: list[TranscriptUtterance],
+    *,
+    tops: list[str] | None,
+    heuristic_segments: list[AssignmentSegment],
+) -> tuple[str, bool]:
+    if not tops or len(transcript) <= AGENDA_DETECTION_CHUNK_LINES:
+        return (
+            "\n".join(
+                f"{index}: {line.speaker}: {line.text}"
+                for index, line in enumerate(transcript)
+            ),
+            False,
+        )
+
+    selected = _compact_known_agenda_indices(transcript, heuristic_segments)
+    return (
+        "\n".join(
+            f"{index}: {transcript[index].speaker}: {transcript[index].text}"
+            for index in selected
+        ),
+        True,
+    )
+
+
+def _compact_known_agenda_indices(
+    transcript: list[TranscriptUtterance],
+    heuristic_segments: list[AssignmentSegment],
+) -> list[int]:
+    selected: set[int] = set()
+    last_index = len(transcript) - 1
+    if last_index < 0:
+        return []
+
+    selected.update(range(0, min(last_index + 1, AGENDA_DETECTION_CONTEXT_WINDOW_AFTER)))
+    selected.update(
+        range(
+            max(0, last_index - AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE + 1),
+            last_index + 1,
+        )
+    )
+
+    for segment in heuristic_segments:
+        for anchor in {segment.start_index, segment.end_index, segment.evidence_index}:
+            if anchor is None:
+                continue
+            start = max(0, anchor - AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE)
+            end = min(last_index, anchor + AGENDA_DETECTION_CONTEXT_WINDOW_AFTER)
+            selected.update(range(start, end + 1))
+
+    for index, line in enumerate(transcript):
+        if has_transition_phrase(line.text):
+            start = max(0, index - AGENDA_DETECTION_CONTEXT_WINDOW_BEFORE)
+            end = min(last_index, index + AGENDA_DETECTION_CONTEXT_WINDOW_AFTER)
+            selected.update(range(start, end + 1))
+
+    return sorted(selected)
 
 
 def _parse_llm_segments(response_text: str) -> list[_RawSegment]:
