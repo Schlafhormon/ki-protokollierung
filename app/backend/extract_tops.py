@@ -23,29 +23,25 @@ logger = logging.getLogger(__name__)
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
 LLM_BASE_URL = get_llm_config().base_url
 LLM_API_KEY = get_llm_config().api_key
+NO_THINK_DIRECTIVE = "/no_think"
 
-# Default system prompt for TOP extraction
-DEFAULT_EXTRACTION_PROMPT = """Du bist ein Experte für deutsche Kommunalverwaltung und analysierst Einladungen zu Ausschusssitzungen.
+# Default system prompt for TOP extraction. Keep this short: reasoning models can
+# otherwise spend the whole response budget on hidden reasoning and return no
+# message.content through Ollama's OpenAI-compatible endpoint.
+DEFAULT_EXTRACTION_PROMPT = """Du bist ein Extraktor. Antworte ohne Denken, ohne Erklärung, nur mit einer nummerierten Liste der Tagesordnungspunkte.
+Extrahiere aus der Einladung alle eigentlichen TOPs aus öffentlichem und nichtöffentlichem Teil.
+Ignoriere Abschnittsüberschriften wie "TOP I. Öffentlicher Teil" und "TOP II. Nichtöffentlicher Teil" als eigene TOPs.
+Ignoriere Bullet-Unterpunkte wie "- Fäkalienentsorgungssatzung - FES".
+Entferne Zusatzinfos wie "BE:", "Beschlussvorlage:", "Antrag:" oder "Drucksache:".
+Jeder TOP kommt auf eine eigene Zeile im Format: 1. Titel"""
 
-Deine Aufgabe ist es, alle Tagesordnungspunkte (TOPs) aus dem Dokument zu extrahieren.
 
-REGELN:
-- Extrahiere ALLE TOPs aus öffentlichen und nichtöffentlichen Teilen
-- Behalte die ursprüngliche Nummerierung bei (1., 2., 2.1., 2.2., etc.)
-- Gib NUR den TOP-Titel zurück, ohne Zusatzinfos wie:
-  - "Beschlussvorlage: XXX"
-  - "Antrag: XXX"
-  - "Drucksache: XXX"
-- Entferne Unterpunkte mit Aufzählungszeichen (●, •, -) - diese sind keine eigenständigen TOPs
-- Jeder TOP kommt auf eine eigene Zeile
-
-FORMAT DER AUSGABE:
-1. [Erster TOP-Titel]
-2. [Zweiter TOP-Titel]
-2.1. [Unter-TOP falls vorhanden]
-...
-
-Gib NUR die nummerierte Liste zurück, keine Erklärungen oder Einleitungen."""
+def build_extraction_system_prompt(system_prompt: Optional[str] = None) -> str:
+    """Return a prompt that keeps reasoning models from hiding the final answer."""
+    prompt = (system_prompt or DEFAULT_EXTRACTION_PROMPT).strip()
+    if prompt.startswith(NO_THINK_DIRECTIVE):
+        return prompt
+    return f"{NO_THINK_DIRECTIVE}\n{prompt}"
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
@@ -119,7 +115,7 @@ def extract_tops_from_text(
 
     config = get_llm_config(model)
     actual_model = config.model
-    actual_system_prompt = system_prompt or DEFAULT_EXTRACTION_PROMPT
+    actual_system_prompt = build_extraction_system_prompt(system_prompt)
 
     logger.info(f"Extracting TOPs using model: {actual_model}")
 

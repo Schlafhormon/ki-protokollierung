@@ -1,6 +1,10 @@
 import pytest
 
-from extract_tops import extract_tops_from_text, parse_tops_response
+from extract_tops import (
+    build_extraction_system_prompt,
+    extract_tops_from_text,
+    parse_tops_response,
+)
 
 
 @pytest.mark.parametrize(
@@ -42,6 +46,10 @@ def test_extract_tops_from_text_uses_openai_client_and_parses_response(fake_open
     assert request["temperature"] == 0.1
     assert request["messages"][0] == {
         "role": "system",
-        "content": "Nur TOPs extrahieren",
+        "content": "/no_think\nNur TOPs extrahieren",
     }
     assert "Einladung zur Sitzung" in request["messages"][1]["content"]
+
+
+def test_build_extraction_system_prompt_does_not_duplicate_no_think():
+    assert build_extraction_system_prompt("/no_think\nNur TOPs") == "/no_think\nNur TOPs"
