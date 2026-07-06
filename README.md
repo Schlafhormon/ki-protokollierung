@@ -116,8 +116,8 @@ chmod +x ./setup.sh
 
 Der Build-Befehl prüft Docker, erkennt optional eine NVIDIA-GPU, baut lokale
 Docker-Images aus diesem Repository und startet Frontend, Backend und Ollama per
-Docker Compose. Wenn bereits Container vorhanden sind, fragt das Skript vor dem
-Neuerstellen nach.
+Docker Compose. Wenn bereits Container vorhanden sind, entfernt das Skript diese
+automatisch vor dem Neuerstellen.
 
 Nach erfolgreichem Start ist die Anwendung erreichbar unter:
 
@@ -143,14 +143,16 @@ oder unter macOS/Linux:
 | --- | --- | --- |
 | Lokale Images bauen und Container neu erstellen | `.\setup.ps1 build` | `./setup.sh build` |
 | Vorhandene Container ohne Neubau starten | `.\setup.ps1 start` oder `.\setup.ps1` | `./setup.sh start` oder `./setup.sh` |
-| Stoppen | `.\setup.ps1 stop` | `./setup.sh stop` |
+| Stoppen, Container behalten | `.\setup.ps1 stop` | `./setup.sh stop` |
+| Stoppen und Container entfernen | `.\setup.ps1 remove` | `./setup.sh remove` |
 | Status prüfen | `.\setup.ps1 status` | `./setup.sh status` |
 | Neustart | `.\setup.ps1 restart` | `./setup.sh restart` |
 | Logs anzeigen | `.\setup.ps1 logs` | `./setup.sh logs` |
 | Daten löschen und neu starten | `.\setup.ps1 cleanup` | `./setup.sh cleanup` |
 
 Nach Änderungen im Repository führen Sie `build` aus. Das baut Frontend und
-Backend neu und erstellt die Container neu. Die Modell-Volumes bleiben
+Backend neu, entfernt vorhandene Container automatisch und erstellt die Container
+neu. Die Modell-Volumes bleiben
 standardmäßig erhalten; fehlende Modelle oder Modelle, die sich durch geänderte
 Konfiguration ergeben, werden beim Start nachgeladen. Nur wenn Sie die Frage zum
 Behalten der Modell-Volumes ausdrücklich mit `n` beantworten, werden die Modelle
@@ -300,7 +302,7 @@ Windows:
 .\setup.ps1 build
 ```
 
-Das Skript fragt, wenn bereits Container vorhanden sind. Modell-Volumes werden
+Das Skript entfernt vorhandene Container automatisch. Modell-Volumes werden
 standardmäßig behalten, damit Ollama-, HuggingFace- und Torch-Modelle nicht bei
 jedem Backend-/Frontend-Build erneut heruntergeladen werden.
 

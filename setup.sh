@@ -6,7 +6,8 @@
 # Verwendung:
 # ./setup.sh build     # Lokale Images bauen und Container neu erstellen
 # ./setup.sh start     # Vorhandene Container starten
-# ./setup.sh stop      # Anwendung stoppen
+# ./setup.sh stop      # Anwendung stoppen, Container behalten
+# ./setup.sh remove    # Container stoppen und entfernen
 # ./setup.sh status    # Status anzeigen
 # ./setup.sh restart   # Anwendung neu starten
 # ./setup.sh logs      # Live-Logs anzeigen
@@ -131,7 +132,8 @@ show_help() {
     echo "  (ohne)      Vorhandene Container starten"
     echo "  start       Vorhandene Container starten, ohne neu zu bauen"
     echo "  build       Lokale Images neu bauen und Container neu erstellen"
-    echo "  stop        Anwendung stoppen"
+    echo "  stop        Anwendung stoppen, Container bleiben erhalten"
+    echo "  remove      Anwendung stoppen und Container entfernen"
     echo "  status      Status der Dienste anzeigen"
     echo "  restart     Anwendung neu starten"
     echo "  logs        Live-Logs anzeigen (Strg+C zum Beenden)"
@@ -176,7 +178,7 @@ volume_exists() {
     docker volume inspect "$1" >/dev/null 2>&1
 }
 
-confirm_rebuild_existing_containers() {
+remove_existing_containers_for_rebuild() {
     local containers
     containers=$(docker compose ps -a -q 2>/dev/null)
     if [ -z "$containers" ]; then
@@ -188,14 +190,9 @@ confirm_rebuild_existing_containers() {
     echo ""
     docker compose ps -a 2>/dev/null
     echo ""
-    echo "Beim Build werden die Container neu erstellt. Modell-Volumes bleiben erhalten,"
-    echo "solange Sie spaeter nicht ausdruecklich das Neuladen der Modelle waehlen."
-    read -p "Container neu erstellen? (j/N): " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Jj]$ ]]; then
-        echo "Abgebrochen."
-        return 1
-    fi
+    echo "Beim Build werden die vorhandenen Container automatisch entfernt."
+    echo "Modell-Volumes bleiben erhalten, solange Sie spaeter nicht ausdruecklich"
+    echo "das Neuladen der Modelle waehlen."
 
     info "Stoppe und entferne vorhandene Container (Volumes bleiben erhalten)..."
     docker compose down --remove-orphans >/dev/null 2>&1
@@ -854,6 +851,7 @@ show_success_message() {
     echo ""
     echo "Nuetzliche Befehle:"
     echo "  ./setup.sh stop      Anwendung stoppen"
+    echo "  ./setup.sh remove    Container entfernen"
     echo "  ./setup.sh status    Status anzeigen"
     echo "  ./setup.sh logs      Logs anzeigen"
     echo ""
@@ -885,7 +883,7 @@ do_build() {
 
     # Pre-flight checks
     check_docker || exit 1
-    confirm_rebuild_existing_containers || exit 1
+    remove_existing_containers_for_rebuild || exit 1
     check_disk_space || exit 1
     check_ram
     check_ports || exit 1
@@ -961,8 +959,27 @@ do_start() {
 do_stop() {
     echo ""
     info "Stoppe die Anwendung..."
-    docker compose down
+    docker compose stop
+    if [ $? -ne 0 ]; then
+        error "Anwendung konnte nicht gestoppt werden."
+        exit 1
+    fi
     success "Anwendung gestoppt"
+    echo ""
+}
+
+########################################
+# Stop and remove containers
+########################################
+do_remove() {
+    echo ""
+    info "Stoppe und entferne die Container..."
+    docker compose down --remove-orphans
+    if [ $? -ne 0 ]; then
+        error "Container konnten nicht entfernt werden."
+        exit 1
+    fi
+    success "Container entfernt"
     echo ""
 }
 
@@ -1086,6 +1103,9 @@ main() {
             ;;
         stop)
             do_stop
+            ;;
+        remove)
+            do_remove
             ;;
         status)
             do_status

@@ -5,7 +5,8 @@
 # Verwendung:
 #   .\setup.ps1 build     # Lokale Images bauen und Container neu erstellen
 #   .\setup.ps1 start     # Vorhandene Container starten
-#   .\setup.ps1 stop      # Anwendung stoppen
+#   .\setup.ps1 stop      # Anwendung stoppen, Container behalten
+#   .\setup.ps1 remove    # Container stoppen und entfernen
 #   .\setup.ps1 status    # Status anzeigen
 #   .\setup.ps1 restart   # Anwendung neu starten
 #   .\setup.ps1 logs      # Live-Logs anzeigen
@@ -115,7 +116,8 @@ function Show-Help {
     Write-Host "  (ohne)     Vorhandene Container starten"
     Write-Host "  start      Vorhandene Container starten, ohne neu zu bauen"
     Write-Host "  build      Lokale Images neu bauen und Container neu erstellen"
-    Write-Host "  stop       Anwendung stoppen"
+    Write-Host "  stop       Anwendung stoppen, Container bleiben erhalten"
+    Write-Host "  remove     Anwendung stoppen und Container entfernen"
     Write-Host "  status     Status der Dienste anzeigen"
     Write-Host "  restart    Anwendung neu starten"
     Write-Host "  logs       Live-Logs anzeigen (Strg+C zum Beenden)"
@@ -164,7 +166,7 @@ function Test-VolumeExists {
     return $LASTEXITCODE -eq 0
 }
 
-function Confirm-RebuildExistingContainers {
+function Remove-ExistingContainersForRebuild {
     $containers = docker compose ps -a -q 2>&1
     if (-not $containers -or $containers.Count -eq 0) {
         return $true
@@ -175,13 +177,9 @@ function Confirm-RebuildExistingContainers {
     Write-Host ""
     docker compose ps -a 2>&1
     Write-Host ""
-    Write-Host "Beim Build werden die Container neu erstellt. Modell-Volumes bleiben erhalten,"
-    Write-Host "solange Sie spaeter nicht ausdruecklich das Neuladen der Modelle waehlen."
-    $response = Read-Host "Container neu erstellen? (j/N)"
-    if ($response -notmatch "^[Jj]$") {
-        Write-Host "Abgebrochen."
-        return $false
-    }
+    Write-Host "Beim Build werden die vorhandenen Container automatisch entfernt."
+    Write-Host "Modell-Volumes bleiben erhalten, solange Sie spaeter nicht ausdruecklich"
+    Write-Host "das Neuladen der Modelle waehlen."
 
     Write-Info "Stoppe und entferne vorhandene Container (Volumes bleiben erhalten)..."
     docker compose down --remove-orphans 2>&1 | Out-Null
@@ -831,6 +829,7 @@ function Show-SuccessMessage {
     Write-Host ""
     Write-Host "Nuetzliche Befehle:"
     Write-Host "  .\setup.ps1 stop      Anwendung stoppen"
+    Write-Host "  .\setup.ps1 remove    Container entfernen"
     Write-Host "  .\setup.ps1 status    Status anzeigen"
     Write-Host "  .\setup.ps1 logs      Logs anzeigen"
     Write-Host ""
@@ -857,7 +856,7 @@ function Invoke-Build {
         exit 1
     }
 
-    if (-not (Confirm-RebuildExistingContainers)) {
+    if (-not (Remove-ExistingContainersForRebuild)) {
         exit 1
     }
 
@@ -962,8 +961,27 @@ function Invoke-Start {
 function Invoke-Stop {
     Write-Host ""
     Write-Info "Stoppe die Anwendung..."
-    docker compose down
+    docker compose stop
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Anwendung konnte nicht gestoppt werden."
+        exit 1
+    }
     Write-Success "Anwendung gestoppt"
+    Write-Host ""
+}
+
+#######################################
+# Stop and remove containers
+#######################################
+function Invoke-Remove {
+    Write-Host ""
+    Write-Info "Stoppe und entferne die Container..."
+    docker compose down --remove-orphans
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Container konnten nicht entfernt werden."
+        exit 1
+    }
+    Write-Success "Container entfernt"
     Write-Host ""
 }
 
@@ -1093,6 +1111,9 @@ switch ($Command.ToLower()) {
     }
     "stop" {
         Invoke-Stop
+    }
+    "remove" {
+        Invoke-Remove
     }
     "status" {
         Show-Status
