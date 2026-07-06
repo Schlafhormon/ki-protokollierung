@@ -116,6 +116,7 @@ export interface PipelineStartOptions {
   sessionId?: string | null;
   tops?: string[];
   pdfFile?: File | null;
+  autoDetectTopsFromPdf?: boolean;
   model?: string;
   systemPrompt?: string;
   rememberSpeakers?: boolean;
@@ -287,6 +288,8 @@ export interface UploadStepProps {
   setRememberSpeakers: (enabled: boolean) => void;
   skipAgendaDetection: boolean;
   setSkipAgendaDetection: (enabled: boolean) => void;
+  autoDetectTopsFromPdf: boolean;
+  setAutoDetectTopsFromPdf: (enabled: boolean) => void;
 }
 
 export interface ProcessingStepProps {

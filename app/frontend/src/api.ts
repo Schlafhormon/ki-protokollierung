@@ -144,6 +144,10 @@ export async function startPipeline(
   }
   formData.append("remember_speakers", String(Boolean(options.rememberSpeakers)));
   formData.append("skip_agenda_detection", String(Boolean(options.skipAgendaDetection)));
+  formData.append(
+    "auto_detect_tops_from_pdf",
+    String(Boolean(options.autoDetectTopsFromPdf))
+  );
 
   const response = await fetch(`${API_BASE}/api/pipeline/start`, {
     method: "POST",

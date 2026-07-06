@@ -22,6 +22,8 @@ const defaultProps: UploadStepProps = {
   setRememberSpeakers: vi.fn(),
   skipAgendaDetection: false,
   setSkipAgendaDetection: vi.fn(),
+  autoDetectTopsFromPdf: false,
+  setAutoDetectTopsFromPdf: vi.fn(),
 };
 
 function renderUploadStep(overrides: Partial<UploadStepProps> = {}) {
@@ -61,6 +63,8 @@ describe('UploadStep', () => {
         setRememberSpeakers={vi.fn()}
         skipAgendaDetection={false}
         setSkipAgendaDetection={vi.fn()}
+        autoDetectTopsFromPdf={false}
+        setAutoDetectTopsFromPdf={vi.fn()}
       />,
     );
 
@@ -88,6 +92,40 @@ describe('UploadStep', () => {
     expect(await screen.findByText(/2 TOPs erfolgreich extrahiert/i)).toBeInTheDocument();
   });
 
+  it('keeps a PDF for pipeline extraction without extracting TOPs immediately in auto-PDF mode', async () => {
+    const setPdfFile = vi.fn();
+    const { container } = renderUploadStep({
+      autoDetectTopsFromPdf: true,
+      setPdfFile,
+    });
+
+    const input = container.querySelector<HTMLInputElement>('input[accept=".pdf,application/pdf"]');
+    expect(input).not.toBeNull();
+    const pdf = new File(['pdf'], 'einladung.pdf', { type: 'application/pdf' });
+
+    fireEvent.change(input!, { target: { files: [pdf] } });
+
+    await waitFor(() => {
+      expect(setPdfFile).toHaveBeenCalledWith(pdf);
+    });
+    expect(extractTOPsFromPDF).not.toHaveBeenCalled();
+    expect(screen.queryByText(/erfolgreich extrahiert/i)).not.toBeInTheDocument();
+  });
+
+  it('enables pipeline PDF detection separately from skip agenda detection', async () => {
+    const user = userEvent.setup();
+    const setAutoDetectTopsFromPdf = vi.fn();
+    const setSkipAgendaDetection = vi.fn();
+    renderUploadStep({ setAutoDetectTopsFromPdf, setSkipAgendaDetection });
+
+    await user.click(screen.getByRole('checkbox', {
+      name: /TOPs automatisch aus PDF erkennen und direkt verarbeiten/i,
+    }));
+
+    expect(setAutoDetectTopsFromPdf).toHaveBeenCalledWith(true);
+    expect(setSkipAgendaDetection).toHaveBeenCalledWith(false);
+  });
+
   it('can explicitly continue without TOPs or automatic TOP detection', async () => {
     const user = userEvent.setup();
     const setTops = vi.fn();
@@ -99,6 +137,7 @@ describe('UploadStep', () => {
     }));
 
     expect(setSkipAgendaDetection).toHaveBeenCalledWith(true);
+    expect(defaultProps.setAutoDetectTopsFromPdf).toHaveBeenCalledWith(false);
     expect(setTops).toHaveBeenCalledWith([]);
   });
 

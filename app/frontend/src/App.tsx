@@ -273,6 +273,7 @@ export default function App() {
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [skippedAssignment, setSkippedAssignment] = useState(false);
   const [skipAgendaDetection, setSkipAgendaDetection] = useState(false);
+  const [autoDetectTopsFromPdf, setAutoDetectTopsFromPdf] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [pipelineJob, setPipelineJob] = useState<PipelineJob | null>(null);
@@ -387,6 +388,7 @@ export default function App() {
     setAudioUrl(withApiBase(session.audio_url));
     setAudioFile(null);
     setPdfFile(null);
+    setAutoDetectTopsFromPdf(false);
     setPipelineId((session as SessionDraft).pipeline_id ?? null);
     setPipelineJob(null);
     setPipelineNotice(null);
@@ -470,6 +472,7 @@ export default function App() {
     setSpeakerNames({});
     setSkippedAssignment(false);
     setSkipAgendaDetection(false);
+    setAutoDetectTopsFromPdf(false);
     setIsGeneratingSummary(false);
     setIsProcessing(false);
     setProcessingError(null);
@@ -637,7 +640,7 @@ export default function App() {
           current_step: 1,
           transcript: [],
           assignments: [],
-          tops: tops,
+          tops: skipAgendaDetection || autoDetectTopsFromPdf ? [] : tops,
           summaries: {},
           summary_reviews: {},
         })
@@ -682,7 +685,7 @@ export default function App() {
         setAudioUrl(withApiBase(completedJob.audio_url));
       }
 
-      const knownTops = skipAgendaDetection
+      const knownTops = skipAgendaDetection || autoDetectTopsFromPdf
         ? []
         : tops.map((top) => top.trim()).filter(Boolean);
       if (skipAgendaDetection) {
@@ -901,7 +904,7 @@ export default function App() {
           current_step: 1,
           transcript: [],
           assignments: [],
-          tops: skipAgendaDetection ? [] : tops,
+          tops: skipAgendaDetection || autoDetectTopsFromPdf ? [] : tops,
           summaries: {},
           summary_reviews: {},
           skipped_assignment: skipAgendaDetection,
@@ -913,8 +916,9 @@ export default function App() {
 
       const pipeline = await apiStartPipeline(audioFile, {
         sessionId: activeSessionId,
-        tops,
+        tops: skipAgendaDetection || autoDetectTopsFromPdf ? [] : tops,
         pdfFile,
+        autoDetectTopsFromPdf,
         model: llmSettings.model,
         systemPrompt: llmSettings.systemPrompt,
         rememberSpeakers,
@@ -1305,6 +1309,8 @@ export default function App() {
           setRememberSpeakers={setRememberSpeakers}
           skipAgendaDetection={skipAgendaDetection}
           setSkipAgendaDetection={setSkipAgendaDetection}
+          autoDetectTopsFromPdf={autoDetectTopsFromPdf}
+          setAutoDetectTopsFromPdf={setAutoDetectTopsFromPdf}
         />
       ) : currentStep === 2 ? (
         <AssignmentStep

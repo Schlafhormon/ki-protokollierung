@@ -695,6 +695,86 @@ def test_pipeline_runs_to_reviewable_result_and_persists_status_after_cache_clea
         assert "Manuell korrigierte Zusammenfassung." in export_response.text
 
 
+def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypatch):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+    extracted_calls = []
+
+    def fake_transcribe(file_path, models, progress_callback=None):
+        return FakeTranscriptionResult(
+            transcript=[
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Ich eröffne TOP 1 Haushalt.",
+                    "start": 0.0,
+                    "end": 2.0,
+                },
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Kommen wir zu TOP 2 Schulbau.",
+                    "start": 2.0,
+                    "end": 4.0,
+                },
+            ],
+            audio_duration_seconds=4.0,
+        )
+
+    def fake_extract_tops_from_pdf(pdf_path, model=None, system_prompt=None):
+        extracted_calls.append(
+            {
+                "pdf_path": pdf_path,
+                "model": model,
+                "system_prompt": system_prompt,
+            }
+        )
+        return ["TOP 1 Haushalt", "TOP 2 Schulbau"]
+
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None):
+        return summarize.SummarizationResult(
+            summary=f"Zusammenfassung {top_title}",
+            duration_seconds=0.01,
+            structured=summarize.StructuredSummary(
+                discussion=[f"{top_title} wurde beraten."]
+            ),
+        )
+
+    monkeypatch.setattr(main, "transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(main, "extract_tops_from_pdf", fake_extract_tops_from_pdf)
+    monkeypatch.setattr(main, "summarize_segment", fake_summarize_segment)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/pipeline/start",
+            data={
+                "session_id": "pipeline-pdf-session",
+                "model": "fake-llm",
+                "auto_detect_tops_from_pdf": "true",
+            },
+            files={
+                "audio": ("meeting.mp3", b"audio", "audio/mpeg"),
+                "pdf": ("agenda.pdf", b"%PDF-1.4", "application/pdf"),
+            },
+        )
+
+        assert response.status_code == 200
+        pipeline_id = response.json()["pipeline_id"]
+
+        assert wait_until(
+            lambda: client.get(f"/api/pipeline/{pipeline_id}").json()["stage"]
+            == "ready_for_review"
+        )
+        result = client.get(f"/api/pipeline/{pipeline_id}/result").json()
+
+    assert extracted_calls
+    assert extracted_calls[0]["model"] == "fake-llm"
+    assert result["session"]["tops"] == ["TOP 1 Haushalt", "TOP 2 Schulbau"]
+    assert result["session"]["assignments"] == [0, 1]
+    assert result["session"]["summaries"]["0"] == "Zusammenfassung TOP 1 Haushalt"
+    assert result["agenda_detection"]["tops"] == ["TOP 1 Haushalt", "TOP 2 Schulbau"]
+    assert result["agenda_detection"]["assignments"] == [0, 1]
+    assert result["agenda_detection"]["segments"][0]["top_title"] == "TOP 1 Haushalt"
+    assert result["agenda_detection"]["uncertain_count"] == 0
+
+
 def test_pipeline_falls_back_to_full_conversation_when_agenda_detection_fails(
     tmp_path, monkeypatch
 ):

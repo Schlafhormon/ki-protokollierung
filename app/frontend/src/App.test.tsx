@@ -5,6 +5,7 @@ import App from './App';
 import {
   checkBackendHealth,
   detectAgenda,
+  extractTOPsFromPDF,
   generateSummary,
   getPipelineResult,
   getPipelineStatus,
@@ -173,6 +174,35 @@ describe('App pipeline flow', () => {
           tops: ['', '', ''],
           pdfFile: null,
           model: expect.any(String),
+        })
+      );
+    });
+  });
+
+  it('starts auto-PDF processing without requiring immediate TOP extraction', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const audioInput = container.querySelector<HTMLInputElement>('input[type="file"][accept="audio/*"]');
+    const pdfInput = container.querySelector<HTMLInputElement>('input[accept=".pdf,application/pdf"]');
+    const pdf = new File(['pdf'], 'agenda.pdf', { type: 'application/pdf' });
+
+    await user.click(screen.getByRole('checkbox', {
+      name: /TOPs automatisch aus PDF erkennen und direkt verarbeiten/i,
+    }));
+    await user.upload(audioInput!, new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
+    await user.upload(pdfInput!, pdf);
+    await user.click(screen.getByRole('button', { name: /automatisch verarbeiten/i }));
+
+    await waitFor(() => {
+      expect(extractTOPsFromPDF).not.toHaveBeenCalled();
+      expect(startPipeline).toHaveBeenCalledWith(
+        expect.any(File),
+        expect.objectContaining({
+          sessionId: 'session-1',
+          tops: [],
+          pdfFile: pdf,
+          autoDetectTopsFromPdf: true,
+          skipAgendaDetection: false,
         })
       );
     });

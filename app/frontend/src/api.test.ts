@@ -82,6 +82,7 @@ describe('api session client', () => {
       model: 'qwen3:8b',
       systemPrompt: 'Prompt',
       rememberSpeakers: true,
+      autoDetectTopsFromPdf: true,
     });
 
     const body = fetchMock.mock.calls[0]![1]!.body as FormData;
@@ -95,6 +96,7 @@ describe('api session client', () => {
     expect(body.get('system_prompt')).toBe('Prompt');
     expect(body.get('remember_speakers')).toBe('true');
     expect(body.get('skip_agenda_detection')).toBe('false');
+    expect(body.get('auto_detect_tops_from_pdf')).toBe('true');
     expect(body.get('audio')).toBeInstanceOf(File);
     expect(body.get('pdf')).toBeInstanceOf(File);
     expect(body.get('transcript')).toBeNull();

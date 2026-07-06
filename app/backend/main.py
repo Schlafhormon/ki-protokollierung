@@ -2024,7 +2024,7 @@ def detect_pipeline_agenda(
             "uncertain_count": 0,
         }
 
-    if pdf_path:
+    if pdf_path and options.get("auto_detect_tops_from_pdf"):
         try:
             extracted_tops = extract_tops_from_pdf(
                 pdf_path,
@@ -2477,6 +2477,7 @@ async def start_pipeline(
     system_prompt: Optional[str] = Form(None),
     remember_speakers: bool = Form(False),
     skip_agenda_detection: bool = Form(False),
+    auto_detect_tops_from_pdf: bool = Form(False),
 ):
     """Start an unattended upload-to-review pipeline job."""
     if (
@@ -2505,10 +2506,12 @@ async def start_pipeline(
     if system_prompt:
         parsed_options["system_prompt"] = system_prompt
     parsed_options["skip_agenda_detection"] = skip_agenda_detection
+    parsed_options["auto_detect_tops_from_pdf"] = auto_detect_tops_from_pdf
     known_tops = parse_pipeline_tops(tops)
     if skip_agenda_detection:
         known_tops = []
         pdf = None
+        parsed_options["auto_detect_tops_from_pdf"] = False
 
     safe_audio_filename = normalize_upload_filename(
         audio.filename,

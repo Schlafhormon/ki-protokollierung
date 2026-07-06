@@ -15,6 +15,8 @@ export default function UploadStep({
   setRememberSpeakers,
   skipAgendaDetection,
   setSkipAgendaDetection,
+  autoDetectTopsFromPdf,
+  setAutoDetectTopsFromPdf,
 }: UploadStepProps) {
   const audioInputRef = useRef<HTMLInputElement>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
@@ -74,7 +76,12 @@ export default function UploadStep({
       const file = e.dataTransfer.files[0];
       if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
         setPdfFile(file);
-        await extractTopsFromFile(file);
+        if (autoDetectTopsFromPdf) {
+          setExtractionError(null);
+          setExtractedCount(null);
+        } else {
+          await extractTopsFromFile(file);
+        }
       }
     }
   };
@@ -83,7 +90,12 @@ export default function UploadStep({
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
       setPdfFile(file);
-      await extractTopsFromFile(file);
+      if (autoDetectTopsFromPdf) {
+        setExtractionError(null);
+        setExtractedCount(null);
+      } else {
+        await extractTopsFromFile(file);
+      }
     }
     // Reset the input so the same file can be selected again
     e.target.value = '';
@@ -103,6 +115,7 @@ export default function UploadStep({
         // Replace empty TOPs with extracted ones, but keep user-entered ones
         setTops(extractedTops);
         setSkipAgendaDetection(false);
+        setAutoDetectTopsFromPdf(false);
         setExtractedCount(extractedTops.length);
       } else {
         setExtractionError('Keine TOPs im PDF gefunden. Bitte manuell eingeben.');
@@ -119,6 +132,7 @@ export default function UploadStep({
   const addTop = () => {
     setTops([...(tops.length ? tops : []), '']);
     setSkipAgendaDetection(false);
+    setAutoDetectTopsFromPdf(false);
     setExtractedCount(null); // Clear success message when user modifies
   };
 
@@ -128,6 +142,7 @@ export default function UploadStep({
     setTops(newTops);
     if (value.trim()) {
       setSkipAgendaDetection(false);
+      setAutoDetectTopsFromPdf(false);
     }
     setExtractedCount(null); // Clear success message when user modifies
   };
@@ -138,6 +153,7 @@ export default function UploadStep({
     } else {
       setTops([]);
       setSkipAgendaDetection(true);
+      setAutoDetectTopsFromPdf(false);
     }
     setExtractedCount(null); // Clear success message when user modifies
   };
@@ -145,6 +161,7 @@ export default function UploadStep({
   const clearAllTops = () => {
     setTops([]);
     setSkipAgendaDetection(true);
+    setAutoDetectTopsFromPdf(false);
     setExtractedCount(null);
     setExtractionError(null);
   };
@@ -288,7 +305,9 @@ export default function UploadStep({
                     PDF-Einladung hochladen
                   </p>
                   <p className="text-gray-400 text-sm">
-                    TOPs werden automatisch extrahiert
+                    {autoDetectTopsFromPdf
+                      ? 'PDF wird in der Pipeline ausgewertet'
+                      : 'TOPs werden automatisch extrahiert'}
                   </p>
                 </div>
               </div>
@@ -348,6 +367,31 @@ export default function UploadStep({
           <p className="mt-3 text-sm text-gray-500">
             TOPs können auch automatisch aus dem Transkript erkannt werden.
           </p>
+          <label className="mt-3 flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm">
+            <input
+              type="checkbox"
+              checked={autoDetectTopsFromPdf}
+              onChange={(event) => {
+                const enabled = event.target.checked;
+                setAutoDetectTopsFromPdf(enabled);
+                if (enabled) {
+                  setSkipAgendaDetection(false);
+                  setExtractionError(null);
+                  setExtractedCount(null);
+                }
+              }}
+              disabled={skipAgendaDetection}
+              className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-50"
+            />
+            <span>
+              <span className="block font-medium text-gray-900">
+                TOPs automatisch aus PDF erkennen und direkt verarbeiten
+              </span>
+              <span className="block text-gray-600">
+                Das PDF wird erst in der Pipeline ausgewertet. Die erkannten TOPs und Segmentgrenzen prüfen Sie später in der Review.
+              </span>
+            </span>
+          </label>
           <label className="mt-3 flex items-start gap-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
             <input
               type="checkbox"
@@ -356,6 +400,7 @@ export default function UploadStep({
                 const enabled = event.target.checked;
                 setSkipAgendaDetection(enabled);
                 if (enabled) {
+                  setAutoDetectTopsFromPdf(false);
                   setTops([]);
                   setPdfFile(null);
                   setExtractedCount(null);
