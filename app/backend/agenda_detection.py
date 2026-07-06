@@ -38,12 +38,14 @@ AGENDA_DETECTION_USE_LLM = (
 AGENDA_DETECTION_TIMEOUT_SECONDS = float(
     os.environ.get("AGENDA_DETECTION_TIMEOUT_SECONDS", "8")
 )
+AGENDA_DETECTION_MIN_TIMEOUT_SECONDS = 30.0
 AGENDA_DETECTION_CHUNK_LINES = int(
     os.environ.get("AGENDA_DETECTION_CHUNK_LINES", "160")
 )
 AGENDA_DETECTION_CHUNK_OVERLAP_LINES = int(
     os.environ.get("AGENDA_DETECTION_CHUNK_OVERLAP_LINES", "12")
 )
+NO_THINK_DIRECTIVE = "/no_think"
 
 DEFAULT_AGENDA_DETECTION_PROMPT = """Du erkennst Tagesordnungspunkte (TOPs) und Segmentgrenzen in deutschen Sitzungstranskripten.
 
@@ -67,6 +69,13 @@ Regeln:
 - Segmente duerfen sich nicht ueberlappen.
 - Markiere geschaetzte oder schwache Grenzen mit uncertain=true.
 - Nutze Moderationssignale wie "kommen wir zu", "rufe ich auf", "naechster Punkt" und explizite TOP-Zahlen."""
+
+
+def build_agenda_detection_system_prompt(system_prompt: str | None = None) -> str:
+    prompt = (system_prompt or DEFAULT_AGENDA_DETECTION_PROMPT).strip()
+    if prompt.startswith(NO_THINK_DIRECTIVE):
+        return prompt
+    return f"{NO_THINK_DIRECTIVE}\n{prompt}"
 
 
 @dataclass(frozen=True)
@@ -352,11 +361,11 @@ def _detect_with_llm(
 
     config = get_llm_config(model)
     actual_model = config.model
-    actual_system_prompt = system_prompt or DEFAULT_AGENDA_DETECTION_PROMPT
+    actual_system_prompt = build_agenda_detection_system_prompt(system_prompt)
     client = OpenAI(
         base_url=config.base_url,
         api_key=config.api_key,
-        timeout=AGENDA_DETECTION_TIMEOUT_SECONDS,
+        timeout=max(AGENDA_DETECTION_TIMEOUT_SECONDS, AGENDA_DETECTION_MIN_TIMEOUT_SECONDS),
     )
 
     response = client.chat.completions.create(

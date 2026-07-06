@@ -96,6 +96,7 @@ from speaker_recognition import (
     match_speaker_embeddings,
     speaker_embedding_config_from_env,
 )
+from transcript_splitter import split_transcript_for_agenda_detection
 
 # Configure logging with timestamps
 logging.basicConfig(
@@ -1090,6 +1091,7 @@ class AssignmentSuggestionsResponse(BaseModel):
 
 class AgendaDetectionResponse(BaseModel):
     tops: List[str]
+    transcript: List[TranscriptLine] = Field(default_factory=list)
     assignments: List[Optional[int]]
     segments: List[AssignmentSuggestionSegmentResponse]
     uncertain_count: int
@@ -1896,6 +1898,7 @@ def build_pipeline_agenda_detection_response(
 
     return AgendaDetectionResponse(
         tops=list(session.tops or []),
+        transcript=list(session.transcript or []),
         assignments=list(session.assignments or []),
         segments=segments,
         strategy=str(agenda_info.get("strategy") or "unknown"),
@@ -2300,6 +2303,7 @@ def run_pipeline_job(
             stage=PIPELINE_STAGE_AGENDA_DETECT,
             progress=72,
         )
+        transcript = split_transcript_for_agenda_detection(transcript)
         tops, assignments, agenda_info = detect_pipeline_agenda(
             pipeline_id,
             transcript,
@@ -3402,10 +3406,10 @@ async def agenda_detection_endpoint(request: AgendaDetectionRequest):
     if not request.transcript:
         raise HTTPException(status_code=400, detail="Kein Transkript vorhanden")
 
-    transcript = [
-        TranscriptUtterance(speaker=line.speaker, text=line.text)
-        for line in request.transcript
-    ]
+    split_transcript = split_transcript_for_agenda_detection(
+        [line_to_dict(line) for line in request.transcript]
+    )
+    transcript = transcript_utterances(split_transcript)
     valid_tops = [top.strip() for top in request.tops if top.strip()]
     if valid_tops:
         result = segment_known_agenda(
@@ -3423,6 +3427,7 @@ async def agenda_detection_endpoint(request: AgendaDetectionRequest):
 
     return AgendaDetectionResponse(
         tops=result.tops,
+        transcript=[TranscriptLine(**line) for line in split_transcript],
         assignments=result.assignments,
         segments=[
             AssignmentSuggestionSegmentResponse(

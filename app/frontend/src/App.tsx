@@ -701,27 +701,34 @@ export default function App() {
           transcript: transcriptResult,
           model: llmSettings.model,
         });
+        const detectionTranscript =
+          detected.transcript && detected.transcript.length > 0
+            ? detected.transcript
+            : transcriptResult;
         const detectedTops = detected.tops.map((top) => top.trim()).filter(Boolean);
         const detectedAssignments =
-          detected.assignments.length === transcriptResult.length
+          detected.assignments.length === detectionTranscript.length
             ? detected.assignments
-            : new Array(transcriptResult.length).fill(null);
+            : new Array(detectionTranscript.length).fill(null);
 
         if (detectedTops.length > 0) {
+          setTranscript(detectionTranscript);
           setTops(detectedTops);
           setAssignments(detectedAssignments);
           setAgendaDetection({
             ...detected,
             tops: detectedTops,
+            transcript: detectionTranscript,
             assignments: detectedAssignments,
           });
           setSkippedAssignment(false);
           setIsProcessing(false);
           setCurrentStep(2);
         } else {
+          setTranscript(detectionTranscript);
           setSkippedAssignment(true);
           setTops([]);
-          setAssignments(new Array(transcriptResult.length).fill(null));
+          setAssignments(new Array(detectionTranscript.length).fill(null));
           setIsProcessing(false);
           setCurrentStep(2);
         }

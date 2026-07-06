@@ -1,4 +1,8 @@
-from agenda_detection import detect_agenda_from_transcript, segment_known_agenda
+from agenda_detection import (
+    build_agenda_detection_system_prompt,
+    detect_agenda_from_transcript,
+    segment_known_agenda,
+)
 from assignment_suggestions import TranscriptUtterance
 import agenda_detection
 
@@ -100,6 +104,8 @@ def test_llm_invalid_boundaries_are_repaired(fake_openai_module):
     assert result.assignments == [0, 0, 1]
     assert result.segments[0].uncertain
     assert result.segments[1].uncertain
+    request = fake_openai_module.instances[0].calls[0]
+    assert request["messages"][0]["content"].startswith("/no_think\n")
 
 
 def test_fallback_without_llm_returns_reviewable_assignments():
@@ -153,3 +159,10 @@ def test_unknown_agenda_llm_detection_chunks_long_transcripts(
     assert len(calls) == 2
     assert "0: MOD" in calls[0]["messages"][1]["content"]
     assert "2: MOD" not in calls[0]["messages"][1]["content"]
+
+
+def test_build_agenda_detection_system_prompt_does_not_duplicate_no_think():
+    assert (
+        build_agenda_detection_system_prompt("/no_think\nNur JSON")
+        == "/no_think\nNur JSON"
+    )

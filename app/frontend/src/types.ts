@@ -239,6 +239,7 @@ export interface AgendaDetectionRequest {
 
 export interface AgendaDetectionResponse {
   tops: string[];
+  transcript?: TranscriptLine[];
   assignments: (number | null)[];
   segments: AssignmentSuggestionSegment[];
   strategy: string;

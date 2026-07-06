@@ -500,6 +500,50 @@ def test_agenda_detection_endpoint_detects_tops_without_pdf_or_manual_list():
     assert data["strategy"] == "heuristic_transcript_fallback"
 
 
+def test_agenda_detection_endpoint_splits_mid_utterance_top_transition():
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/agenda-detection",
+            json={
+                    "tops": [
+                        "Eröffnung",
+                        "Protokoll der letzten Sitzung",
+                        "Verpflichtung Herr Krull",
+                    ],
+                "transcript": [
+                    {
+                        "speaker": "SPEAKER_04",
+                        "text": "Ich eröffne die Sitzung.",
+                        "start": 0,
+                        "end": 2,
+                    },
+                    {
+                        "speaker": "SPEAKER_04",
+                        "text": (
+                            "Das Protokoll wird geändert. Das ist einstimmig. "
+                            "Kommen wir zum Tagesordnungspunkt 3. "
+                            "Wir haben heute Herrn Krull zu verpflichten."
+                        ),
+                        "start": 2,
+                        "end": 12,
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [line["text"] for line in data["transcript"]] == [
+        "Ich eröffne die Sitzung.",
+        "Das Protokoll wird geändert.",
+        "Das ist einstimmig.",
+        "Kommen wir zum Tagesordnungspunkt 3.",
+        "Wir haben heute Herrn Krull zu verpflichten.",
+    ]
+    assert data["assignments"] == [0, 1, 1, 2, 2]
+    assert data["segments"][2]["start_index"] == 3
+
+
 def test_llm_diagnostics_endpoint_reports_configured_model(fake_openai_module):
     with TestClient(main.app) as client:
         response = client.get("/api/llm/diagnostics?model=test-model")

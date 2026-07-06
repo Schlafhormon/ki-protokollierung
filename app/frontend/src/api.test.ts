@@ -315,6 +315,10 @@ describe('api session client', () => {
       json: () =>
         Promise.resolve({
           tops: ['Begruessung', 'Haushalt'],
+          transcript: [
+            { speaker: 'SPEAKER_00', text: 'Hallo', start: 0, end: 1 },
+            { speaker: 'SPEAKER_01', text: 'Haushalt', start: 2, end: 3 },
+          ],
           assignments: [0, 1],
           segments: [],
           strategy: 'known_agenda_heuristic',
@@ -334,6 +338,7 @@ describe('api session client', () => {
     });
 
     expect(result.assignments).toEqual([0, 1]);
+    expect(result.transcript).toHaveLength(2);
     expect(fetchMock.mock.calls[0]![0]).toBe('/api/agenda-detection');
     expect(fetchMock.mock.calls[0]![1]!.method).toBe('POST');
     expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)).toMatchObject({

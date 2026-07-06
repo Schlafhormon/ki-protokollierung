@@ -63,6 +63,7 @@ function normalizeAgendaDetection(
   }
   return {
     tops: data.tops ?? [],
+    transcript: data.transcript ?? [],
     assignments: data.assignments ?? [],
     segments: data.segments ?? [],
     strategy: data.strategy ?? "unknown",
@@ -452,7 +453,15 @@ export async function detectAgenda(
     throw new Error(error.detail || "Fehler bei der automatischen TOP-Erkennung");
   }
 
-  return response.json();
+  const data = await response.json();
+  return {
+    tops: data.tops ?? [],
+    transcript: data.transcript ?? request.transcript,
+    assignments: data.assignments ?? [],
+    segments: data.segments ?? [],
+    strategy: data.strategy ?? "unknown",
+    uncertain_count: data.uncertain_count ?? 0,
+  };
 }
 
 export interface ListSpeakerProfilesOptions {
