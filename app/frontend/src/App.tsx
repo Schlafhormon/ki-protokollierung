@@ -1189,6 +1189,13 @@ export default function App() {
     setPipelineNotice(null);
   };
 
+  const handleTranscriptStructureChange = () => {
+    setAgendaDetection(null);
+    setAgendaDetectionError(null);
+    setDirectProtocolAvailable(false);
+    setPipelineNotice(null);
+  };
+
   const handleCancelPipeline = async () => {
     if (!pipelineId) return;
 
@@ -1330,6 +1337,7 @@ export default function App() {
           setAssignments={setAssignments}
           agendaDetection={agendaDetection}
           agendaDetectionError={agendaDetectionError}
+          onTranscriptStructureChange={handleTranscriptStructureChange}
           audioUrl={audioUrl ?? undefined}
           speakerNames={speakerNames}
           setSpeakerNames={setSpeakerNames}

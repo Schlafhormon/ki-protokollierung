@@ -190,6 +190,48 @@ describe('AssignmentStep', () => {
     expect(setAssignments).toHaveBeenLastCalledWith([0]);
   });
 
+  it('merges consecutive lines only when speaker and TOP assignment match', async () => {
+    const user = userEvent.setup();
+    const setTranscript = vi.fn();
+    const setAssignments = vi.fn();
+    const onTranscriptStructureChange = vi.fn();
+    const splitTranscript: TranscriptLine[] = [
+      { speaker: 'SPEAKER_00', text: 'Erster Satz.', start: 0, end: 1 },
+      { speaker: 'SPEAKER_00', text: 'Zweiter Satz.', start: 1, end: 2 },
+      { speaker: 'SPEAKER_00', text: 'Neuer TOP.', start: 2, end: 3 },
+      { speaker: 'SPEAKER_01', text: 'Anderer Sprecher.', start: 3, end: 4 },
+      { speaker: 'SPEAKER_01', text: 'Gleicher TOP.', start: 4, end: 5 },
+    ];
+
+    renderAssignmentStep({
+      transcript: splitTranscript,
+      assignments: [0, 0, 1, 1, 1],
+      setTranscript,
+      setAssignments,
+      onTranscriptStructureChange,
+    });
+
+    await user.click(screen.getByRole('button', { name: /gleiche sprecher zusammenführen/i }));
+
+    expect(setTranscript).toHaveBeenCalledWith([
+      {
+        speaker: 'SPEAKER_00',
+        text: 'Erster Satz. Zweiter Satz.',
+        start: 0,
+        end: 2,
+      },
+      splitTranscript[2],
+      {
+        speaker: 'SPEAKER_01',
+        text: 'Anderer Sprecher. Gleicher TOP.',
+        start: 3,
+        end: 5,
+      },
+    ]);
+    expect(setAssignments).toHaveBeenCalledWith([0, 1, 1]);
+    expect(onTranscriptStructureChange).toHaveBeenCalledTimes(1);
+  });
+
   it('applies generated assignment suggestions after review', async () => {
     const user = userEvent.setup();
     const setAssignments = vi.fn();

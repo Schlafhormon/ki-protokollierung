@@ -311,6 +311,7 @@ export interface AssignmentStepProps {
   setAssignments: (assignments: (number | null)[]) => void;
   agendaDetection?: AgendaDetectionResponse | null;
   agendaDetectionError?: string | null;
+  onTranscriptStructureChange?: () => void;
   audioUrl?: string;  // URL to stream audio for playback
   speakerNames: Record<string, string>;
   setSpeakerNames: Dispatch<SetStateAction<Record<string, string>>>;

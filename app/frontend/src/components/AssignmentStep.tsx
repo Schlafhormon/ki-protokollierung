@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, type MouseEvent } from 'react';
 import type {
   AssignmentSuggestionSegment,
   AssignmentStepProps,
+  TranscriptLine,
   TopColor,
 } from '../types';
 import AudioPlayer from './AudioPlayer';
@@ -37,6 +38,7 @@ export default function AssignmentStep({
   setAssignments,
   agendaDetection,
   agendaDetectionError,
+  onTranscriptStructureChange,
   audioUrl,
   speakerNames,
   setSpeakerNames,
@@ -343,6 +345,7 @@ export default function AssignmentStep({
         ...replacementLines.map(() => currentAssignment),
         ...assignments.slice(editingLine + 1),
       ]);
+      onTranscriptStructureChange?.();
     }
 
     setSelectedLineIndex(editingLine);
@@ -383,6 +386,7 @@ export default function AssignmentStep({
       ...assignments.slice(selectedLineIndex + 1),
     ]);
     setSelectedLineIndex(selectedLineIndex - 1);
+    onTranscriptStructureChange?.();
   };
 
   const mergeLineWithNext = () => {
@@ -412,6 +416,55 @@ export default function AssignmentStep({
       ...assignments.slice(0, selectedLineIndex + 1),
       ...assignments.slice(selectedLineIndex + 2),
     ]);
+    onTranscriptStructureChange?.();
+  };
+
+  const mergeConsecutiveSameSpeakerLines = () => {
+    if (transcript.length <= 1) {
+      return;
+    }
+
+    const mergedTranscript: TranscriptLine[] = [];
+    const mergedAssignments: (number | null)[] = [];
+
+    for (let index = 0; index < transcript.length; index++) {
+      const line = transcript[index];
+      if (!line) {
+        continue;
+      }
+
+      const assignment = assignments[index] ?? null;
+      const previousLine = mergedTranscript[mergedTranscript.length - 1];
+      const previousAssignment = mergedAssignments[mergedAssignments.length - 1] ?? null;
+
+      if (
+        previousLine &&
+        previousLine.speaker === line.speaker &&
+        previousAssignment === assignment
+      ) {
+        mergedTranscript[mergedTranscript.length - 1] = {
+          ...previousLine,
+          text: [previousLine.text, line.text].filter(Boolean).join(' '),
+          start: Math.min(previousLine.start, line.start),
+          end: Math.max(previousLine.end, line.end),
+        };
+      } else {
+        mergedTranscript.push(line);
+        mergedAssignments.push(assignment);
+      }
+    }
+
+    if (mergedTranscript.length === transcript.length) {
+      return;
+    }
+
+    setTranscript(mergedTranscript);
+    setAssignments(mergedAssignments);
+    setSelectedLineIndex(null);
+    setSelectionStart(null);
+    setEditingLine(null);
+    setEditText('');
+    onTranscriptStructureChange?.();
   };
 
   const assignedCount = assignments.filter((a) => a !== null).length;
@@ -629,6 +682,14 @@ export default function AssignmentStep({
           className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
         >
           Zeile mit nächster verbinden
+        </button>
+        <button
+          type="button"
+          onClick={mergeConsecutiveSameSpeakerLines}
+          disabled={transcript.length <= 1}
+          className="px-3 py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+        >
+          Gleiche Sprecher zusammenführen
         </button>
       </div>
 
