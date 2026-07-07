@@ -5,7 +5,7 @@ import App from './App';
 import {
   checkBackendHealth,
   detectAgenda,
-  extractTOPsFromPDF,
+  extractAgendaDataFromPDF,
   generateSummary,
   getPipelineResult,
   getPipelineStatus,
@@ -33,7 +33,7 @@ vi.mock('./api', () => ({
   regenerateSessionSummaries: vi.fn(),
   detectAgenda: vi.fn(),
   generateSummary: vi.fn(),
-  extractTOPsFromPDF: vi.fn(),
+  extractAgendaDataFromPDF: vi.fn(),
   exportProtocol: vi.fn(),
   listSpeakerProfiles: vi.fn(() => Promise.resolve([])),
   deleteSpeakerProfileEmbeddings: vi.fn(),
@@ -194,7 +194,7 @@ describe('App pipeline flow', () => {
     await user.click(screen.getByRole('button', { name: /automatisch verarbeiten/i }));
 
     await waitFor(() => {
-      expect(extractTOPsFromPDF).not.toHaveBeenCalled();
+      expect(extractAgendaDataFromPDF).not.toHaveBeenCalled();
       expect(startPipeline).toHaveBeenCalledWith(
         expect.any(File),
         expect.objectContaining({
@@ -214,7 +214,10 @@ describe('App pipeline flow', () => {
     const audioInput = container.querySelector<HTMLInputElement>('input[type="file"][accept="audio/*"]');
     const pdfInput = container.querySelector<HTMLInputElement>('input[accept=".pdf,application/pdf"]');
     const pdf = new File(['pdf'], 'agenda.pdf', { type: 'application/pdf' });
-    vi.mocked(extractTOPsFromPDF).mockResolvedValue(['Eröffnung', 'Haushalt']);
+    vi.mocked(extractAgendaDataFromPDF).mockResolvedValue({
+      tops: ['Eröffnung', 'Haushalt'],
+      metadata: {},
+    });
 
     await user.click(screen.getByRole('checkbox', {
       name: /TOPs automatisch aus PDF erkennen und direkt verarbeiten/i,

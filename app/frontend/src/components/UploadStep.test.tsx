@@ -1,12 +1,12 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { extractTOPsFromPDF } from '../api';
+import { extractAgendaDataFromPDF } from '../api';
 import type { UploadStepProps } from '../types';
 import UploadStep from './UploadStep';
 
 vi.mock('../api', () => ({
-  extractTOPsFromPDF: vi.fn(),
+  extractAgendaDataFromPDF: vi.fn(),
 }));
 
 const defaultProps: UploadStepProps = {
@@ -84,10 +84,19 @@ describe('UploadStep', () => {
   });
 
   it('extracts TOPs from a PDF and replaces the TOP list', async () => {
-    vi.mocked(extractTOPsFromPDF).mockResolvedValue(['Begruessung', 'Haushalt']);
+    vi.mocked(extractAgendaDataFromPDF).mockResolvedValue({
+      tops: ['Begruessung', 'Haushalt'],
+      metadata: {
+        committee: 'Hauptausschuss',
+        date: '2026-06-30',
+        location: 'Rathaus',
+        title: 'Sitzung Hauptausschuss',
+      },
+    });
     const setTops = vi.fn();
     const setPdfFile = vi.fn();
-    const { container } = renderUploadStep({ setTops, setPdfFile });
+    const setExportMetadata = vi.fn();
+    const { container } = renderUploadStep({ setTops, setPdfFile, setExportMetadata });
 
     const input = container.querySelector<HTMLInputElement>('input[accept=".pdf,application/pdf"]');
     expect(input).not.toBeNull();
@@ -96,9 +105,17 @@ describe('UploadStep', () => {
     fireEvent.change(input!, { target: { files: [pdf] } });
 
     await waitFor(() => {
-      expect(extractTOPsFromPDF).toHaveBeenCalledWith(pdf, { model: 'qwen3:8b' });
+      expect(extractAgendaDataFromPDF).toHaveBeenCalledWith(pdf, { model: 'qwen3:8b' });
       expect(setTops).toHaveBeenCalledWith(['Begruessung', 'Haushalt']);
       expect(setPdfFile).toHaveBeenCalledWith(pdf);
+      expect(setExportMetadata).toHaveBeenCalledWith(
+        expect.objectContaining({
+          committee: 'Hauptausschuss',
+          date: '2026-06-30',
+          location: 'Rathaus',
+          title: 'Sitzung Hauptausschuss',
+        })
+      );
     });
     expect(await screen.findByText(/2 TOPs erfolgreich extrahiert/i)).toBeInTheDocument();
   });
@@ -119,7 +136,7 @@ describe('UploadStep', () => {
     await waitFor(() => {
       expect(setPdfFile).toHaveBeenCalledWith(pdf);
     });
-    expect(extractTOPsFromPDF).not.toHaveBeenCalled();
+    expect(extractAgendaDataFromPDF).not.toHaveBeenCalled();
     expect(screen.queryByText(/erfolgreich extrahiert/i)).not.toBeInTheDocument();
   });
 

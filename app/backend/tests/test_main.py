@@ -434,6 +434,39 @@ def test_pdf_upload_validation_accepts_pdf_mime_or_extension():
     assert main.is_allowed_pdf_file("agenda.PDF", "application/octet-stream")
 
 
+def test_extract_tops_endpoint_returns_metadata(tmp_path, monkeypatch):
+    configure_test_app(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        main,
+        "extract_agenda_data_from_pdf",
+        lambda pdf_path, model=None, system_prompt=None: SimpleNamespace(
+            tops=["Eröffnung", "Haushalt"],
+            metadata=SimpleNamespace(
+                to_dict=lambda: {
+                    "committee": "Hauptausschuss",
+                    "date": "2026-06-30",
+                    "location": "Rathaus",
+                    "title": "Sitzung Hauptausschuss",
+                }
+            ),
+        ),
+    )
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/extract-tops",
+            data={"model": "fake-llm"},
+            files={"pdf": ("agenda.pdf", b"%PDF-1.4", "application/pdf")},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tops"] == ["Eröffnung", "Haushalt"]
+    assert body["metadata"]["committee"] == "Hauptausschuss"
+    assert body["metadata"]["date"] == "2026-06-30"
+
+
 def test_assignment_suggestions_endpoint_returns_reviewable_segments():
     with TestClient(main.app) as client:
         response = client.post(
@@ -798,7 +831,7 @@ def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypa
             audio_duration_seconds=4.0,
         )
 
-    def fake_extract_tops_from_pdf(pdf_path, model=None, system_prompt=None):
+    def fake_extract_agenda_data_from_pdf(pdf_path, model=None, system_prompt=None):
         extracted_calls.append(
             {
                 "pdf_path": pdf_path,
@@ -806,7 +839,17 @@ def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypa
                 "system_prompt": system_prompt,
             }
         )
-        return ["TOP 1 Haushalt", "TOP 2 Schulbau"]
+        return SimpleNamespace(
+            tops=["TOP 1 Haushalt", "TOP 2 Schulbau"],
+            metadata=SimpleNamespace(
+                to_dict=lambda: {
+                    "committee": "Hauptausschuss",
+                    "date": "2026-07-01",
+                    "location": "Rathaus",
+                    "title": "Sitzung Hauptausschuss",
+                }
+            ),
+        )
 
     def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None):
         return summarize.SummarizationResult(
@@ -818,7 +861,7 @@ def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypa
         )
 
     monkeypatch.setattr(main, "transcribe_audio", fake_transcribe)
-    monkeypatch.setattr(main, "extract_tops_from_pdf", fake_extract_tops_from_pdf)
+    monkeypatch.setattr(main, "extract_agenda_data_from_pdf", fake_extract_agenda_data_from_pdf)
     monkeypatch.setattr(main, "summarize_segment", fake_summarize_segment)
 
     with TestClient(main.app) as client:
@@ -847,6 +890,9 @@ def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypa
     assert extracted_calls
     assert extracted_calls[0]["model"] == "fake-llm"
     assert result["session"]["tops"] == ["TOP 1 Haushalt", "TOP 2 Schulbau"]
+    assert result["session"]["export_metadata"]["committee"] == "Hauptausschuss"
+    assert result["session"]["export_metadata"]["date"] == "2026-07-01"
+    assert result["session"]["export_metadata"]["location"] == "Rathaus"
     assert result["session"]["assignments"] == [0, 1]
     assert result["session"]["summaries"]["0"] == "Zusammenfassung TOP 1 Haushalt"
     assert result["agenda_detection"]["tops"] == ["TOP 1 Haushalt", "TOP 2 Schulbau"]
@@ -878,9 +924,12 @@ def test_pipeline_keeps_known_tops_when_pdf_auto_mode_is_stale(tmp_path, monkeyp
             audio_duration_seconds=2.0,
         )
 
-    def fake_extract_tops_from_pdf(pdf_path, model=None, system_prompt=None):
+    def fake_extract_agenda_data_from_pdf(pdf_path, model=None, system_prompt=None):
         extracted_calls.append(pdf_path)
-        return ["TOP I. Öffentlicher Teil", "01 Eröffnung", "02 Haushalt"]
+        return SimpleNamespace(
+            tops=["TOP I. Öffentlicher Teil", "01 Eröffnung", "02 Haushalt"],
+            metadata=SimpleNamespace(to_dict=lambda: {"committee": "Nicht genutzt"}),
+        )
 
     def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None):
         return summarize.SummarizationResult(
@@ -892,7 +941,7 @@ def test_pipeline_keeps_known_tops_when_pdf_auto_mode_is_stale(tmp_path, monkeyp
         )
 
     monkeypatch.setattr(main, "transcribe_audio", fake_transcribe)
-    monkeypatch.setattr(main, "extract_tops_from_pdf", fake_extract_tops_from_pdf)
+    monkeypatch.setattr(main, "extract_agenda_data_from_pdf", fake_extract_agenda_data_from_pdf)
     monkeypatch.setattr(main, "summarize_segment", fake_summarize_segment)
 
     known_tops = ["Eröffnung", "Haushalt"]

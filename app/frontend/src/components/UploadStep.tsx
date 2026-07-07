@@ -1,6 +1,6 @@
 import { useState, useRef, type DragEvent, type ChangeEvent } from 'react';
 import type { UploadStepProps } from '../types';
-import { extractTOPsFromPDF } from '../api';
+import { extractAgendaDataFromPDF } from '../api';
 
 export default function UploadStep({
   onNext,
@@ -113,9 +113,11 @@ export default function UploadStep({
     setExtractedCount(null);
 
     try {
-      const extractedTops = await extractTOPsFromPDF(file, {
+      const extracted = await extractAgendaDataFromPDF(file, {
         model: llmSettings?.model,
       });
+      const extractedTops = extracted.tops.map((top) => top.trim()).filter(Boolean);
+      applyDetectedMetadata(extracted.metadata ?? {});
 
       if (extractedTops.length > 0) {
         // Replace empty TOPs with extracted ones, but keep user-entered ones
@@ -177,6 +179,45 @@ export default function UploadStep({
 
   const updateExportMetadata = (patch: Partial<typeof exportMetadata>) => {
     setExportMetadata({ ...exportMetadata, ...patch });
+  };
+
+  const applyDetectedMetadata = (metadata: {
+    committee?: string;
+    date?: string;
+    location?: string;
+    title?: string;
+  }) => {
+    const patch: Partial<typeof exportMetadata> = {};
+    const defaultDate = new Date().toISOString().slice(0, 10);
+    if (metadata.committee?.trim() && !exportMetadata.committee.trim()) {
+      patch.committee = metadata.committee.trim();
+    }
+    if (
+      metadata.date?.trim() &&
+      (
+        !exportMetadata.date.trim() ||
+        exportMetadata.date === defaultDate ||
+        (
+          !exportMetadata.committee.trim() &&
+          !exportMetadata.location.trim() &&
+          exportMetadata.title === 'Sitzungsprotokoll'
+        )
+      )
+    ) {
+      patch.date = metadata.date.trim();
+    }
+    if (metadata.location?.trim() && !exportMetadata.location.trim()) {
+      patch.location = metadata.location.trim();
+    }
+    if (
+      metadata.title?.trim() &&
+      (!exportMetadata.title.trim() || exportMetadata.title === 'Sitzungsprotokoll')
+    ) {
+      patch.title = metadata.title.trim();
+    }
+    if (Object.keys(patch).length > 0) {
+      setExportMetadata({ ...exportMetadata, ...patch });
+    }
   };
 
   const canProceed = !!audioFile;

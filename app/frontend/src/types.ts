@@ -258,6 +258,18 @@ export interface ExportMetadata {
   includeGenerationNote: boolean;
 }
 
+export interface PdfAgendaMetadata {
+  committee?: string;
+  date?: string;
+  location?: string;
+  title?: string;
+}
+
+export interface PdfAgendaExtractionResult {
+  tops: string[];
+  metadata: PdfAgendaMetadata;
+}
+
 export type ExportFormat = 'txt' | 'docx' | 'pdf';
 
 // Component Props Types

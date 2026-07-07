@@ -14,6 +14,8 @@ import logging
 import os
 import re
 import unicodedata
+import json
+from dataclasses import dataclass, field
 from typing import Optional
 
 from summarize import get_llm_config
@@ -36,6 +38,58 @@ Ignoriere Bullet-Unterpunkte wie "- Fäkalienentsorgungssatzung - FES".
 Entferne Zusatzinfos wie "BE:", "Beschlussvorlage:", "Antrag:" oder "Drucksache:".
 Jeder TOP kommt auf eine eigene Zeile im Format: 1. Titel"""
 
+DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT = """Du bist ein Extraktor. Antworte ohne Denken, ohne Erklärung, nur mit validem JSON.
+Extrahiere aus der Einladung:
+- alle eigentlichen Tagesordnungspunkte aus öffentlichem und nichtöffentlichem Teil
+- die Sitzungsmetadaten Gremium, Sitzungsdatum, Ort und Sitzungstitel
+
+Regeln:
+- Verwende als datum das Datum der Sitzung, nicht das Datum des Schreibens.
+- datum muss im Format YYYY-MM-DD stehen, falls eindeutig erkennbar.
+- Ignoriere Abschnittsüberschriften wie "TOP I. Öffentlicher Teil" und "TOP II. Nichtöffentlicher Teil" als eigene TOPs.
+- Ignoriere Bullet-Unterpunkte wie "- Fäkalienentsorgungssatzung - FES".
+- Entferne Zusatzinfos wie "BE:", "Beschlussvorlage:", "Antrag:" oder "Drucksache:".
+- Lass unbekannte Metadatenfelder als leere Strings.
+
+JSON-Schema:
+{
+  "tops": ["Titel ohne Nummerierung"],
+  "metadata": {
+    "committee": "Gremium",
+    "date": "YYYY-MM-DD",
+    "location": "Ort",
+    "title": "Sitzungstitel"
+  }
+}"""
+
+
+@dataclass
+class PdfSessionMetadata:
+    committee: str = ""
+    date: str = ""
+    location: str = ""
+    title: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "committee": self.committee,
+            "date": self.date,
+            "location": self.location,
+            "title": self.title,
+        }
+
+
+@dataclass
+class PdfAgendaExtractionResult:
+    tops: list[str] = field(default_factory=list)
+    metadata: PdfSessionMetadata = field(default_factory=PdfSessionMetadata)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "tops": self.tops,
+            "metadata": self.metadata.to_dict(),
+        }
+
 
 def build_extraction_system_prompt(system_prompt: Optional[str] = None) -> str:
     """Return a prompt that keeps reasoning models from hiding the final answer."""
@@ -43,6 +97,152 @@ def build_extraction_system_prompt(system_prompt: Optional[str] = None) -> str:
     if prompt.startswith(NO_THINK_DIRECTIVE):
         return prompt
     return f"{NO_THINK_DIRECTIVE}\n{prompt}"
+
+
+def build_agenda_data_extraction_system_prompt(system_prompt: Optional[str] = None) -> str:
+    """Return the structured extraction prompt with optional caller context."""
+    base_prompt = DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT
+    if system_prompt and system_prompt.strip():
+        base_prompt = (
+            f"{system_prompt.strip()}\n\n"
+            "Für diese Aufgabe gilt zusätzlich zwingend:\n"
+            f"{DEFAULT_AGENDA_DATA_EXTRACTION_PROMPT}"
+        )
+    if base_prompt.startswith(NO_THINK_DIRECTIVE):
+        return base_prompt
+    return f"{NO_THINK_DIRECTIVE}\n{base_prompt}"
+
+
+def repair_common_pdf_text(text: str) -> str:
+    """Repair common replacement-character artifacts from municipal PDFs."""
+    replacements = {
+        "f�r": "für",
+        "F�r": "Für",
+        "�ffentlich": "öffentlich",
+        "�ffentlicher": "Öffentlicher",
+        "�ffentliche": "öffentliche",
+        "�ffentlichen": "öffentlichen",
+        "nicht�ffentlich": "nichtöffentlich",
+        "Nicht�ffentlich": "Nichtöffentlich",
+        "�ber": "über",
+        "gem��": "gemäß",
+        "ordnungsgem��en": "ordnungsgemäßen",
+        "Best�tigung": "Bestätigung",
+        "Geb�hren": "Gebühren",
+        "F�kalien": "Fäkalien",
+        "Schlie�ung": "Schließung",
+        "Ausschusssitzung": "Ausschusssitzung",
+    }
+    repaired = text
+    for broken, fixed in replacements.items():
+        repaired = repaired.replace(broken, fixed)
+    return repaired
+
+
+def normalize_session_date(value: str | None) -> str:
+    """Normalize German dates to YYYY-MM-DD when possible."""
+    if not value:
+        return ""
+    text = str(value).strip()
+    iso_match = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", text)
+    if iso_match:
+        return iso_match.group(0)
+    german_match = re.search(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b", text)
+    if german_match:
+        day, month, year = german_match.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}"
+    return text
+
+
+def normalize_metadata(raw_metadata: object) -> PdfSessionMetadata:
+    """Normalize metadata from JSON or heuristic extraction."""
+    if not isinstance(raw_metadata, dict):
+        return PdfSessionMetadata()
+
+    def pick(*keys: str) -> str:
+        for key in keys:
+            value = raw_metadata.get(key)
+            if value is not None and str(value).strip():
+                return repair_common_pdf_text(str(value).strip())
+        return ""
+
+    return PdfSessionMetadata(
+        committee=pick("committee", "gremium", "ausschuss"),
+        date=normalize_session_date(pick("date", "datum", "sitzungsdatum")),
+        location=pick("location", "ort", "sitzungsort"),
+        title=pick("title", "titel", "sitzungstitel"),
+    )
+
+
+def merge_metadata(
+    primary: PdfSessionMetadata,
+    fallback: PdfSessionMetadata,
+) -> PdfSessionMetadata:
+    """Fill empty primary metadata fields from fallback values."""
+    return PdfSessionMetadata(
+        committee=primary.committee or fallback.committee,
+        date=primary.date or fallback.date,
+        location=primary.location or fallback.location,
+        title=primary.title or fallback.title,
+    )
+
+
+def extract_session_metadata_from_text(pdf_text: str) -> PdfSessionMetadata:
+    """Extract common session metadata directly from invitation text."""
+    repaired_text = repair_common_pdf_text(pdf_text)
+    lines = [line.strip() for line in repaired_text.splitlines() if line.strip()]
+
+    committee = ""
+    for line in lines[:12]:
+        if re.search(
+            r"\b(Ausschuss|Rat|Beirat|Gemeindevertretung|"
+            r"Stadtverordnetenversammlung|Ortsbeirat)\b",
+            line,
+            flags=re.IGNORECASE,
+        ):
+            committee = line
+            break
+
+    title = ""
+    title_match = re.search(
+        r"\bzur\s+(.+?)\s+am\s+\d{1,2}\.\d{1,2}\.\d{4}\b",
+        repaired_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if title_match:
+        title = re.sub(r"\s+", " ", title_match.group(1)).strip()
+
+    date = ""
+    session_date_match = re.search(
+        r"\bam\s+(\d{1,2}\.\d{1,2}\.\d{4})\b",
+        repaired_text,
+        flags=re.IGNORECASE,
+    )
+    if session_date_match:
+        date = normalize_session_date(session_date_match.group(1))
+
+    location = ""
+    for index, line in enumerate(lines):
+        location_match = re.match(
+            r"^in\s+(?:das|den|die|der)\s+(.+)$",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if not location_match:
+            location_match = re.match(r"^im\s+(.+)$", line, flags=re.IGNORECASE)
+        if location_match:
+            location = location_match.group(1).strip().rstrip(".")
+            break
+        if line.lower() == "in" and index + 1 < len(lines):
+            location = lines[index + 1].strip().rstrip(".")
+            break
+
+    return PdfSessionMetadata(
+        committee=committee,
+        date=date,
+        location=location,
+        title=title,
+    )
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
@@ -218,6 +418,61 @@ def parse_tops_response(response_text: str) -> list[str]:
     return tops
 
 
+def _extract_json_object(response_text: str) -> dict[str, object] | None:
+    """Extract a JSON object from plain or fenced model output."""
+    text = response_text.strip()
+    if not text:
+        return None
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    elif not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start : end + 1]
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def parse_agenda_data_response(
+    response_text: str,
+    fallback_text: str = "",
+) -> PdfAgendaExtractionResult:
+    """Parse structured LLM output, falling back to legacy TOP parsing."""
+    payload = _extract_json_object(response_text)
+    fallback_metadata = (
+        extract_session_metadata_from_text(fallback_text)
+        if fallback_text
+        else PdfSessionMetadata()
+    )
+    if not payload:
+        return PdfAgendaExtractionResult(
+            tops=parse_tops_response(response_text),
+            metadata=fallback_metadata,
+        )
+
+    raw_tops = payload.get("tops") or payload.get("agenda") or []
+    if isinstance(raw_tops, list):
+        numbered_response = "\n".join(
+            f"{index + 1}. {str(item).strip()}"
+            for index, item in enumerate(raw_tops)
+            if str(item).strip()
+        )
+        tops = parse_tops_response(numbered_response)
+    else:
+        tops = parse_tops_response(str(raw_tops))
+
+    metadata = merge_metadata(
+        normalize_metadata(payload.get("metadata") or payload),
+        fallback_metadata,
+    )
+    return PdfAgendaExtractionResult(tops=tops, metadata=metadata)
+
+
 def is_agenda_section_heading(value: str) -> bool:
     """Return true for agenda section labels, not actual agenda items."""
     normalized = unicodedata.normalize("NFKD", value.lower().replace("ß", "ss"))
@@ -256,3 +511,85 @@ def extract_tops_from_pdf(
     """
     pdf_text = extract_text_from_pdf(pdf_path)
     return extract_tops_from_text(pdf_text, model, system_prompt)
+
+
+def extract_agenda_data_from_text(
+    pdf_text: str,
+    model: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+) -> PdfAgendaExtractionResult:
+    """
+    Extract TOPs and session metadata from PDF text using LLM plus heuristics.
+
+    Args:
+        pdf_text: Full text extracted from the PDF
+        model: LLM model to use
+        system_prompt: Optional additional system prompt context
+
+    Returns:
+        Structured agenda extraction result
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise RuntimeError(
+            "OpenAI client nicht installiert. Installieren Sie mit: uv add openai"
+        )
+
+    config = get_llm_config(model)
+    actual_model = config.model
+    actual_system_prompt = build_agenda_data_extraction_system_prompt(system_prompt)
+    repaired_text = repair_common_pdf_text(pdf_text)
+
+    logger.info("Extracting TOPs and session metadata using model: %s", actual_model)
+
+    client = OpenAI(
+        base_url=config.base_url,
+        api_key=config.api_key,
+    )
+
+    user_prompt = f"""Extrahiere Tagesordnungspunkte und Sitzungsmetadaten aus diesem Einladungsdokument:
+
+{repaired_text}
+
+JSON:"""
+
+    try:
+        response = client.chat.completions.create(
+            model=actual_model,
+            messages=[
+                {"role": "system", "content": actual_system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=3072,
+            temperature=0.1,
+        )
+
+        raw_response = response.choices[0].message.content or ""
+        logger.debug("LLM agenda data extraction returned %s characters", len(raw_response))
+
+        result = parse_agenda_data_response(raw_response, fallback_text=repaired_text)
+        logger.info(
+            "Extracted %s TOPs with metadata fields: %s",
+            len(result.tops),
+            [key for key, value in result.metadata.to_dict().items() if value],
+        )
+        return result
+
+    except Exception as e:
+        logger.error("LLM agenda data extraction failed (%s)", e.__class__.__name__)
+        raise RuntimeError(f"PDF-Datenextraktion fehlgeschlagen: {str(e)}")
+
+
+def extract_agenda_data_from_pdf(
+    pdf_path: str,
+    model: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+) -> PdfAgendaExtractionResult:
+    """
+    Extract TOPs and session metadata from a PDF file.
+
+    Keeps PDF text extraction shared with the legacy TOP-only path.
+    """
+    pdf_text = extract_text_from_pdf(pdf_path)
+    return extract_agenda_data_from_text(pdf_text, model, system_prompt)

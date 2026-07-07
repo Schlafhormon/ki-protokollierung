@@ -1,8 +1,13 @@
 import pytest
+from pathlib import Path
 
 from extract_tops import (
     build_extraction_system_prompt,
+    extract_agenda_data_from_text,
+    extract_session_metadata_from_text,
+    extract_text_from_pdf,
     extract_tops_from_text,
+    parse_agenda_data_response,
     parse_tops_response,
 )
 
@@ -57,3 +62,70 @@ def test_extract_tops_from_text_uses_openai_client_and_parses_response(fake_open
 
 def test_build_extraction_system_prompt_does_not_duplicate_no_think():
     assert build_extraction_system_prompt("/no_think\nNur TOPs") == "/no_think\nNur TOPs"
+
+
+def test_parse_agenda_data_response_handles_json_and_metadata():
+    result = parse_agenda_data_response(
+        """
+        ```json
+        {
+          "tops": ["Eröffnung", "Haushalt"],
+          "metadata": {
+            "committee": "Hauptausschuss",
+            "date": "30.06.2026",
+            "location": "Rathaus",
+            "title": "Sitzung Hauptausschuss"
+          }
+        }
+        ```
+        """
+    )
+
+    assert result.tops == ["Eröffnung", "Haushalt"]
+    assert result.metadata.to_dict() == {
+        "committee": "Hauptausschuss",
+        "date": "2026-06-30",
+        "location": "Rathaus",
+        "title": "Sitzung Hauptausschuss",
+    }
+
+
+def test_extract_agenda_data_from_text_uses_structured_prompt(fake_openai_module):
+    fake_openai_module.content = """
+    {
+      "tops": ["Eröffnung", "Haushalt"],
+      "metadata": {
+        "committee": "Hauptausschuss",
+        "date": "2026-06-30",
+        "location": "Rathaus",
+        "title": "Sitzung Hauptausschuss"
+      }
+    }
+    """
+
+    result = extract_agenda_data_from_text(
+        "Einladung zur Sitzung\nam 30.06.2026\nin das Rathaus",
+        model="test-model",
+        system_prompt="Zusatzhinweis",
+    )
+
+    assert result.tops == ["Eröffnung", "Haushalt"]
+    assert result.metadata.committee == "Hauptausschuss"
+
+    request = fake_openai_module.instances[0].calls[0]
+    assert request["model"] == "test-model"
+    assert request["temperature"] == 0.1
+    assert "validem JSON" in request["messages"][0]["content"]
+    assert "Zusatzhinweis" in request["messages"][0]["content"]
+
+
+def test_extract_session_metadata_from_test_pdf():
+    pdf_path = Path(__file__).resolve().parents[3] / "Testsdata" / "6.ATA TOPS.pdf"
+    pdf_text = extract_text_from_pdf(str(pdf_path))
+
+    metadata = extract_session_metadata_from_text(pdf_text)
+
+    assert metadata.committee == "Ausschuss für Trink- und Abwasser"
+    assert metadata.date == "2026-04-27"
+    assert metadata.location == "Refektorium, Schlossplatz Doberlug"
+    assert metadata.title == "06. Sitzung des Ausschusses für Trink- und Abwasser"

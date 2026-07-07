@@ -8,6 +8,7 @@ import type {
   AssignmentSuggestionsResponse,
   ExportFormat,
   ExportMetadata,
+  PdfAgendaExtractionResult,
   PipelineJob,
   PipelineResultResponse,
   PipelineStartOptions,
@@ -791,12 +792,12 @@ export interface ExtractTOPsOptions {
 }
 
 /**
- * Extract TOPs (agenda items) from a PDF meeting invitation.
+ * Extract TOPs and session metadata from a PDF meeting invitation.
  */
-export async function extractTOPsFromPDF(
+export async function extractAgendaDataFromPDF(
   pdfFile: File,
   options?: ExtractTOPsOptions
-): Promise<string[]> {
+): Promise<PdfAgendaExtractionResult> {
   const formData = new FormData();
   formData.append("pdf", pdfFile);
 
@@ -819,6 +820,20 @@ export async function extractTOPsFromPDF(
   }
 
   const data = await response.json();
+  return {
+    tops: data.tops ?? [],
+    metadata: data.metadata ?? {},
+  };
+}
+
+/**
+ * Extract only TOPs from a PDF meeting invitation.
+ */
+export async function extractTOPsFromPDF(
+  pdfFile: File,
+  options?: ExtractTOPsOptions
+): Promise<string[]> {
+  const data = await extractAgendaDataFromPDF(pdfFile, options);
   return data.tops;
 }
 

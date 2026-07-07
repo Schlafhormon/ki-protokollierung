@@ -44,7 +44,7 @@ from summarize import (
     llm_diagnostics,
     summarize_segment,
 )
-from extract_tops import extract_tops_from_pdf
+from extract_tops import extract_agenda_data_from_pdf
 from assignment_suggestions import TranscriptUtterance, suggest_assignments
 from agenda_detection import detect_agenda_from_transcript, segment_known_agenda
 from export_protocol import (
@@ -1065,6 +1065,7 @@ class LLMDiagnosticsResponse(BaseModel):
 
 class ExtractTOPsResponse(BaseModel):
     tops: List[str]
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AssignmentSuggestionsRequest(BaseModel):
@@ -1948,6 +1949,7 @@ def save_pipeline_session(
     assignments: list[int | None] | None = None,
     summaries: dict[int, str] | None = None,
     summary_reviews: dict[int, Any] | None = None,
+    export_metadata: dict[str, Any] | None = None,
     current_step: int | None = None,
     skipped_assignment: bool | None = None,
 ) -> dict[str, Any]:
@@ -1971,6 +1973,12 @@ def save_pipeline_session(
         state["summaries"] = summaries
     if summary_reviews is not None:
         state["summary_reviews"] = summary_reviews
+    if export_metadata is not None:
+        current_metadata = dict(state.get("export_metadata") or {})
+        for key, value in export_metadata.items():
+            if value is not None and str(value).strip():
+                current_metadata[key] = value
+        state["export_metadata"] = current_metadata
     if current_step is not None:
         state["current_step"] = current_step
     if skipped_assignment is not None:
@@ -2023,8 +2031,9 @@ def detect_pipeline_agenda(
     known_tops: list[str],
     pdf_path: str | None,
     options: dict[str, Any],
-) -> tuple[list[str], list[int | None], dict[str, Any]]:
+) -> tuple[list[str], list[int | None], dict[str, Any], dict[str, Any]]:
     agenda_tops = [top.strip() for top in known_tops if top.strip()]
+    pdf_metadata: dict[str, Any] = {}
     model = options.get("agenda_model") or options.get("model")
     system_prompt = options.get("agenda_system_prompt") or options.get("system_prompt")
     if options.get("skip_agenda_detection"):
@@ -2032,15 +2041,17 @@ def detect_pipeline_agenda(
             "strategy": "no_agenda_requested",
             "segments": [],
             "uncertain_count": 0,
-        }
+        }, pdf_metadata
 
     if not agenda_tops and pdf_path and options.get("auto_detect_tops_from_pdf"):
         try:
-            extracted_tops = extract_tops_from_pdf(
+            extracted = extract_agenda_data_from_pdf(
                 pdf_path,
                 model=model,
                 system_prompt=system_prompt,
             )
+            extracted_tops = extracted.tops
+            pdf_metadata = extracted.metadata.to_dict()
             if extracted_tops:
                 agenda_tops = [top.strip() for top in extracted_tops if top.strip()]
         except Exception as exc:
@@ -2070,7 +2081,7 @@ def detect_pipeline_agenda(
                 "strategy": result.strategy,
                 "segments": [segment.__dict__ for segment in result.segments],
                 "uncertain_count": result.uncertain_count,
-            }
+            }, pdf_metadata
         append_pipeline_warning(
             pipeline_id,
             "Agenda Detection ergab keine belastbaren TOPs, nutze Fallback.",
@@ -2082,7 +2093,8 @@ def detect_pipeline_agenda(
             f"({safe_exception_label(exc)}).",
         )
 
-    return fallback_agenda(transcript, agenda_tops)
+    tops, assignments, agenda_info = fallback_agenda(transcript, agenda_tops)
+    return tops, assignments, agenda_info, pdf_metadata
 
 
 def format_line_for_summary(
@@ -2323,7 +2335,7 @@ def run_pipeline_job(
             progress=72,
         )
         transcript = split_transcript_for_agenda_detection(transcript)
-        tops, assignments, agenda_info = detect_pipeline_agenda(
+        tops, assignments, agenda_info, pdf_metadata = detect_pipeline_agenda(
             pipeline_id,
             transcript,
             known_tops=known_tops,
@@ -2336,6 +2348,7 @@ def run_pipeline_job(
             transcript=transcript,
             tops=tops,
             assignments=assignments,
+            export_metadata=pdf_metadata,
             skipped_assignment=not bool(tops),
             current_step=2,
         )
@@ -3405,15 +3418,16 @@ async def extract_tops_endpoint(
         size_bytes = await save_upload_with_size_limit(pdf, file_path)
         logger.info("Saved uploaded PDF for TOP extraction (%s bytes)", size_bytes)
 
-        # Extract TOPs using LLM
-        tops = extract_tops_from_pdf(
+        # Extract TOPs and session metadata using LLM
+        extraction = extract_agenda_data_from_pdf(
             str(file_path),
             model=model,
             system_prompt=system_prompt,
         )
+        tops = extraction.tops
 
         logger.info("Successfully extracted %s TOPs from uploaded PDF", len(tops))
-        return ExtractTOPsResponse(tops=tops)
+        return ExtractTOPsResponse(tops=tops, metadata=extraction.metadata.to_dict())
 
     except HTTPException:
         raise

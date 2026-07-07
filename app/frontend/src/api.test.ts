@@ -10,6 +10,8 @@ import {
   deleteSpeakerProfileEmbeddings,
   detectAgenda,
   exportProtocol,
+  extractAgendaDataFromPDF,
+  extractTOPsFromPDF,
   generateSummary,
   listSpeakerMatchDiagnostics,
   listSpeakerObservations,
@@ -101,6 +103,61 @@ describe('api session client', () => {
     expect(body.get('pdf')).toBeInstanceOf(File);
     expect(body.get('transcript')).toBeNull();
     expect(body.get('summaries')).toBeNull();
+  });
+
+  it('extracts PDF agenda data including session metadata', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          tops: ['Begruessung', 'Haushalt'],
+          metadata: {
+            committee: 'Hauptausschuss',
+            date: '2026-06-30',
+            location: 'Rathaus',
+            title: 'Sitzung Hauptausschuss',
+          },
+        }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await extractAgendaDataFromPDF(
+      new File(['pdf'], 'agenda.pdf', { type: 'application/pdf' }),
+      { model: 'qwen3:8b', systemPrompt: 'Prompt' }
+    );
+
+    const body = fetchMock.mock.calls[0]![1]!.body as FormData;
+    expect(fetchMock).toHaveBeenCalledWith('/api/extract-tops', {
+      method: 'POST',
+      body,
+    });
+    expect(body.get('model')).toBe('qwen3:8b');
+    expect(body.get('system_prompt')).toBe('Prompt');
+    expect(result.tops).toEqual(['Begruessung', 'Haushalt']);
+    expect(result.metadata).toEqual(
+      expect.objectContaining({
+        committee: 'Hauptausschuss',
+        date: '2026-06-30',
+      })
+    );
+  });
+
+  it('keeps the TOP-only PDF extraction helper backward compatible', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            tops: ['Begruessung'],
+            metadata: { committee: 'Hauptausschuss' },
+          }),
+      })
+    );
+
+    await expect(
+      extractTOPsFromPDF(new File(['pdf'], 'agenda.pdf', { type: 'application/pdf' }))
+    ).resolves.toEqual(['Begruessung']);
   });
 
   it('polls pipeline status until completion', async () => {
