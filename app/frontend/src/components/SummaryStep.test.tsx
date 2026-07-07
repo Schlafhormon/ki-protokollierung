@@ -216,4 +216,63 @@ describe('SummaryStep', () => {
     expect(screen.getByText('Unsicherheiten')).toBeInTheDocument();
     expect(screen.getByText('Die Stimmenzahl ist unklar.')).toBeInTheDocument();
   });
+
+  it('allows export after review warnings are explicitly accepted', async () => {
+    const user = userEvent.setup();
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => undefined);
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:test-protocol'),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    vi.mocked(exportProtocol).mockResolvedValue(
+      new Blob(['SITZUNGSPROTOKOLL'], { type: 'text/plain;charset=utf-8' })
+    );
+
+    renderSummaryStep({
+      summaries: {
+        0: 'Der TOP wurde zur Kenntnis genommen.',
+        1: 'Der Haushalt wurde beraten.',
+      },
+      summaryReviews: {
+        0: {
+          structured: {
+            discussion: [],
+            decisions: [],
+            votes: [],
+            action_items: [],
+            open_points: [],
+            uncertainties: ['Keine Beschlusslage erkannt.'],
+          },
+          source_links: [],
+          review_warnings: [
+            {
+              kind: 'missing_decision_signal',
+              message: 'Keine Beschlusslage erkannt.',
+              severity: 'warning',
+              line_indices: [],
+              excerpt: '',
+            },
+          ],
+        },
+      },
+    });
+
+    await user.click(screen.getByRole('button', { name: /text \(\.txt\)/i }));
+    expect(exportProtocol).not.toHaveBeenCalled();
+    expect(screen.getByText(/Prüfhinweise müssen vor dem Export akzeptiert/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('checkbox', {
+      name: /Prüfhinweise akzeptieren und Export erlauben/i,
+    }));
+    await user.click(screen.getByRole('button', { name: /text \(\.txt\)/i }));
+
+    expect(exportProtocol).toHaveBeenCalledTimes(1);
+    expect(click).toHaveBeenCalledTimes(1);
+  });
 });

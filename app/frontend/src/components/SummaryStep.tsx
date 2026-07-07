@@ -47,6 +47,7 @@ export default function SummaryStep({
   const [activeSourceLine, setActiveSourceLine] = useState<number | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(null);
+  const [acceptedSummaryWarnings, setAcceptedSummaryWarnings] = useState(false);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
   const transcriptLineRefs = useRef<Array<HTMLDivElement | null>>([]);
 
@@ -149,19 +150,25 @@ export default function SummaryStep({
     setExportMetadata({ ...exportMetadata, ...patch });
   };
 
-  const hasBlockingSummaryIssue = () => {
-    const hasMissingSummaries = tops.length > 0
-      ? tops.some((_, index) => !summaries[index]?.trim())
-      : !summaries[0]?.trim();
+  const getSummaryIssueState = () => {
+    const missingSummaryIndexes = tops.length > 0
+      ? tops
+          .map((_, index) => index)
+          .filter((index) => !summaries[index]?.trim())
+      : !summaries[0]?.trim()
+        ? [0]
+        : [];
     const reviewWarnings = Object.values(summaryReviews).flatMap(
       (review) => review?.review_warnings ?? []
     );
-    return (
-      hasMissingSummaries ||
-      reviewWarnings.some((warning) =>
+    const hasReviewWarnings = reviewWarnings.some((warning) =>
         ['warning', 'error'].includes(String(warning.severity ?? '').toLowerCase())
-      )
     );
+    return {
+      hasMissingSummaries: missingSummaryIndexes.length > 0,
+      hasReviewWarnings,
+      hasAnyIssue: missingSummaryIndexes.length > 0 || hasReviewWarnings,
+    };
   };
 
   const handleExport = async (format: ExportFormat) => {
@@ -170,8 +177,12 @@ export default function SummaryStep({
       setExportError('Zusammenfassungen müssen nach den Korrekturen aktualisiert werden.');
       return;
     }
-    if (hasBlockingSummaryIssue()) {
-      setExportError('Mindestens eine Zusammenfassung fehlt oder enthält Prüfhinweise. Bitte prüfen und bei Bedarf alle Zusammenfassungen aktualisieren.');
+    if (summaryIssueState.hasMissingSummaries) {
+      setExportError('Mindestens eine Zusammenfassung fehlt. Bitte aktualisieren Sie die Zusammenfassungen oder tragen Sie den Text manuell ein.');
+      return;
+    }
+    if (summaryIssueState.hasReviewWarnings && !acceptedSummaryWarnings) {
+      setExportError('Prüfhinweise müssen vor dem Export akzeptiert oder durch Aktualisierung behoben werden.');
       return;
     }
     setExportingFormat(format);
@@ -225,7 +236,7 @@ export default function SummaryStep({
     structured &&
       SUMMARY_SECTIONS.some((section) => structured[section.key]?.length)
   );
-  const summaryHasBlockingIssue = hasBlockingSummaryIssue();
+  const summaryIssueState = getSummaryIssueState();
   const hasReviewContent =
     selectedWarnings.length > 0 ||
     hasStructuredItems ||
@@ -251,12 +262,27 @@ export default function SummaryStep({
         </div>
       )}
 
-      {summariesAreFresh && summaryHasBlockingIssue && (
+      {summariesAreFresh && summaryIssueState.hasAnyIssue && (
         <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <span>
-              Mindestens eine Zusammenfassung fehlt oder enthält Prüfhinweise. Prüfen Sie die betroffenen TOPs oder starten Sie die Aktualisierung erneut.
-            </span>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-3">
+              <div>
+                {summaryIssueState.hasMissingSummaries
+                  ? 'Mindestens eine Zusammenfassung fehlt. Prüfen Sie die betroffenen TOPs oder starten Sie die Aktualisierung erneut.'
+                  : 'Mindestens eine Zusammenfassung enthält Prüfhinweise. Sie können diese Hinweise nach Prüfung akzeptieren und trotzdem exportieren.'}
+              </div>
+              {!summaryIssueState.hasMissingSummaries && summaryIssueState.hasReviewWarnings && (
+                <label className="inline-flex items-center gap-2 text-sm font-medium text-red-900">
+                  <input
+                    type="checkbox"
+                    checked={acceptedSummaryWarnings}
+                    onChange={(event) => setAcceptedSummaryWarnings(event.target.checked)}
+                    className="h-4 w-4 rounded border-red-300"
+                  />
+                  Prüfhinweise akzeptieren und Export erlauben
+                </label>
+              )}
+            </div>
             <button
               type="button"
               onClick={onRegenerateAllSummaries}

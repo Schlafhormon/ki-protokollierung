@@ -515,7 +515,7 @@ statt des lokalen Ollama-Containers. Details stehen in `k8s/README.md`.
 
 Die ursprüngliche Protokollierungsassistenz entstand im Umfeld des AI Service
 Centre Berlin Brandenburg. Dieses Repository enthält die darauf aufbauende
-Weiterentwicklung durch Keule-Services, Erik Benke und die Stadt
+Weiterentwicklung durch Keule-Services und die Stadt
 Doberlug-Kirchhain.
 
 <p>
