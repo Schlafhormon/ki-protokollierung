@@ -294,6 +294,49 @@ export async function loadSession(sessionId: string): Promise<SessionResponse> {
   return response.json();
 }
 
+export interface RegenerateSessionSummariesPayload {
+  tops: string[];
+  transcript: TranscriptLine[];
+  assignments: (number | null)[];
+  speakerNames: Record<string, string>;
+  skippedAssignment: boolean;
+  model?: string;
+  systemPrompt?: string;
+}
+
+/**
+ * Regenerate all summaries for the current persisted session state.
+ */
+export async function regenerateSessionSummaries(
+  sessionId: string,
+  payload: RegenerateSessionSummariesPayload
+): Promise<SessionResponse> {
+  const response = await fetch(
+    `${API_BASE}/api/sessions/${sessionId}/summaries/regenerate`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        tops: payload.tops,
+        transcript: payload.transcript,
+        assignments: payload.assignments,
+        speaker_names: payload.speakerNames,
+        skipped_assignment: payload.skippedAssignment,
+        model: payload.model,
+        system_prompt: payload.systemPrompt,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    throw await readApiError(response, "Fehler beim Aktualisieren der Zusammenfassungen");
+  }
+
+  return response.json();
+}
+
 /**
  * Cancel a pending or running transcription job.
  */

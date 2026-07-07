@@ -12,6 +12,7 @@ import {
   loadSession,
   pollPipeline,
   pollTranscription,
+  regenerateSessionSummaries,
   saveSession,
   startPipeline,
   startTranscription,
@@ -29,6 +30,7 @@ vi.mock('./api', () => ({
   cancelPipeline: vi.fn(),
   startTranscription: vi.fn(),
   pollTranscription: vi.fn(),
+  regenerateSessionSummaries: vi.fn(),
   detectAgenda: vi.fn(),
   generateSummary: vi.fn(),
   extractTOPsFromPDF: vi.fn(),
@@ -72,7 +74,7 @@ function pipelineResult(
         { speaker: 'SPEAKER_00', text: 'Der Haushalt wird beraten.', start: 0, end: 2 },
       ],
       assignments: [0],
-      speaker_names: { SPEAKER_00: 'SPEAKER_00' },
+      speaker_names: { SPEAKER_00: 'Alice' },
       summaries: { 0: 'Der Haushalt wurde serverseitig zusammengefasst.' },
       summary_reviews: {},
       skipped_assignment: false,
@@ -161,6 +163,7 @@ describe('App pipeline flow', () => {
       fallbackUsed: false,
       chunksProcessed: 1,
     });
+    vi.mocked(regenerateSessionSummaries).mockResolvedValue(pipelineResult().session);
   });
 
   it('starts the end-to-end pipeline from the upload UI', async () => {
@@ -186,9 +189,6 @@ describe('App pipeline flow', () => {
     const pdfInput = container.querySelector<HTMLInputElement>('input[accept=".pdf,application/pdf"]');
     const pdf = new File(['pdf'], 'agenda.pdf', { type: 'application/pdf' });
 
-    await user.click(screen.getByRole('checkbox', {
-      name: /TOPs automatisch aus PDF erkennen und direkt verarbeiten/i,
-    }));
     await user.upload(audioInput!, new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
     await user.upload(pdfInput!, pdf);
     await user.click(screen.getByRole('button', { name: /automatisch verarbeiten/i }));
@@ -216,6 +216,9 @@ describe('App pipeline flow', () => {
     const pdf = new File(['pdf'], 'agenda.pdf', { type: 'application/pdf' });
     vi.mocked(extractTOPsFromPDF).mockResolvedValue(['Eröffnung', 'Haushalt']);
 
+    await user.click(screen.getByRole('checkbox', {
+      name: /TOPs automatisch aus PDF erkennen und direkt verarbeiten/i,
+    }));
     await user.upload(audioInput!, new File(['audio'], 'meeting.mp3', { type: 'audio/mpeg' }));
     await user.upload(pdfInput!, pdf);
     await screen.findByDisplayValue('Eröffnung');
@@ -234,29 +237,27 @@ describe('App pipeline flow', () => {
     });
   });
 
-  it('polls status and offers the direct protocol path for safe results', async () => {
+  it('polls status and opens the protocol step for safe results', async () => {
     await uploadAndStart();
 
     await waitFor(() => {
       expect(pollPipeline).toHaveBeenCalledWith('pipeline-1', expect.any(Function));
     });
-    expect(await screen.findByRole('button', { name: /direkt zum protokoll/i })).toBeInTheDocument();
+    expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
   });
 
   it('loads the completed result into app state without regenerating summaries', async () => {
-    const user = userEvent.setup();
-    await uploadAndStart(user);
-
-    await user.click(await screen.findByRole('button', { name: /direkt zum protokoll/i }));
+    await uploadAndStart();
 
     expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
     expect(generateSummary).not.toHaveBeenCalled();
+    expect(regenerateSessionSummaries).not.toHaveBeenCalled();
   });
 
   it('sets agenda detection from the pipeline result', async () => {
     vi.mocked(getPipelineResult).mockResolvedValue(
       pipelineResult(
-        {},
+        { speaker_names: { SPEAKER_00: 'SPEAKER_00' } },
         completedPipeline,
         [],
         {
@@ -352,10 +353,19 @@ describe('App pipeline flow', () => {
       fallbackUsed: false,
       chunksProcessed: 1,
     });
+    vi.mocked(getPipelineResult).mockResolvedValue(
+      pipelineResult({ speaker_names: { SPEAKER_00: 'SPEAKER_00' } })
+    );
+    vi.mocked(regenerateSessionSummaries).mockResolvedValue(
+      pipelineResult({
+        speaker_names: { SPEAKER_00: 'SPEAKER_00' },
+        tops: ['Neuer Haushalt'],
+        summaries: { 0: 'Neu generierte Zusammenfassung.' },
+      }).session
+    );
 
     await uploadAndStart(user);
 
-    expect(await screen.findByRole('button', { name: /direkt zum protokoll/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^zum protokoll/i })).toBeInTheDocument();
 
     const topInput = screen.getByLabelText(/ausgewählter top/i);
@@ -363,16 +373,15 @@ describe('App pipeline flow', () => {
     await user.type(topInput, 'Neuer Haushalt');
     await user.click(screen.getByRole('button', { name: /top umbenennen/i }));
 
-    expect(screen.queryByRole('button', { name: /direkt zum protokoll/i })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: /zusammenfassungen erstellen/i }));
+    await user.click(screen.getByRole('button', { name: /^zum protokoll/i }));
 
     await waitFor(() => {
-      expect(generateSummary).toHaveBeenCalledWith(
-        'Neuer Haushalt',
-        expect.arrayContaining([
-          expect.objectContaining({ text: 'Der Haushalt wird beraten.' }),
-        ]),
-        expect.any(Object)
+      expect(regenerateSessionSummaries).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({
+          tops: ['Neuer Haushalt'],
+          speakerNames: { SPEAKER_00: 'SPEAKER_00' },
+        })
       );
     });
     expect(await screen.findByText('Neu generierte Zusammenfassung.')).toBeInTheDocument();
@@ -431,7 +440,7 @@ describe('App pipeline flow', () => {
       expect(getPipelineStatus).toHaveBeenCalledWith('pipeline-1');
       expect(pollPipeline).toHaveBeenCalledWith('pipeline-1', expect.any(Function));
     });
-    expect(await screen.findByRole('button', { name: /direkt zum protokoll/i })).toBeInTheDocument();
+    expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
   });
 
   it('clears a failed restored pipeline id and loads the saved session', async () => {

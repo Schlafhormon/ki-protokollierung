@@ -1042,6 +1042,16 @@ class SummarizeResponse(BaseModel):
     chunks_processed: int = 1
 
 
+class SessionSummaryRegenerateRequest(BaseModel):
+    tops: List[str] = Field(default_factory=list)
+    transcript: List[TranscriptLine] = Field(default_factory=list)
+    assignments: List[Optional[int]] = Field(default_factory=list)
+    speaker_names: Dict[str, str] = Field(default_factory=dict)
+    skipped_assignment: bool = False
+    model: Optional[str] = None
+    system_prompt: Optional[str] = None
+
+
 class LLMDiagnosticsResponse(BaseModel):
     ok: bool
     base_url: str
@@ -2075,6 +2085,15 @@ def detect_pipeline_agenda(
     return fallback_agenda(transcript, agenda_tops)
 
 
+def format_line_for_summary(
+    line: dict[str, Any],
+    speaker_names: dict[str, str] | None = None,
+) -> str:
+    speaker = str(line.get("speaker", ""))
+    display_name = (speaker_names or {}).get(speaker, speaker)
+    return f"{display_name}: {line.get('text', '')}"
+
+
 def summarize_pipeline_segments(
     pipeline_id: str,
     *,
@@ -2082,6 +2101,7 @@ def summarize_pipeline_segments(
     tops: list[str],
     assignments: list[int | None],
     options: dict[str, Any],
+    speaker_names: dict[str, str] | None = None,
 ) -> tuple[dict[int, str], dict[int, Any]]:
     summaries: dict[int, str] = {}
     summary_reviews: dict[int, Any] = {}
@@ -2090,8 +2110,7 @@ def summarize_pipeline_segments(
     if not tops:
         try:
             transcript_text = "\n".join(
-                f"{line.get('speaker', '')}: {line.get('text', '')}"
-                for line in transcript
+                format_line_for_summary(line, speaker_names) for line in transcript
             )
             result = summarize_segment(
                 "Gesamtes Gespräch",
@@ -2168,7 +2187,7 @@ def summarize_pipeline_segments(
             continue
 
         transcript_text = "\n".join(
-            f"{line.get('speaker', '')}: {line.get('text', '')}" for line in lines
+            format_line_for_summary(line, speaker_names) for line in lines
         )
         try:
             result = summarize_segment(
@@ -2681,6 +2700,66 @@ async def get_session(session_id: str):
     session = load_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session nicht gefunden")
+    return build_session_response(session)
+
+
+@app.post(
+    "/api/sessions/{session_id}/summaries/regenerate",
+    response_model=SessionResponse,
+)
+async def regenerate_session_summaries(
+    session_id: str,
+    request: SessionSummaryRegenerateRequest,
+):
+    """Regenerate all TOP summaries for the current persisted review state."""
+    existing = load_session(session_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Session nicht gefunden")
+    if not request.transcript:
+        raise HTTPException(status_code=400, detail="Kein Transkript vorhanden")
+
+    transcript = [line_to_dict(line) for line in request.transcript]
+    tops = [top.strip() for top in request.tops if top.strip()]
+    assignments = list(request.assignments)
+    if tops and len(assignments) != len(transcript):
+        raise HTTPException(
+            status_code=400,
+            detail="Zuordnungen passen nicht zur Transkriptlänge",
+        )
+
+    no_top_mode = request.skipped_assignment or not tops
+    summary_tops = [] if no_top_mode else tops
+    summary_assignments = (
+        [None for _ in transcript] if no_top_mode else assignments
+    )
+
+    summaries, summary_reviews = summarize_pipeline_segments(
+        session_id,
+        transcript=transcript,
+        tops=summary_tops,
+        assignments=summary_assignments,
+        options={
+            "model": request.model,
+            "system_prompt": request.system_prompt,
+        },
+        speaker_names=request.speaker_names,
+    )
+
+    updated_state = dict(existing)
+    updated_state.update(
+        {
+            "session_id": session_id,
+            "transcript": transcript,
+            "tops": tops,
+            "assignments": summary_assignments if no_top_mode else assignments,
+            "speaker_names": request.speaker_names,
+            "summaries": summaries,
+            "summary_reviews": summary_reviews,
+            "skipped_assignment": no_top_mode,
+            "current_step": 3,
+        }
+    )
+    session = save_session(session_id, updated_state)
     return build_session_response(session)
 
 

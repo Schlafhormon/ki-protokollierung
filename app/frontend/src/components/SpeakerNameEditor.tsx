@@ -83,7 +83,7 @@ export default function SpeakerNameEditor({
     return Array.from(speakers.entries()).map(([id, value]) => ({ id, ...value }));
   }, [transcript]);
 
-  const [isExpanded, setIsExpanded] = useState(speakerInfo.length <= 3);
+  const [isExpanded, setIsExpanded] = useState(true);
   const [mergeTargets, setMergeTargets] = useState<Record<string, string>>({});
   const [profiles, setProfiles] = useState<SpeakerProfile[]>([]);
   const [observations, setObservations] = useState<SpeakerObservation[]>([]);

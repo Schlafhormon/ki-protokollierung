@@ -17,6 +17,8 @@ export default function UploadStep({
   setSkipAgendaDetection,
   autoDetectTopsFromPdf,
   setAutoDetectTopsFromPdf,
+  exportMetadata,
+  setExportMetadata,
 }: UploadStepProps) {
   const audioInputRef = useRef<HTMLInputElement>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
@@ -77,6 +79,7 @@ export default function UploadStep({
       if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
         setPdfFile(file);
         if (autoDetectTopsFromPdf) {
+          setSkipAgendaDetection(false);
           setExtractionError(null);
           setExtractedCount(null);
         } else {
@@ -91,6 +94,7 @@ export default function UploadStep({
       const file = e.target.files[0];
       setPdfFile(file);
       if (autoDetectTopsFromPdf) {
+        setSkipAgendaDetection(false);
         setExtractionError(null);
         setExtractedCount(null);
       } else {
@@ -166,6 +170,10 @@ export default function UploadStep({
     setExtractionError(null);
   };
 
+  const updateExportMetadata = (patch: Partial<typeof exportMetadata>) => {
+    setExportMetadata({ ...exportMetadata, ...patch });
+  };
+
   const canProceed = !!audioFile;
 
   return (
@@ -225,6 +233,68 @@ export default function UploadStep({
               </p>
             </div>
           )}
+        </div>
+      </div>
+
+      {/* Export metadata */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <h2 className="text-lg font-medium text-gray-900 mb-4 flex items-center gap-2">
+          <span className="text-xl">📝</span>
+          Sitzungsdaten für den Export
+        </h2>
+        <div className="grid gap-3 md:grid-cols-2">
+          <label className="text-sm font-medium text-gray-700">
+            Gremium
+            <input
+              value={exportMetadata.committee}
+              onChange={(event) => updateExportMetadata({ committee: event.target.value })}
+              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 font-normal text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="z. B. Hauptausschuss"
+            />
+          </label>
+          <label className="text-sm font-medium text-gray-700">
+            Datum
+            <input
+              type="date"
+              value={exportMetadata.date}
+              onChange={(event) => updateExportMetadata({ date: event.target.value })}
+              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 font-normal text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </label>
+          <label className="text-sm font-medium text-gray-700">
+            Ort
+            <input
+              value={exportMetadata.location}
+              onChange={(event) => updateExportMetadata({ location: event.target.value })}
+              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 font-normal text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="z. B. Rathaus, Sitzungssaal"
+            />
+          </label>
+          <label className="text-sm font-medium text-gray-700">
+            Sitzungstitel
+            <input
+              value={exportMetadata.title}
+              onChange={(event) => updateExportMetadata({ title: event.target.value })}
+              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 font-normal text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Sitzungsprotokoll"
+            />
+          </label>
+          <label className="text-sm font-medium text-gray-700 md:col-span-2">
+            Teilnehmer
+            <textarea
+              value={exportMetadata.participants.join('\n')}
+              onChange={(event) =>
+                updateExportMetadata({
+                  participants: event.target.value
+                    .split(/\n|;/)
+                    .map((participant) => participant.trim())
+                    .filter(Boolean),
+                })
+              }
+              className="mt-1 h-20 w-full resize-none rounded-md border border-gray-300 px-3 py-2 font-normal text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Eine Person pro Zeile"
+            />
+          </label>
         </div>
       </div>
 

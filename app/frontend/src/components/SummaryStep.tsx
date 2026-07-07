@@ -32,7 +32,9 @@ export default function SummaryStep({
   setSummaries,
   summaryReviews = {},
   onRegenerateSummary,
+  onRegenerateAllSummaries,
   isGenerating,
+  summariesAreFresh,
   audioUrl,
   speakerNames,
   exportMetadata,
@@ -149,6 +151,10 @@ export default function SummaryStep({
 
   const handleExport = async (format: ExportFormat) => {
     setExportError(null);
+    if (!summariesAreFresh) {
+      setExportError('Zusammenfassungen müssen nach den Korrekturen aktualisiert werden.');
+      return;
+    }
     setExportingFormat(format);
     try {
       const exportTops = hasTops ? tops : ['Gesamtes Gespräch'];
@@ -203,6 +209,24 @@ export default function SummaryStep({
 
   return (
     <div className="space-y-6">
+      {!summariesAreFresh && (
+        <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>
+              Die Zuordnung, Sprecher oder TOPs wurden geändert. Aktualisieren Sie alle Zusammenfassungen gemeinsam vor dem Export.
+            </span>
+            <button
+              type="button"
+              onClick={onRegenerateAllSummaries}
+              disabled={isGenerating}
+              className="rounded-lg bg-yellow-600 px-4 py-2 font-medium text-white hover:bg-yellow-700 disabled:opacity-50"
+            >
+              {isGenerating ? 'Wird aktualisiert...' : 'Alle Zusammenfassungen aktualisieren'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main Layout */}
       <div className="flex gap-6 h-[600px]">
         {/* TOPs Sidebar */}
@@ -494,7 +518,7 @@ export default function SummaryStep({
                 <button
                   key={format}
                   onClick={() => handleExport(format)}
-                  disabled={exportingFormat !== null}
+                  disabled={exportingFormat !== null || !summariesAreFresh}
                   className={`px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 ${
                     format === 'docx'
                       ? 'bg-blue-600 text-white hover:bg-blue-700'

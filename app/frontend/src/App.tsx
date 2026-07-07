@@ -18,6 +18,7 @@ import {
   getPipelineResult,
   cancelPipeline,
   generateSummary,
+  regenerateSessionSummaries,
   detectAgenda,
   checkBackendHealth,
   saveSession,
@@ -30,6 +31,7 @@ import type {
   PipelineResultResponse,
   SessionResponse,
   SessionSavePayload,
+  SpeakerObservation,
   SummaryReview,
   TranscriptLine,
 } from "./types";
@@ -44,9 +46,10 @@ const SPEAKER_MEMORY_OPT_IN_KEY = "speaker-memory-opt-in";
 // Implicit TOP title when no TOPs are defined
 const DEFAULT_TOP_TITLE = "Gesamtes Gespräch";
 const EMPTY_TOPS = ["", "", ""];
+const DEFAULT_SESSION_DATE = new Date().toISOString().slice(0, 10);
 const DEFAULT_EXPORT_METADATA: ExportMetadata = {
   committee: "",
-  date: "",
+  date: DEFAULT_SESSION_DATE,
   location: "",
   title: "Sitzungsprotokoll",
   participants: [],
@@ -243,6 +246,52 @@ function hasAnySummary(session: SessionResponse | SessionDraft): boolean {
   );
 }
 
+function getTranscriptSpeakers(transcript: TranscriptLine[] = []): string[] {
+  return Array.from(new Set(transcript.map((line) => line.speaker).filter(Boolean)));
+}
+
+function hasUnverifiedSpeakers(
+  session: SessionResponse,
+  observations: SpeakerObservation[] = []
+): boolean {
+  const speakers = getTranscriptSpeakers(session.transcript ?? []);
+  if (speakers.length === 0) {
+    return false;
+  }
+  if (observations.some((observation) => observation.status === "suggested")) {
+    return true;
+  }
+  return speakers.some((speaker) => {
+    const displayName = (session.speaker_names ?? {})[speaker]?.trim();
+    return !displayName || displayName.toLowerCase() === speaker.toLowerCase();
+  });
+}
+
+function applySuggestedSpeakerNames(
+  session: SessionResponse,
+  observations: SpeakerObservation[] = []
+): Record<string, string> {
+  const speakerNames = { ...(session.speaker_names ?? {}) };
+  observations.forEach((observation) => {
+    if (observation.status !== "suggested") {
+      return;
+    }
+    const suggestedName =
+      observation.profile_display_name?.trim() || observation.display_name?.trim();
+    if (!suggestedName) {
+      return;
+    }
+    const currentName = speakerNames[observation.local_speaker_id]?.trim();
+    if (
+      !currentName ||
+      currentName.toLowerCase() === observation.local_speaker_id.toLowerCase()
+    ) {
+      speakerNames[observation.local_speaker_id] = suggestedName;
+    }
+  });
+  return speakerNames;
+}
+
 export default function App() {
   // Current step in wizard
   const [currentStep, setCurrentStep] = useState(1);
@@ -273,7 +322,7 @@ export default function App() {
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [skippedAssignment, setSkippedAssignment] = useState(false);
   const [skipAgendaDetection, setSkipAgendaDetection] = useState(false);
-  const [autoDetectTopsFromPdf, setAutoDetectTopsFromPdf] = useState(false);
+  const [autoDetectTopsFromPdf, setAutoDetectTopsFromPdf] = useState(true);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [pipelineJob, setPipelineJob] = useState<PipelineJob | null>(null);
@@ -400,43 +449,59 @@ export default function App() {
   }, []);
 
   const applyPipelineResult = useCallback((result: PipelineResultResponse) => {
-    applySession(result.session);
+    const speakerObservations = result.speaker_observations ?? [];
+    const sessionWithSuggestedSpeakers: SessionResponse = {
+      ...result.session,
+      speaker_names: applySuggestedSpeakerNames(result.session, speakerObservations),
+    };
+    const summaryFingerprintSession =
+      JSON.stringify(sessionWithSuggestedSpeakers.speaker_names ?? {}) ===
+      JSON.stringify(result.session.speaker_names ?? {})
+        ? sessionWithSuggestedSpeakers
+        : result.session;
     const completedPipeline = result.pipeline;
     const warnings = result.warnings ?? completedPipeline.warnings ?? [];
     const agendaDetectionResult = result.agenda_detection ?? null;
     const needsReview = hasReviewUncertainty(
-      result.session,
+      sessionWithSuggestedSpeakers,
       warnings,
       agendaDetectionResult
     );
+    const needsSpeakerReview = hasUnverifiedSpeakers(
+      sessionWithSuggestedSpeakers,
+      speakerObservations
+    );
+    const shouldReviewBeforeProtocol = needsReview || needsSpeakerReview;
+
+    applySession(sessionWithSuggestedSpeakers);
 
     setPipelineJob(completedPipeline);
     setPipelineId(null);
-    setJobId(result.session.job_id ?? result.job?.job_id ?? completedPipeline.transcription_job_id ?? null);
+    setJobId(sessionWithSuggestedSpeakers.job_id ?? result.job?.job_id ?? completedPipeline.transcription_job_id ?? null);
     setAgendaDetection(agendaDetectionResult);
     setAgendaDetectionError(null);
     setSummaryReviews(
-      normalizeSummaryReviews(result.summary_reviews ?? result.session.summary_reviews)
+      normalizeSummaryReviews(result.summary_reviews ?? sessionWithSuggestedSpeakers.summary_reviews)
     );
     setSummaryInputFingerprint(
       buildSummaryInputFingerprint(
-        result.session.tops ?? [],
-        result.session.transcript ?? [],
-        result.session.assignments ?? [],
-        result.session.speaker_names ?? {}
+        summaryFingerprintSession.tops ?? [],
+        summaryFingerprintSession.transcript ?? [],
+        summaryFingerprintSession.assignments ?? [],
+        summaryFingerprintSession.speaker_names ?? {}
       )
     );
     setIsProcessing(false);
     setProcessingProgress(100);
     setProcessingStatus("Pipeline abgeschlossen");
     setProcessingError(null);
-    setDirectProtocolAvailable(!needsReview);
+    setDirectProtocolAvailable(false);
     setPipelineNotice(
-      needsReview
-        ? "Automatische Verarbeitung abgeschlossen. Bitte prüfen Sie unsichere Zuordnungen vor dem Protokoll."
-        : "Automatische Verarbeitung abgeschlossen. Sie können direkt zum Protokoll wechseln oder die Zuordnung prüfen."
+      shouldReviewBeforeProtocol
+        ? "Automatische Verarbeitung abgeschlossen. Prüfen Sie Sprecher und markierte Stellen, die Zusammenfassungen sind bereits erstellt."
+        : "Automatische Verarbeitung abgeschlossen. Das Protokoll ist vorbereitet."
     );
-    setCurrentStep(2);
+    setCurrentStep(shouldReviewBeforeProtocol ? 2 : 3);
 
     try {
       localStorage.removeItem(ACTIVE_PIPELINE_KEY);
@@ -472,7 +537,7 @@ export default function App() {
     setSpeakerNames({});
     setSkippedAssignment(false);
     setSkipAgendaDetection(false);
-    setAutoDetectTopsFromPdf(false);
+    setAutoDetectTopsFromPdf(true);
     setIsGeneratingSummary(false);
     setIsProcessing(false);
     setProcessingError(null);
@@ -1004,6 +1069,118 @@ export default function App() {
     }
   };
 
+  const generateAllSummariesForCurrentState = async () => {
+    const validTops = tops.filter((t) => t.trim() !== "");
+    const noTopMode = validTops.length === 0;
+    const effectiveAssignments = noTopMode
+      ? new Array(transcript.length).fill(null)
+      : assignments;
+    const prompt = noTopMode ? GENERIC_SUMMARY_PROMPT : llmSettings.systemPrompt;
+
+    setIsGeneratingSummary(true);
+    setSummaryInputFingerprint(null);
+    setSummaryReviews({});
+    setSummaries(
+      noTopMode
+        ? { 0: "Zusammenfassung wird generiert..." }
+        : Object.fromEntries(
+            validTops.map((_, index) => [index, "Zusammenfassung wird generiert..."])
+          )
+    );
+
+    if (noTopMode) {
+      setSkippedAssignment(true);
+      setAssignments(effectiveAssignments);
+    }
+
+    try {
+      if (!sessionId) {
+        throw new Error("Keine aktive Sitzung");
+      }
+
+      const updatedSession = await regenerateSessionSummaries(sessionId, {
+        tops: noTopMode ? [] : validTops,
+        transcript,
+        assignments: effectiveAssignments,
+        speakerNames,
+        skippedAssignment: noTopMode,
+        model: llmSettings.model,
+        systemPrompt: prompt,
+      });
+      const nextSummaries = normalizeSummaries(updatedSession.summaries);
+      const nextReviews = normalizeSummaryReviews(updatedSession.summary_reviews);
+      const nextTops = updatedSession.tops?.length ? updatedSession.tops : noTopMode ? [] : validTops;
+      const nextAssignments = updatedSession.assignments ?? effectiveAssignments;
+
+      setTops(noTopMode ? [] : nextTops);
+      setAssignments(nextAssignments);
+      setSummaries(nextSummaries);
+      setSummaryReviews(nextReviews);
+      setSkippedAssignment(Boolean(updatedSession.skipped_assignment));
+      setSummaryInputFingerprint(
+        buildSummaryInputFingerprint(
+          nextTops,
+          updatedSession.transcript ?? transcript,
+          nextAssignments,
+          speakerNames
+        )
+      );
+    } catch (error) {
+      console.warn("Backend summary regeneration failed, using client fallback:", error);
+      if (noTopMode) {
+        await generateSummaryForAll(transcript, true);
+      } else {
+        const generationFingerprint = buildSummaryInputFingerprint(
+          validTops,
+          transcript,
+          effectiveAssignments,
+          speakerNames
+        );
+        const newSummaries: Record<number, string> = {};
+        const newSummaryReviews: Record<number, SummaryReview> = {};
+
+        for (let index = 0; index < validTops.length; index++) {
+          const topLines = transcript.filter((_, i) => effectiveAssignments[i] === index);
+          if (topLines.length === 0) {
+            continue;
+          }
+          newSummaries[index] = "Zusammenfassung wird generiert...";
+          setSummaries({ ...newSummaries });
+          setSummaryReviews({ ...newSummaryReviews });
+
+          try {
+            const result = await generateSummary(
+              validTops[index]!,
+              applySpeakerNames(topLines),
+              {
+                model: llmSettings.model,
+                systemPrompt: llmSettings.systemPrompt,
+              }
+            );
+            newSummaries[index] = result.summary;
+            newSummaryReviews[index] = {
+              structured: result.structured ?? null,
+              source_links: result.sourceLinks,
+              review_warnings: result.reviewWarnings,
+              fallback_used: result.fallbackUsed,
+              chunks_processed: result.chunksProcessed,
+            };
+          } catch (summaryError) {
+            const errorMessage =
+              summaryError instanceof Error ? summaryError.message : "Unbekannter Fehler";
+            newSummaries[index] = `Fehler: ${errorMessage}`;
+            delete newSummaryReviews[index];
+          }
+          setSummaries({ ...newSummaries });
+          setSummaryReviews({ ...newSummaryReviews });
+        }
+        setSummaryInputFingerprint(generationFingerprint);
+      }
+    } finally {
+      setIsGeneratingSummary(false);
+    }
+  };
+
   // Handle step navigation
   const handleStep1Next = () => {
     if (backendAvailable === false) {
@@ -1015,96 +1192,18 @@ export default function App() {
   };
 
   const handleStep2Next = async () => {
-    // Move to step 3 first
     setCurrentStep(3);
-
-    let totalDuration = 0;
-
-    // Generate summaries for each TOP with assigned lines
     const validTops = tops.filter((t) => t.trim() !== "");
-    if (validTops.length === 0) {
-      setSkippedAssignment(true);
-      setAssignments(new Array(transcript.length).fill(null));
-      await generateSummaryForAll(transcript, true);
-      setDirectProtocolAvailable(false);
-      setPipelineNotice(null);
-      return;
-    }
     const hasCurrentSummaries = summariesAreFresh && validTops.some((_, index) => {
       const summary = summaries[index];
       return typeof summary === "string" && summary.trim() !== "";
-    });
+    }) || (validTops.length === 0 && summariesAreFresh && Boolean(summaries[0]?.trim()));
 
-    if (hasCurrentSummaries) {
-      setDirectProtocolAvailable(false);
-      setPipelineNotice(null);
-      return;
+    if (!hasCurrentSummaries) {
+      await generateAllSummariesForCurrentState();
     }
-
-    const generationFingerprint = currentSummaryInputFingerprint;
-    const newSummaries: Record<number, string> = {};
-    const newSummaryReviews: Record<number, SummaryReview> = {};
-    setSummaryInputFingerprint(null);
-
-    console.log(`[Summary] Starting generation for ${validTops.length} TOPs`);
-
-    for (let index = 0; index < validTops.length; index++) {
-      const topLines = transcript.filter((_, i) => assignments[i] === index);
-      console.log(
-        `[Summary] TOP ${index + 1}: ${topLines.length} lines assigned`
-      );
-
-      if (topLines.length > 0) {
-        // Set placeholder while generating
-        newSummaries[index] = "Zusammenfassung wird generiert...";
-        setSummaries({ ...newSummaries });
-        setSummaryReviews({ ...newSummaryReviews });
-
-        try {
-          console.log(`[Summary] Generating summary for TOP ${index + 1}...`);
-          const result = await generateSummary(
-            validTops[index]!,
-            applySpeakerNames(topLines),
-            {
-              model: llmSettings.model,
-              systemPrompt: llmSettings.systemPrompt,
-            }
-          );
-          console.log(
-            `[Summary] TOP ${index + 1} complete, length: ${
-              result.summary.length
-            }, duration: ${result.durationSeconds}s`
-          );
-          newSummaries[index] = result.summary;
-          newSummaryReviews[index] = {
-            structured: result.structured ?? null,
-            source_links: result.sourceLinks,
-            review_warnings: result.reviewWarnings,
-            fallback_used: result.fallbackUsed,
-            chunks_processed: result.chunksProcessed,
-          };
-          totalDuration += result.durationSeconds;
-          setSummaries({ ...newSummaries });
-          setSummaryReviews({ ...newSummaryReviews });
-        } catch (error) {
-          console.error(`[Summary] TOP ${index + 1} failed:`, error);
-          const errorMessage =
-            error instanceof Error ? error.message : "Unbekannter Fehler";
-          newSummaries[index] = `Fehler: ${errorMessage}`;
-          delete newSummaryReviews[index];
-          setSummaries({ ...newSummaries });
-          setSummaryReviews({ ...newSummaryReviews });
-        }
-      } else {
-        console.log(`[Summary] TOP ${index + 1}: skipped (no lines)`);
-      }
-    }
-
-    console.log(
-      `[Summary] All TOPs processed, total duration: ${totalDuration}s`
-    );
-    setSummaryInputFingerprint(generationFingerprint);
-
+    setDirectProtocolAvailable(false);
+    setPipelineNotice(null);
   };
 
   const handleStep2Back = () => {
@@ -1324,6 +1423,8 @@ export default function App() {
           setSkipAgendaDetection={setSkipAgendaDetection}
           autoDetectTopsFromPdf={autoDetectTopsFromPdf}
           setAutoDetectTopsFromPdf={setAutoDetectTopsFromPdf}
+          exportMetadata={exportMetadata}
+          setExportMetadata={setExportMetadata}
         />
       ) : currentStep === 2 ? (
         <AssignmentStep
@@ -1342,7 +1443,14 @@ export default function App() {
           speakerNames={speakerNames}
           setSpeakerNames={setSpeakerNames}
           sessionId={sessionId}
-          hasSummaries={hasFreshSummariesInState}
+          hasSummaries={hasAnySummary({
+            tops,
+            transcript,
+            assignments,
+            speaker_names: speakerNames,
+            summaries,
+            skipped_assignment: skippedAssignment,
+          })}
           rememberSpeakers={rememberSpeakers}
         />
       ) : (
@@ -1355,7 +1463,9 @@ export default function App() {
           setSummaries={setSummaries}
           summaryReviews={summariesAreFresh ? summaryReviews : {}}
           onRegenerateSummary={handleRegenerateSummary}
+          onRegenerateAllSummaries={generateAllSummariesForCurrentState}
           isGenerating={isGeneratingSummary}
+          summariesAreFresh={summariesAreFresh}
           audioUrl={audioUrl ?? undefined}
           speakerNames={speakerNames}
           exportMetadata={exportMetadata}

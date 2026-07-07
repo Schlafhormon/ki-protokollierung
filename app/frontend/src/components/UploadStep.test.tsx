@@ -24,6 +24,17 @@ const defaultProps: UploadStepProps = {
   setSkipAgendaDetection: vi.fn(),
   autoDetectTopsFromPdf: false,
   setAutoDetectTopsFromPdf: vi.fn(),
+  exportMetadata: {
+    committee: '',
+    date: '2026-07-07',
+    location: '',
+    title: 'Sitzungsprotokoll',
+    participants: [],
+    includeSpeakerList: true,
+    includeTranscriptExcerpt: false,
+    includeGenerationNote: true,
+  },
+  setExportMetadata: vi.fn(),
 };
 
 function renderUploadStep(overrides: Partial<UploadStepProps> = {}) {

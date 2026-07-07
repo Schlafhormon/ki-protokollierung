@@ -24,7 +24,9 @@ const defaultProps: SummaryStepProps = {
   },
   setSummaries: vi.fn(),
   onRegenerateSummary: vi.fn().mockResolvedValue(undefined),
+  onRegenerateAllSummaries: vi.fn().mockResolvedValue(undefined),
   isGenerating: false,
+  summariesAreFresh: true,
   speakerNames: {},
   exportMetadata: {
     committee: 'Hauptausschuss',

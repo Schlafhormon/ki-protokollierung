@@ -695,6 +695,86 @@ def test_pipeline_runs_to_reviewable_result_and_persists_status_after_cache_clea
         assert "Manuell korrigierte Zusammenfassung." in export_response.text
 
 
+def test_session_summary_regeneration_updates_all_tops_with_speaker_names(
+    tmp_path, monkeypatch
+):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+    captured = []
+    persistence.save_session(
+        "summary-session",
+        {
+            "job_id": None,
+            "current_step": 2,
+            "tops": ["Haushalt"],
+            "transcript": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Der Haushalt wird beraten.",
+                    "start": 0.0,
+                    "end": 2.0,
+                }
+            ],
+            "assignments": [0],
+            "speaker_names": {"SPEAKER_00": "Frau Beispiel"},
+            "summaries": {0: "Alt."},
+            "summary_reviews": {},
+            "skipped_assignment": False,
+            "export_metadata": {"title": "Sitzung"},
+        },
+    )
+
+    def fake_summarize_segment(top_title, transcript_text, model=None, system_prompt=None):
+        captured.append(
+            {
+                "top_title": top_title,
+                "transcript_text": transcript_text,
+                "model": model,
+                "system_prompt": system_prompt,
+            }
+        )
+        return summarize.SummarizationResult(
+            summary=f"Neu: {top_title}",
+            duration_seconds=0.01,
+            structured=summarize.StructuredSummary(
+                discussion=["Der Haushalt wurde beraten."]
+            ),
+        )
+
+    monkeypatch.setattr(main, "summarize_segment", fake_summarize_segment)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/sessions/summary-session/summaries/regenerate",
+            json={
+                "tops": ["Haushalt"],
+                "transcript": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "text": "Der Haushalt wird beraten.",
+                        "start": 0.0,
+                        "end": 2.0,
+                    }
+                ],
+                "assignments": [0],
+                "speaker_names": {"SPEAKER_00": "Frau Beispiel"},
+                "skipped_assignment": False,
+                "model": "fake-llm",
+                "system_prompt": "Kurz",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["current_step"] == 3
+    assert body["summaries"]["0"] == "Neu: Haushalt"
+    assert body["export_metadata"]["title"] == "Sitzung"
+    assert captured[0]["transcript_text"] == (
+        "Frau Beispiel: Der Haushalt wird beraten."
+    )
+    assert captured[0]["model"] == "fake-llm"
+    assert captured[0]["system_prompt"] == "Kurz"
+
+
 def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypatch):
     configure_test_app(tmp_path, monkeypatch, concurrency=1)
     extracted_calls = []

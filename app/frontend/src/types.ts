@@ -290,6 +290,8 @@ export interface UploadStepProps {
   setSkipAgendaDetection: (enabled: boolean) => void;
   autoDetectTopsFromPdf: boolean;
   setAutoDetectTopsFromPdf: (enabled: boolean) => void;
+  exportMetadata: ExportMetadata;
+  setExportMetadata: (metadata: ExportMetadata) => void;
 }
 
 export interface ProcessingStepProps {
@@ -329,7 +331,9 @@ export interface SummaryStepProps {
   setSummaries: (summaries: Record<number, string>) => void;
   summaryReviews?: Record<number, SummaryReview>;
   onRegenerateSummary: (topIndex: number) => Promise<void>;
+  onRegenerateAllSummaries: () => Promise<void>;
   isGenerating: boolean;
+  summariesAreFresh: boolean;
   audioUrl?: string;  // URL to stream audio for playback
   speakerNames: Record<string, string>;
   exportMetadata: ExportMetadata;
