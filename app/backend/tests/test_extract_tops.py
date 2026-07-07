@@ -6,6 +6,7 @@ from extract_tops import (
     extract_agenda_data_from_text,
     extract_session_metadata_from_text,
     extract_text_from_pdf,
+    extract_tops_heuristically_from_text,
     extract_tops_from_text,
     parse_agenda_data_response,
     parse_tops_response,
@@ -90,6 +91,43 @@ def test_parse_agenda_data_response_handles_json_and_metadata():
     }
 
 
+def test_parse_agenda_data_response_falls_back_to_pdf_tops_when_json_tops_are_empty():
+    pdf_text = """
+    Ausschuss für Trink- und Abwasser
+    Einladung
+    hiermit lade ich Sie zur 06. Sitzung des Ausschusses für Trink- und Abwasser
+    am 27.04.2026
+    in das Refektorium, Schlossplatz Doberlug
+    Tagesordnung
+    TOP I. Öffentlicher Teil
+    01 Eröffnung der Sitzung
+    02 Einwohnerfragestunde
+    TOP II. Nichtöffentlicher Teil
+    01 Bestätigung der Tagesordnung
+    """
+
+    result = parse_agenda_data_response(
+        """
+        {
+          "tops": [],
+          "metadata": {
+            "committee": "Ausschuss für Trink- und Abwasser",
+            "date": "2026-04-27",
+            "location": "Refektorium, Schlossplatz Doberlug",
+            "title": "06. Sitzung des Ausschusses für Trink- und Abwasser"
+          }
+        }
+        """,
+        fallback_text=pdf_text,
+    )
+
+    assert result.tops == [
+        "Eröffnung der Sitzung",
+        "Einwohnerfragestunde",
+        "Bestätigung der Tagesordnung",
+    ]
+
+
 def test_extract_agenda_data_from_text_uses_structured_prompt(fake_openai_module):
     fake_openai_module.content = """
     {
@@ -129,3 +167,25 @@ def test_extract_session_metadata_from_test_pdf():
     assert metadata.date == "2026-04-27"
     assert metadata.location == "Refektorium, Schlossplatz Doberlug"
     assert metadata.title == "06. Sitzung des Ausschusses für Trink- und Abwasser"
+
+
+def test_extract_tops_heuristically_from_test_pdf():
+    pdf_path = Path(__file__).resolve().parents[3] / "Testsdata" / "6.ATA TOPS.pdf"
+    pdf_text = extract_text_from_pdf(str(pdf_path))
+
+    tops = extract_tops_heuristically_from_text(pdf_text)
+
+    assert tops == [
+        "Eröffnung der Sitzung, Feststellung der ordnungsgemäßen Ladung und Bestätigung der Tagesordnung",
+        "Entscheidung über eventuelle Einwendungen gegen die Niederschrift der öffentlichen Ausschusssitzung am 19.01.2026",
+        "Verpflichtung Herr Krull",
+        "Einwohnerfragestunde",
+        "Informationen Stand „Vereinheitlichung Gebührengebiete“",
+        "Einwohnerfragestunde",
+        "Anfragen und Informationen",
+        "Schließung der öffentlichen Sitzung",
+        "Bestätigung der Tagesordnung",
+        "Entscheidung über eventuelle Einwendungen gegen die Niederschrift der nichtöffentlichen Ausschusssitzung am 19.01.2026",
+        "Anfragen und Informationen",
+        "Schließung der nichtöffentlichen Sitzung",
+    ]

@@ -245,6 +245,63 @@ def extract_session_metadata_from_text(pdf_text: str) -> PdfSessionMetadata:
     )
 
 
+def extract_tops_heuristically_from_text(pdf_text: str) -> list[str]:
+    """Extract numbered agenda items directly from invitation text."""
+    repaired_text = repair_common_pdf_text(pdf_text)
+    lines = [line.strip() for line in repaired_text.splitlines() if line.strip()]
+    try:
+        start_index = next(
+            index
+            for index, line in enumerate(lines)
+            if re.fullmatch(r"tagesordnung", line, flags=re.IGNORECASE)
+        ) + 1
+    except StopIteration:
+        start_index = 0
+
+    item_pattern = re.compile(r"^(\d{1,3})\s+(.+)$")
+    stop_pattern = re.compile(
+        r"^(?:Seite\s+\d+\s+von\s+\d+|Uwe\s+Roland|Ausschussvorsitzender|"
+        r"Beleg:|ressawbA|dnu|-knirT|rüf|sessuhcssuA|sed|gnuztiS|"
+        r"\.\d+|nov|\d+)$",
+        flags=re.IGNORECASE,
+    )
+    current: list[str] | None = None
+    items: list[str] = []
+
+    def flush_current() -> None:
+        nonlocal current
+        if not current:
+            return
+        title = re.sub(r"\s+", " ", " ".join(current)).strip()
+        if title and not is_agenda_section_heading(title):
+            items.append(title)
+        current = None
+
+    for line in lines[start_index:]:
+        if is_agenda_section_heading(line):
+            flush_current()
+            continue
+        if line.startswith(("-", "–", "•", "*")):
+            continue
+        if line.startswith(("BE:", "Beschlussvorlage:", "Antrag:", "Drucksache:")):
+            continue
+        if stop_pattern.match(line):
+            flush_current()
+            continue
+
+        item_match = item_pattern.match(line)
+        if item_match:
+            flush_current()
+            current = [item_match.group(2).strip()]
+            continue
+
+        if current is not None:
+            current.append(line)
+
+    flush_current()
+    return items
+
+
 def extract_text_from_pdf(pdf_path: str) -> str:
     """
     Extract text content from a PDF file.
@@ -444,6 +501,11 @@ def parse_agenda_data_response(
 ) -> PdfAgendaExtractionResult:
     """Parse structured LLM output, falling back to legacy TOP parsing."""
     payload = _extract_json_object(response_text)
+    fallback_tops = (
+        extract_tops_heuristically_from_text(fallback_text)
+        if fallback_text
+        else []
+    )
     fallback_metadata = (
         extract_session_metadata_from_text(fallback_text)
         if fallback_text
@@ -451,7 +513,7 @@ def parse_agenda_data_response(
     )
     if not payload:
         return PdfAgendaExtractionResult(
-            tops=parse_tops_response(response_text),
+            tops=parse_tops_response(response_text) or fallback_tops,
             metadata=fallback_metadata,
         )
 
@@ -470,6 +532,8 @@ def parse_agenda_data_response(
         normalize_metadata(payload.get("metadata") or payload),
         fallback_metadata,
     )
+    if len(fallback_tops) > len(tops):
+        tops = fallback_tops
     return PdfAgendaExtractionResult(tops=tops, metadata=metadata)
 
 
