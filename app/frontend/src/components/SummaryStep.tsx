@@ -237,6 +237,19 @@ export default function SummaryStep({
       SUMMARY_SECTIONS.some((section) => structured[section.key]?.length)
   );
   const summaryIssueState = getSummaryIssueState();
+  const speakerCount = Array.from(new Set(transcript.map((line) => line.speaker))).length;
+  const assignedLineCount = hasTops
+    ? assignments.filter((assignment) => assignment !== null && assignment !== undefined).length
+    : transcript.length;
+  const metadataMissing = [
+    exportMetadata.committee.trim(),
+    exportMetadata.date.trim(),
+    exportMetadata.title.trim(),
+  ].some((value) => !value);
+  const exportBlocked =
+    !summariesAreFresh ||
+    summaryIssueState.hasMissingSummaries ||
+    (summaryIssueState.hasReviewWarnings && !acceptedSummaryWarnings);
   const hasReviewContent =
     selectedWarnings.length > 0 ||
     hasStructuredItems ||
@@ -294,6 +307,47 @@ export default function SummaryStep({
           </div>
         </div>
       )}
+
+      <div className="rounded-lg border border-blue-200 bg-blue-50 p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <p className="text-sm font-medium text-blue-700">Exportfreigabe</p>
+            <h2 className="mt-1 text-xl font-semibold text-gray-950">
+              Protokoll prüfen und herunterladen
+            </h2>
+            <p className="mt-2 max-w-3xl text-sm text-blue-900">
+              Zusammenfassungen, Belege und Exportdaten bleiben editierbar. Blockierende
+              Hinweise müssen akzeptiert oder durch Aktualisierung behoben werden.
+            </p>
+          </div>
+          <div className="grid min-w-0 gap-2 sm:grid-cols-2 lg:w-[520px]">
+            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
+              <div className="text-xs font-medium uppercase text-gray-400">Zusammenfassungen</div>
+              <div className={`mt-1 text-sm font-semibold ${summariesAreFresh && !summaryIssueState.hasMissingSummaries ? 'text-green-700' : 'text-yellow-700'}`}>
+                {summariesAreFresh && !summaryIssueState.hasMissingSummaries ? 'Aktuell' : 'Prüfen'}
+              </div>
+            </div>
+            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
+              <div className="text-xs font-medium uppercase text-gray-400">Hinweise</div>
+              <div className={`mt-1 text-sm font-semibold ${summaryIssueState.hasReviewWarnings && !acceptedSummaryWarnings ? 'text-yellow-700' : 'text-green-700'}`}>
+                {summaryIssueState.hasReviewWarnings && !acceptedSummaryWarnings ? 'Offen' : 'Erledigt'}
+              </div>
+            </div>
+            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
+              <div className="text-xs font-medium uppercase text-gray-400">Zuordnung</div>
+              <div className="mt-1 text-sm font-semibold text-gray-900">
+                {assignedLineCount}/{transcript.length} Zeilen
+              </div>
+            </div>
+            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
+              <div className="text-xs font-medium uppercase text-gray-400">Metadaten</div>
+              <div className={`mt-1 text-sm font-semibold ${metadataMissing ? 'text-yellow-700' : 'text-green-700'}`}>
+                {metadataMissing ? 'Unvollständig' : 'Bereit'}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* Main Layout */}
       <div className="flex gap-6 h-[600px]">
@@ -582,7 +636,10 @@ export default function SummaryStep({
             <div>
               <h3 className="font-medium text-gray-900">Export</h3>
               <p className="text-sm text-gray-500">
-                Metadaten erfassen und Protokoll als Datei herunterladen
+                Metadaten final prüfen und Protokoll als Datei herunterladen
+              </p>
+              <p className="mt-1 text-xs text-gray-400">
+                {speakerCount} Sprecher erkannt · {hasTops ? `${tops.length} TOPs` : 'Gesamtes Gespräch'}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -592,7 +649,7 @@ export default function SummaryStep({
                   onClick={() => handleExport(format)}
                   disabled={exportingFormat !== null || !summariesAreFresh}
                   className={`px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 ${
-                    format === 'docx'
+                    format === 'docx' && !exportBlocked
                       ? 'bg-blue-600 text-white hover:bg-blue-700'
                       : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                   }`}

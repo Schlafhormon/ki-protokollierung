@@ -219,6 +219,12 @@ export default function SpeakerNameEditor({
   const selectedProfile = profiles.find(
     (profile) => profile.profile_id === selectedProfileId
   );
+  const suggestedCount = speakerInfo.filter(({ id }) => suggestionsBySpeaker.has(id)).length;
+  const acceptedCount = speakerInfo.filter(({ id }) => acceptedBySpeaker.has(id)).length;
+  const namedCount = speakerInfo.filter(({ id }) => {
+    const name = speakerNames[id]?.trim();
+    return name && name.toLowerCase() !== id.toLowerCase();
+  }).length;
 
   const refreshProfiles = async () => {
     const loadedProfiles = await listSpeakerProfiles();
@@ -512,11 +518,26 @@ export default function SpeakerNameEditor({
         onClick={() => setIsExpanded(!isExpanded)}
         className="w-full px-4 py-3 flex items-center justify-between bg-gray-50 hover:bg-gray-100 transition-colors"
       >
-        <span className="font-medium text-gray-700">
-          Sprecher umbenennen und Profile prüfen
-          <span className="ml-2 text-sm font-normal text-gray-500">
-            (optional)
+        <span className="flex flex-wrap items-center gap-2 text-left">
+          <span className="font-medium text-gray-700">
+            Sprecher umbenennen und Profile prüfen
+            <span className="ml-2 text-sm font-normal text-gray-500">
+              (optional)
+            </span>
           </span>
+          <span className="rounded-full bg-white px-2 py-0.5 text-xs font-medium text-gray-500">
+            {namedCount}/{speakerInfo.length} benannt
+          </span>
+          {rememberSpeakers && suggestedCount > 0 && (
+            <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">
+              {suggestedCount} Vorschläge
+            </span>
+          )}
+          {rememberSpeakers && acceptedCount > 0 && (
+            <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
+              {acceptedCount} bestätigt
+            </span>
+          )}
         </span>
         <span className="text-gray-400 text-lg">
           {isExpanded ? '▲' : '▼'}
@@ -525,10 +546,31 @@ export default function SpeakerNameEditor({
 
       {isExpanded && (
         <div className="p-4 space-y-4 border-t border-gray-200">
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+              <div className="text-xs font-medium uppercase text-gray-400">Erkannt</div>
+              <div className="mt-1 text-sm font-semibold text-gray-900">
+                {speakerInfo.length} Sprecher
+              </div>
+            </div>
+            <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+              <div className="text-xs font-medium uppercase text-gray-400">Benannt</div>
+              <div className={`mt-1 text-sm font-semibold ${namedCount === speakerInfo.length ? 'text-green-700' : 'text-yellow-700'}`}>
+                {namedCount}/{speakerInfo.length}
+              </div>
+            </div>
+            <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+              <div className="text-xs font-medium uppercase text-gray-400">Profile</div>
+              <div className="mt-1 text-sm font-semibold text-gray-900">
+                {rememberSpeakers ? `${suggestedCount} Vorschläge` : 'Aus'}
+              </div>
+            </div>
+          </div>
+
           <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
             {rememberSpeakers
-              ? 'Lokale Benennung wirkt nur in dieser Sitzung. Ein dauerhaftes Sprecherprofil wird erst gespeichert, wenn Sie einen Vorschlag übernehmen, ein neues Profil merken oder ein bestehendes Profil zuordnen.'
-              : 'Lokale Benennung wirkt nur in dieser Sitzung. Dauerhafte Sprecherprofile sind ausgeschaltet und werden in diesem Durchlauf nicht vorgeschlagen oder gespeichert.'}
+              ? 'Bestätigen Sie passende Vorschläge oder geben Sie pro lokalem Sprecher den korrekten Namen ein. Dauerhafte Profile entstehen erst durch eine ausdrückliche Aktion.'
+              : 'Geben Sie bei Bedarf Namen für diese Sitzung ein. Dauerhafte Sprecherprofile sind ausgeschaltet und werden in diesem Durchlauf nicht vorgeschlagen oder gespeichert.'}
           </div>
 
           {sessionId && reviewStatus === 'loading' && (

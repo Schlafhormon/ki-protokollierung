@@ -1,8 +1,8 @@
 import type { StepIndicatorProps } from '../types';
 
 const steps = [
-  { id: 1, name: 'Hochladen' },
-  { id: 2, name: 'Zuordnen' },
+  { id: 1, name: 'Start' },
+  { id: 2, name: 'Prüfen' },
   { id: 3, name: 'Exportieren' },
 ];
 

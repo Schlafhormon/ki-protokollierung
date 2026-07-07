@@ -469,6 +469,7 @@ export default function AssignmentStep({
 
   const assignedCount = assignments.filter((a) => a !== null).length;
   const totalCount = transcript.length;
+  const unassignedCount = Math.max(0, totalCount - assignedCount);
   const hasTops = tops.length > 0;
   const canProceed = hasTops ? assignedCount > 0 : true;
   const selectedSegmentBounds =
@@ -476,6 +477,20 @@ export default function AssignmentStep({
   const safeSuggestionCount =
     agendaDetection?.segments.filter((segment) => !segment.uncertain && segment.confidence >= 0.7)
       .length ?? 0;
+  const speakerIds = Array.from(new Set(transcript.map((line) => line.speaker).filter(Boolean)));
+  const openSpeakerCount = speakerIds.filter((speakerId) => {
+    const displayName = speakerNames[speakerId]?.trim();
+    return !displayName || displayName.toLowerCase() === speakerId.toLowerCase();
+  }).length;
+  const uncertainSegmentCount =
+    agendaDetection?.segments.filter((segment) => segment.uncertain).length ?? 0;
+  const topReviewStatus = !hasTops
+    ? 'Nicht erforderlich'
+    : uncertainSegmentCount > 0 || unassignedCount > 0
+      ? 'Prüfen'
+      : 'Bereit';
+  const speakerReviewStatus = openSpeakerCount > 0 ? 'Prüfen' : 'Bereit';
+  const protocolDraftStatus = hasSummaries ? 'Vorbereitet' : 'Wird nach Prüfung erstellt';
 
   const getDetectionSegmentForLine = (lineIndex: number) =>
     agendaDetection?.segments.find(
@@ -484,21 +499,50 @@ export default function AssignmentStep({
 
   return (
     <div className="space-y-6">
-      {/* Instructions */}
-      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-        <p className="text-blue-800 text-sm">
-          {hasTops ? (
-            <>
-              <strong>Anleitung:</strong> 1) TOP links auswählen → 2) Zeilen rechts
-              anklicken (Shift+Klick für Bereich) → 3) Zugeordnete Zeilen werden
-              farblich markiert{audioUrl && ' → Doppelklick auf Zeile zum Abspielen'}
-            </>
-          ) : (
-            <>
-              Keine TOPs angelegt. Das gesamte Transkript wird ohne automatische TOP-Erkennung zusammengefasst.
-            </>
-          )}
-        </p>
+      {/* Review overview */}
+      <div className="rounded-lg border border-blue-200 bg-blue-50 p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <p className="text-sm font-medium text-blue-700">Prüfung nach der Automatik</p>
+            <h2 className="mt-1 text-xl font-semibold text-gray-950">
+              Kontrollieren Sie nur die markierten Sprecher und TOP-Zuordnungen.
+            </h2>
+            <p className="mt-2 max-w-3xl text-sm text-blue-900">
+              {hasTops
+                ? 'Die Transkription und der Protokollentwurf sind vorbereitet. Korrekturen wirken direkt auf die spätere Zusammenfassung und den Export.'
+                : 'Keine TOPs angelegt. Das gesamte Transkript wird ohne automatische TOP-Erkennung zusammengefasst.'}
+            </p>
+          </div>
+          <div className="grid min-w-0 gap-2 sm:grid-cols-3 lg:w-[520px]">
+            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
+              <div className="text-xs font-medium uppercase text-gray-400">Sprecher</div>
+              <div className={`mt-1 text-sm font-semibold ${openSpeakerCount > 0 ? 'text-yellow-700' : 'text-green-700'}`}>
+                {speakerReviewStatus}
+              </div>
+              <div className="mt-1 text-xs text-gray-500">
+                {openSpeakerCount > 0 ? `${openSpeakerCount} offen` : `${speakerIds.length} erkannt`}
+              </div>
+            </div>
+            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
+              <div className="text-xs font-medium uppercase text-gray-400">TOPs</div>
+              <div className={`mt-1 text-sm font-semibold ${topReviewStatus === 'Prüfen' ? 'text-yellow-700' : 'text-green-700'}`}>
+                {topReviewStatus}
+              </div>
+              <div className="mt-1 text-xs text-gray-500">
+                {hasTops ? `${assignedCount}/${totalCount} Zeilen` : 'Gesamtgespräch'}
+              </div>
+            </div>
+            <div className="rounded-md border border-blue-200 bg-white px-3 py-2">
+              <div className="text-xs font-medium uppercase text-gray-400">Entwurf</div>
+              <div className="mt-1 text-sm font-semibold text-gray-900">
+                {protocolDraftStatus}
+              </div>
+              <div className="mt-1 text-xs text-gray-500">
+                {hasSummaries ? 'Zusammenfassungen vorhanden' : 'Nächster Schritt'}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Speaker Name Editor */}
@@ -518,7 +562,7 @@ export default function AssignmentStep({
           <div>
             <h3 className="font-medium text-gray-900">Automatisch erkannte Segmente</h3>
             <p className="text-sm text-gray-600">
-              Prüfen Sie die TOP-Grenzen und korrigieren Sie unsichere Bereiche bei Bedarf.
+              Sichere Treffer sind bereits nutzbar; gelb markierte Bereiche sollten geprüft werden.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -602,25 +646,33 @@ export default function AssignmentStep({
           </div>
         ) : (
           <div className="text-sm text-gray-600">
-            Keine automatischen Segmente verfügbar. Nutzen Sie die manuelle Zeilenzuordnung.
+            Keine automatischen Segmente verfügbar. Nutzen Sie bei Bedarf die manuelle Zeilenzuordnung.
           </div>
         )}
       </div>
 
       {/* Progress */}
-      <div className="flex items-center justify-between text-sm text-gray-600">
-        <span>
-          {assignedCount} von {totalCount} Zeilen zugeordnet
-        </span>
-        <div className="w-48 h-2 bg-gray-200 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-blue-500 transition-all"
-            style={{ width: `${totalCount ? (assignedCount / totalCount) * 100 : 0}%` }}
-          />
+      <div className="rounded-lg border border-gray-200 bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-gray-600">
+          <span>
+            {assignedCount} von {totalCount} Zeilen zugeordnet
+          </span>
+          {hasTops && unassignedCount > 0 && (
+            <span className="rounded-full bg-yellow-100 px-3 py-1 text-xs font-medium text-yellow-800">
+              {unassignedCount} Zeilen ohne TOP
+            </span>
+          )}
+          <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 sm:w-64">
+            <div
+              className="h-full bg-blue-500 transition-all"
+              style={{ width: `${totalCount ? (assignedCount / totalCount) * 100 : 0}%` }}
+            />
+          </div>
         </div>
       </div>
 
       <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 flex flex-wrap items-center gap-2 text-sm">
+        <span className="mr-1 font-medium text-gray-900">Erweiterte Korrektur</span>
         <span className="text-gray-700">
           {selectedLineIndex === null
             ? 'Keine Zeile ausgewählt'
