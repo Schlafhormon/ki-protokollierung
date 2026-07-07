@@ -254,7 +254,9 @@ export interface ExportMetadata {
   title: string;
   participants: string[];
   includeSpeakerList: boolean;
-  includeTranscriptExcerpt: boolean;
+  includeTranscript: boolean;
+  includeTranscriptExcerpt?: boolean;
+  groupTranscriptByTop: boolean;
   includeGenerationNote: boolean;
 }
 

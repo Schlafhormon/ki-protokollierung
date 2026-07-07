@@ -18,7 +18,8 @@ EXPORT_PAYLOAD = {
     },
     "appendix": {
         "include_speaker_list": True,
-        "include_transcript_excerpt": True,
+        "include_transcript": True,
+        "group_transcript_by_top": False,
         "include_generation_note": True,
     },
     "tops": ["Begrüßung", "Haushalt"],
@@ -66,8 +67,52 @@ def test_txt_export_contains_metadata_agenda_sections_and_appendix():
     assert "Abstimmung:" in content
     assert "Maßnahmen/offene Punkte:" in content
     assert "Sprecherliste:" in content
-    assert "Transkript-Auszug:" in content
+    assert "Transkript:" in content
+    assert "Ich eröffne die Sitzung." in content
+    assert "Der Haushalt wird beraten." in content
     assert "Bearbeitungs-/Generierungshinweis:" in content
+
+
+def test_txt_export_can_group_full_transcript_by_top():
+    payload = {
+        **EXPORT_PAYLOAD,
+        "appendix": {
+            **EXPORT_PAYLOAD["appendix"],
+            "group_transcript_by_top": True,
+        },
+    }
+
+    with TestClient(main.app) as client:
+        response = client.post("/api/export", json=payload)
+
+    assert response.status_code == 200
+    content = response.text
+    assert "Transkript:" in content
+    assert "TOP: TOP 1: Begrüßung" in content
+    assert "TOP: TOP 2: Haushalt" in content
+    assert "[0:00] Alice: Ich eröffne die Sitzung." in content
+    assert "[0:03] Bob: Der Haushalt wird beraten." in content
+
+
+def test_legacy_transcript_excerpt_flag_exports_full_transcript():
+    payload = {
+        **EXPORT_PAYLOAD,
+        "appendix": {
+            "include_speaker_list": False,
+            "include_transcript_excerpt": True,
+            "transcript_excerpt_limit": 1,
+            "include_generation_note": False,
+        },
+    }
+
+    with TestClient(main.app) as client:
+        response = client.post("/api/export", json=payload)
+
+    assert response.status_code == 200
+    content = response.text
+    assert "Transkript:" in content
+    assert "Ich eröffne die Sitzung." in content
+    assert "Der Haushalt wird beraten." in content
 
 
 def test_docx_export_has_expected_document_structure():

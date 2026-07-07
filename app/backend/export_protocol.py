@@ -67,9 +67,9 @@ class ProtocolTop:
 @dataclass
 class ProtocolAppendix:
     include_speaker_list: bool = True
-    include_transcript_excerpt: bool = False
+    include_transcript: bool = False
+    group_transcript_by_top: bool = False
     include_generation_note: bool = True
-    transcript_excerpt_limit: int = 20
 
 
 @dataclass
@@ -87,6 +87,7 @@ class ProtocolDocument:
     agenda: list[str]
     speakers: list[str]
     transcript: list[TranscriptLine]
+    assignments: list[int | None]
     appendix: ProtocolAppendix
 
 
@@ -160,11 +161,13 @@ def build_protocol_document(
     summaries: dict[int, str],
     summary_reviews: dict[int, dict] | None = None,
     transcript: list[TranscriptLine] | None = None,
+    assignments: list[int | None] | None = None,
     speaker_names: dict[str, str] | None = None,
     appendix: ProtocolAppendix | None = None,
 ) -> ProtocolDocument:
     summary_reviews = summary_reviews or {}
     transcript = transcript or []
+    assignments = assignments or []
     speaker_names = speaker_names or {}
     appendix = appendix or ProtocolAppendix()
 
@@ -208,6 +211,7 @@ def build_protocol_document(
         agenda=agenda,
         speakers=speaker_set,
         transcript=transcript,
+        assignments=assignments,
         appendix=appendix,
     )
 
@@ -377,10 +381,21 @@ def _append_text_appendix(lines: list[str], document: ProtocolDocument) -> None:
     appendix_lines: list[str] = []
     if document.appendix.include_speaker_list and document.speakers:
         appendix_lines.extend(["Sprecherliste:", *[f"- {speaker}" for speaker in document.speakers], ""])
-    if document.appendix.include_transcript_excerpt and document.transcript:
-        appendix_lines.append("Transkript-Auszug:")
-        for line in document.transcript[: document.appendix.transcript_excerpt_limit]:
-            appendix_lines.append(f"- [{format_timestamp(line.start)}] {line.speaker}: {line.text}")
+    if document.appendix.include_transcript and document.transcript:
+        appendix_lines.append("Transkript:")
+        if document.appendix.group_transcript_by_top:
+            for title, top_lines in _transcript_groups(document):
+                appendix_lines.append(f"TOP: {title}")
+                appendix_lines.extend(
+                    f"- [{format_timestamp(line.start)}] {line.speaker}: {line.text}"
+                    for line in top_lines
+                )
+                appendix_lines.append("")
+        else:
+            appendix_lines.extend(
+                f"- [{format_timestamp(line.start)}] {line.speaker}: {line.text}"
+                for line in document.transcript
+            )
         appendix_lines.append("")
     if document.appendix.include_generation_note:
         appendix_lines.extend(["Bearbeitungs-/Generierungshinweis:", "- Automatisch erzeugter Entwurf; fachlich und rechtlich zu prüfen.", ""])
@@ -400,7 +415,7 @@ def _add_docx_section(doc: Document, label: str, items: list[str]) -> None:
 def _add_docx_appendix(doc: Document, document: ProtocolDocument) -> None:
     if not (
         document.appendix.include_speaker_list
-        or document.appendix.include_transcript_excerpt
+        or document.appendix.include_transcript
         or document.appendix.include_generation_note
     ):
         return
@@ -411,10 +426,16 @@ def _add_docx_appendix(doc: Document, document: ProtocolDocument) -> None:
         doc.add_heading("Sprecherliste", level=2)
         for speaker in document.speakers:
             doc.add_paragraph(speaker, style="List Bullet")
-    if document.appendix.include_transcript_excerpt and document.transcript:
-        doc.add_heading("Transkript-Auszug", level=2)
-        for line in document.transcript[: document.appendix.transcript_excerpt_limit]:
-            doc.add_paragraph(f"[{format_timestamp(line.start)}] {line.speaker}: {line.text}")
+    if document.appendix.include_transcript and document.transcript:
+        doc.add_heading("Transkript", level=2)
+        if document.appendix.group_transcript_by_top:
+            for title, top_lines in _transcript_groups(document):
+                doc.add_heading(f"TOP: {title}", level=3)
+                for line in top_lines:
+                    doc.add_paragraph(f"[{format_timestamp(line.start)}] {line.speaker}: {line.text}")
+        else:
+            for line in document.transcript:
+                doc.add_paragraph(f"[{format_timestamp(line.start)}] {line.speaker}: {line.text}")
     if document.appendix.include_generation_note:
         doc.add_heading("Bearbeitungs-/Generierungshinweis", level=2)
         doc.add_paragraph("Automatisch erzeugter Entwurf; fachlich und rechtlich zu prüfen.")
@@ -425,10 +446,34 @@ def _append_pdf_section(story: list, styles, label: str, items: list[str]) -> No
     story.append(_pdf_list(items or ["Keine Angabe."], styles["BodyText"]))
 
 
+def _transcript_groups(document: ProtocolDocument) -> list[tuple[str, list[TranscriptLine]]]:
+    groups: list[tuple[str, list[TranscriptLine]]] = []
+    index_by_assignment: dict[int | None, int] = {}
+
+    def group_title(top_index: int | None) -> str:
+        if top_index is None or top_index < 0 or top_index >= len(document.agenda):
+            return "Ohne TOP-Zuordnung"
+        return f"TOP {top_index + 1}: {document.agenda[top_index]}"
+
+    for line_index, line in enumerate(document.transcript):
+        top_index = (
+            document.assignments[line_index]
+            if line_index < len(document.assignments)
+            else None
+        )
+        key = top_index if top_index is not None else None
+        if key not in index_by_assignment:
+            index_by_assignment[key] = len(groups)
+            groups.append((group_title(top_index), []))
+        groups[index_by_assignment[key]][1].append(line)
+
+    return groups
+
+
 def _append_pdf_appendix(story: list, styles, document: ProtocolDocument) -> None:
     if not (
         document.appendix.include_speaker_list
-        or document.appendix.include_transcript_excerpt
+        or document.appendix.include_transcript
         or document.appendix.include_generation_note
     ):
         return
@@ -436,13 +481,30 @@ def _append_pdf_appendix(story: list, styles, document: ProtocolDocument) -> Non
     if document.appendix.include_speaker_list and document.speakers:
         story.append(Paragraph("Sprecherliste", styles["SectionTitle"]))
         story.append(_pdf_list(document.speakers, styles["BodyText"]))
-    if document.appendix.include_transcript_excerpt and document.transcript:
-        story.append(Paragraph("Transkript-Auszug", styles["SectionTitle"]))
-        excerpt = [
-            f"[{format_timestamp(line.start)}] {line.speaker}: {line.text}"
-            for line in document.transcript[: document.appendix.transcript_excerpt_limit]
-        ]
-        story.append(_pdf_list(excerpt, styles["Small"]))
+    if document.appendix.include_transcript and document.transcript:
+        story.append(Paragraph("Transkript", styles["SectionTitle"]))
+        if document.appendix.group_transcript_by_top:
+            for title, top_lines in _transcript_groups(document):
+                story.append(Paragraph(_pdf_text(f"TOP: {title}"), styles["Small"]))
+                story.append(
+                    _pdf_list(
+                        [
+                            f"[{format_timestamp(line.start)}] {line.speaker}: {line.text}"
+                            for line in top_lines
+                        ],
+                        styles["Small"],
+                    )
+                )
+        else:
+            story.append(
+                _pdf_list(
+                    [
+                        f"[{format_timestamp(line.start)}] {line.speaker}: {line.text}"
+                        for line in document.transcript
+                    ],
+                    styles["Small"],
+                )
+            )
     if document.appendix.include_generation_note:
         story.append(Paragraph("Bearbeitungs-/Generierungshinweis", styles["SectionTitle"]))
         story.append(Paragraph("Automatisch erzeugter Entwurf; fachlich und rechtlich zu prüfen.", styles["BodyText"]))

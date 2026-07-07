@@ -54,7 +54,8 @@ const DEFAULT_EXPORT_METADATA: ExportMetadata = {
   title: "Sitzungsprotokoll",
   participants: [],
   includeSpeakerList: true,
-  includeTranscriptExcerpt: false,
+  includeTranscript: false,
+  groupTranscriptByTop: false,
   includeGenerationNote: true,
 };
 
@@ -461,6 +462,13 @@ export default function App() {
     setExportMetadata({
       ...DEFAULT_EXPORT_METADATA,
       ...(session.export_metadata ?? {}),
+      includeTranscript:
+        session.export_metadata?.includeTranscript ??
+        session.export_metadata?.includeTranscriptExcerpt ??
+        DEFAULT_EXPORT_METADATA.includeTranscript,
+      groupTranscriptByTop:
+        session.export_metadata?.groupTranscriptByTop ??
+        DEFAULT_EXPORT_METADATA.groupTranscriptByTop,
     });
     setSkippedAssignment(Boolean(session.skipped_assignment));
     setAudioUrl(withApiBase(session.audio_url));

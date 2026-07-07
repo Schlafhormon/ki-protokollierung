@@ -734,11 +734,21 @@ export default function SummaryStep({
             <label className="inline-flex items-center gap-2">
               <input
                 type="checkbox"
-                checked={exportMetadata.includeTranscriptExcerpt}
-                onChange={(event) => updateExportMetadata({ includeTranscriptExcerpt: event.target.checked })}
+                checked={exportMetadata.includeTranscript}
+                onChange={(event) => updateExportMetadata({ includeTranscript: event.target.checked })}
                 className="h-4 w-4 rounded border-gray-300"
               />
-              Transkript-Auszug
+              Transkript anfügen
+            </label>
+            <label className="inline-flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={exportMetadata.groupTranscriptByTop}
+                onChange={(event) => updateExportMetadata({ groupTranscriptByTop: event.target.checked })}
+                disabled={!exportMetadata.includeTranscript}
+                className="h-4 w-4 rounded border-gray-300 disabled:opacity-50"
+              />
+              TOP-Unterteilung
             </label>
             <label className="inline-flex items-center gap-2">
               <input

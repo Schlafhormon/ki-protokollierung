@@ -36,7 +36,8 @@ const defaultProps: SummaryStepProps = {
     title: 'Sitzung Hauptausschuss',
     participants: ['Alice', 'Bob'],
     includeSpeakerList: true,
-    includeTranscriptExcerpt: false,
+    includeTranscript: false,
+    groupTranscriptByTop: false,
     includeGenerationNote: true,
   },
   setExportMetadata: vi.fn(),
@@ -119,6 +120,21 @@ describe('SummaryStep', () => {
 
     expect(setExportMetadata).toHaveBeenLastCalledWith(
       expect.objectContaining({ committee: 'Finanzausschuss' })
+    );
+  });
+
+  it('offers full transcript export with optional TOP grouping', async () => {
+    const user = userEvent.setup();
+    const setExportMetadata = vi.fn();
+    renderSummaryStep({ setExportMetadata });
+
+    const groupingCheckbox = screen.getByRole('checkbox', { name: /TOP-Unterteilung/i });
+    expect(groupingCheckbox).toBeDisabled();
+
+    await user.click(screen.getByRole('checkbox', { name: /Transkript anfügen/i }));
+
+    expect(setExportMetadata).toHaveBeenCalledWith(
+      expect.objectContaining({ includeTranscript: true })
     );
   });
 

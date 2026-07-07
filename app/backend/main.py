@@ -1129,7 +1129,9 @@ class ExportMetadataRequest(BaseModel):
 
 class ExportAppendixRequest(BaseModel):
     include_speaker_list: bool = True
+    include_transcript: Optional[bool] = None
     include_transcript_excerpt: bool = False
+    group_transcript_by_top: bool = False
     include_generation_note: bool = True
     transcript_excerpt_limit: int = Field(default=20, ge=1, le=200)
 
@@ -3120,9 +3122,13 @@ async def export_protocol_endpoint(request: ProtocolExportRequest):
     )
     appendix = ProtocolAppendix(
         include_speaker_list=request.appendix.include_speaker_list,
-        include_transcript_excerpt=request.appendix.include_transcript_excerpt,
+        include_transcript=(
+            request.appendix.include_transcript
+            if request.appendix.include_transcript is not None
+            else request.appendix.include_transcript_excerpt
+        ),
+        group_transcript_by_top=request.appendix.group_transcript_by_top,
         include_generation_note=request.appendix.include_generation_note,
-        transcript_excerpt_limit=request.appendix.transcript_excerpt_limit,
     )
     export_transcript = [
         ExportTranscriptLine(
@@ -3139,6 +3145,7 @@ async def export_protocol_endpoint(request: ProtocolExportRequest):
         summaries=request.summaries,
         summary_reviews=request.summary_reviews,
         transcript=export_transcript,
+        assignments=request.assignments,
         speaker_names=request.speaker_names,
         appendix=appendix,
     )

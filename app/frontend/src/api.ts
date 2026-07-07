@@ -865,7 +865,9 @@ export async function exportProtocol(payload: ProtocolExportPayload): Promise<Bl
       },
       appendix: {
         include_speaker_list: payload.metadata.includeSpeakerList,
-        include_transcript_excerpt: payload.metadata.includeTranscriptExcerpt,
+        include_transcript: payload.metadata.includeTranscript,
+        include_transcript_excerpt: payload.metadata.includeTranscript,
+        group_transcript_by_top: payload.metadata.groupTranscriptByTop,
         include_generation_note: payload.metadata.includeGenerationNote,
       },
       tops: payload.tops,
