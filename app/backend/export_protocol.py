@@ -278,8 +278,8 @@ def render_docx(document: ProtocolDocument) -> bytes:
     doc.add_paragraph()
 
     doc.add_heading("Tagesordnung", level=1)
-    for index, agenda_item in enumerate(document.agenda, start=1):
-        doc.add_paragraph(f"{index}. {agenda_item}", style="List Number")
+    for agenda_item in document.agenda:
+        doc.add_paragraph(agenda_item, style="List Number")
 
     for top in document.tops:
         doc.add_heading(f"TOP {top.index}: {top.title}", level=1)
@@ -385,7 +385,7 @@ def _append_text_appendix(lines: list[str], document: ProtocolDocument) -> None:
         appendix_lines.append("Transkript:")
         if document.appendix.group_transcript_by_top:
             for title, top_lines in _transcript_groups(document):
-                appendix_lines.append(f"TOP: {title}")
+                appendix_lines.append(title)
                 appendix_lines.extend(
                     f"- [{format_timestamp(line.start)}] {line.speaker}: {line.text}"
                     for line in top_lines
@@ -430,7 +430,7 @@ def _add_docx_appendix(doc: Document, document: ProtocolDocument) -> None:
         doc.add_heading("Transkript", level=2)
         if document.appendix.group_transcript_by_top:
             for title, top_lines in _transcript_groups(document):
-                doc.add_heading(f"TOP: {title}", level=3)
+                doc.add_heading(title, level=3)
                 for line in top_lines:
                     doc.add_paragraph(f"[{format_timestamp(line.start)}] {line.speaker}: {line.text}")
         else:
@@ -485,7 +485,7 @@ def _append_pdf_appendix(story: list, styles, document: ProtocolDocument) -> Non
         story.append(Paragraph("Transkript", styles["SectionTitle"]))
         if document.appendix.group_transcript_by_top:
             for title, top_lines in _transcript_groups(document):
-                story.append(Paragraph(_pdf_text(f"TOP: {title}"), styles["Small"]))
+                story.append(Paragraph(_pdf_text(title), styles["Small"]))
                 story.append(
                     _pdf_list(
                         [

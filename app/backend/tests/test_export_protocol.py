@@ -88,8 +88,9 @@ def test_txt_export_can_group_full_transcript_by_top():
     assert response.status_code == 200
     content = response.text
     assert "Transkript:" in content
-    assert "TOP: TOP 1: Begrüßung" in content
-    assert "TOP: TOP 2: Haushalt" in content
+    assert "TOP 1: Begrüßung" in content
+    assert "TOP 2: Haushalt" in content
+    assert "TOP: TOP" not in content
     assert "[0:00] Alice: Ich eröffne die Sitzung." in content
     assert "[0:03] Bob: Der Haushalt wird beraten." in content
 
@@ -130,6 +131,8 @@ def test_docx_export_has_expected_document_structure():
 
     assert "Sitzung Hauptausschuss" in paragraphs
     assert "Tagesordnung" in paragraphs
+    assert "Begrüßung" in paragraphs
+    assert "1. Begrüßung" not in paragraphs
     assert "TOP 2: Haushalt" in paragraphs
     assert "Beschluss" in paragraphs
     assert "Der Haushalt wurde empfohlen." in paragraphs
