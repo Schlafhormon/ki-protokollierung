@@ -21,6 +21,7 @@ const defaultProps: SummaryStepProps = {
   assignments: [0, 1],
   summaries: {
     0: 'Die Sitzung wurde eroeffnet.',
+    1: 'Der Haushalt wurde beraten.',
   },
   setSummaries: vi.fn(),
   onRegenerateSummary: vi.fn().mockResolvedValue(undefined),

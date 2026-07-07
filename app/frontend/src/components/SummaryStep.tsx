@@ -149,10 +149,29 @@ export default function SummaryStep({
     setExportMetadata({ ...exportMetadata, ...patch });
   };
 
+  const hasBlockingSummaryIssue = () => {
+    const hasMissingSummaries = tops.length > 0
+      ? tops.some((_, index) => !summaries[index]?.trim())
+      : !summaries[0]?.trim();
+    const reviewWarnings = Object.values(summaryReviews).flatMap(
+      (review) => review?.review_warnings ?? []
+    );
+    return (
+      hasMissingSummaries ||
+      reviewWarnings.some((warning) =>
+        ['warning', 'error'].includes(String(warning.severity ?? '').toLowerCase())
+      )
+    );
+  };
+
   const handleExport = async (format: ExportFormat) => {
     setExportError(null);
     if (!summariesAreFresh) {
       setExportError('Zusammenfassungen müssen nach den Korrekturen aktualisiert werden.');
+      return;
+    }
+    if (hasBlockingSummaryIssue()) {
+      setExportError('Mindestens eine Zusammenfassung fehlt oder enthält Prüfhinweise. Bitte prüfen und bei Bedarf alle Zusammenfassungen aktualisieren.');
       return;
     }
     setExportingFormat(format);
@@ -206,6 +225,11 @@ export default function SummaryStep({
     structured &&
       SUMMARY_SECTIONS.some((section) => structured[section.key]?.length)
   );
+  const summaryHasBlockingIssue = hasBlockingSummaryIssue();
+  const hasReviewContent =
+    selectedWarnings.length > 0 ||
+    hasStructuredItems ||
+    Boolean(summaries[selectedSummaryIndex]);
 
   return (
     <div className="space-y-6">
@@ -222,6 +246,24 @@ export default function SummaryStep({
               className="rounded-lg bg-yellow-600 px-4 py-2 font-medium text-white hover:bg-yellow-700 disabled:opacity-50"
             >
               {isGenerating ? 'Wird aktualisiert...' : 'Alle Zusammenfassungen aktualisieren'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {summariesAreFresh && summaryHasBlockingIssue && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>
+              Mindestens eine Zusammenfassung fehlt oder enthält Prüfhinweise. Prüfen Sie die betroffenen TOPs oder starten Sie die Aktualisierung erneut.
+            </span>
+            <button
+              type="button"
+              onClick={onRegenerateAllSummaries}
+              disabled={isGenerating}
+              className="rounded-lg bg-red-600 px-4 py-2 font-medium text-white hover:bg-red-700 disabled:opacity-50"
+            >
+              {isGenerating ? 'Wird aktualisiert...' : 'Alle Zusammenfassungen erneut versuchen'}
             </button>
           </div>
         </div>
@@ -348,7 +390,7 @@ export default function SummaryStep({
                   <div className="animate-spin mr-2">⏳</div>
                   Zusammenfassung wird generiert...
                 </div>
-              ) : summaries[selectedSummaryIndex] ? (
+              ) : hasReviewContent ? (
                 <div className="space-y-3">
                   {selectedWarnings.length > 0 && (
                     <div className="rounded-md border border-yellow-200 bg-yellow-50 px-3 py-2 text-sm text-yellow-900">
@@ -432,9 +474,13 @@ export default function SummaryStep({
                         );
                       })}
                     </div>
-                  ) : (
+                  ) : summaries[selectedSummaryIndex] ? (
                     <div className="prose max-w-none text-gray-700 whitespace-pre-wrap">
                       {summaries[selectedSummaryIndex]}
+                    </div>
+                  ) : (
+                    <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+                      Für diesen TOP liegt keine Zusammenfassung vor.
                     </div>
                   )}
                 </div>

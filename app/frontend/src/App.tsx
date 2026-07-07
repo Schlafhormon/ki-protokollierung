@@ -246,6 +246,25 @@ function hasAnySummary(session: SessionResponse | SessionDraft): boolean {
   );
 }
 
+function hasAnySummaryArtifact(session: SessionResponse | SessionDraft): boolean {
+  if (hasAnySummary(session)) {
+    return true;
+  }
+  return Object.keys(session.summary_reviews ?? {}).length > 0;
+}
+
+function hasSummaryArtifactForIndex(
+  summaries: Record<number, string>,
+  reviews: Record<number, SummaryReview>,
+  index: number
+): boolean {
+  const summary = summaries[index];
+  return (
+    (typeof summary === "string" && summary.trim() !== "") ||
+    Object.prototype.hasOwnProperty.call(reviews, index)
+  );
+}
+
 function getTranscriptSpeakers(transcript: TranscriptLine[] = []): string[] {
   return Array.from(new Set(transcript.map((line) => line.speaker).filter(Boolean)));
 }
@@ -353,14 +372,24 @@ export default function App() {
   const summariesAreFresh =
     summaryInputFingerprint !== null &&
     summaryInputFingerprint === currentSummaryInputFingerprint;
-  const hasFreshSummariesInState = hasAnySummary({
+  const hasFreshSummariesInState = hasAnySummaryArtifact({
     tops,
     transcript,
     assignments,
     speaker_names: speakerNames,
     summaries,
+    summary_reviews: summaryReviews,
     skipped_assignment: skippedAssignment,
   }) && summariesAreFresh;
+  const hasSummaryArtifactsInState = hasAnySummaryArtifact({
+    tops,
+    transcript,
+    assignments,
+    speaker_names: speakerNames,
+    summaries,
+    summary_reviews: summaryReviews,
+    skipped_assignment: skippedAssignment,
+  });
 
   const [jobId, setJobId] = useState<string | null>(null);
   const [rememberSpeakers, setRememberSpeakers] = useState<boolean>(() => {
@@ -454,11 +483,6 @@ export default function App() {
       ...result.session,
       speaker_names: applySuggestedSpeakerNames(result.session, speakerObservations),
     };
-    const summaryFingerprintSession =
-      JSON.stringify(sessionWithSuggestedSpeakers.speaker_names ?? {}) ===
-      JSON.stringify(result.session.speaker_names ?? {})
-        ? sessionWithSuggestedSpeakers
-        : result.session;
     const completedPipeline = result.pipeline;
     const warnings = result.warnings ?? completedPipeline.warnings ?? [];
     const agendaDetectionResult = result.agenda_detection ?? null;
@@ -485,10 +509,10 @@ export default function App() {
     );
     setSummaryInputFingerprint(
       buildSummaryInputFingerprint(
-        summaryFingerprintSession.tops ?? [],
-        summaryFingerprintSession.transcript ?? [],
-        summaryFingerprintSession.assignments ?? [],
-        summaryFingerprintSession.speaker_names ?? {}
+        sessionWithSuggestedSpeakers.tops ?? [],
+        sessionWithSuggestedSpeakers.transcript ?? [],
+        sessionWithSuggestedSpeakers.assignments ?? [],
+        sessionWithSuggestedSpeakers.speaker_names ?? {}
       )
     );
     setIsProcessing(false);
@@ -898,7 +922,7 @@ export default function App() {
       } else if (restoreCandidate.sessionId) {
         const restored = await loadSession(restoreCandidate.sessionId);
         applySession(restored);
-        if ((restored.current_step ?? 1) === 2 && hasAnySummary(restored)) {
+        if ((restored.current_step ?? 1) === 2 && hasAnySummaryArtifact(restored)) {
           const canGoDirect =
             hasFreshSessionSummaries(restored) && !hasReviewUncertainty(restored);
           setDirectProtocolAvailable(canGoDirect);
@@ -924,7 +948,7 @@ export default function App() {
         );
       } else if (restoreCandidate.draft) {
         applySession(restoreCandidate.draft);
-        if ((restoreCandidate.draft.current_step ?? 1) === 2 && hasAnySummary(restoreCandidate.draft)) {
+        if ((restoreCandidate.draft.current_step ?? 1) === 2 && hasAnySummaryArtifact(restoreCandidate.draft)) {
           const draftSession = restoreCandidate.draft as SessionResponse;
           const canGoDirect =
             hasFreshSessionSummaries(restoreCandidate.draft) &&
@@ -1194,10 +1218,13 @@ export default function App() {
   const handleStep2Next = async () => {
     setCurrentStep(3);
     const validTops = tops.filter((t) => t.trim() !== "");
-    const hasCurrentSummaries = summariesAreFresh && validTops.some((_, index) => {
-      const summary = summaries[index];
-      return typeof summary === "string" && summary.trim() !== "";
-    }) || (validTops.length === 0 && summariesAreFresh && Boolean(summaries[0]?.trim()));
+    const hasCurrentSummaries =
+      summariesAreFresh &&
+      (validTops.length === 0
+        ? hasSummaryArtifactForIndex(summaries, summaryReviews, 0)
+        : validTops.some((_, index) =>
+            hasSummaryArtifactForIndex(summaries, summaryReviews, index)
+          ));
 
     if (!hasCurrentSummaries) {
       await generateAllSummariesForCurrentState();
@@ -1443,14 +1470,7 @@ export default function App() {
           speakerNames={speakerNames}
           setSpeakerNames={setSpeakerNames}
           sessionId={sessionId}
-          hasSummaries={hasAnySummary({
-            tops,
-            transcript,
-            assignments,
-            speaker_names: speakerNames,
-            summaries,
-            skipped_assignment: skippedAssignment,
-          })}
+          hasSummaries={hasSummaryArtifactsInState}
           rememberSpeakers={rememberSpeakers}
         />
       ) : (

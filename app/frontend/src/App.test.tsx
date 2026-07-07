@@ -387,6 +387,39 @@ describe('App pipeline flow', () => {
     expect(await screen.findByText('Neu generierte Zusammenfassung.')).toBeInTheDocument();
   });
 
+  it('does not auto-regenerate when the pipeline already returned a summary error review', async () => {
+    const user = userEvent.setup();
+    vi.mocked(getPipelineResult).mockResolvedValue(
+      pipelineResult({
+        summaries: { 0: '' },
+        summary_reviews: {
+          0: {
+            structured: null,
+            source_links: [],
+            review_warnings: [
+              {
+                kind: 'summary_failed',
+                message: 'Leere Antwort des LLM',
+                severity: 'error',
+                line_indices: [],
+                excerpt: '',
+              },
+            ],
+          },
+        },
+      })
+    );
+
+    await uploadAndStart(user);
+
+    expect(await screen.findByText(/Sprecher umbenennen und Profile prüfen/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^zum protokoll/i }));
+
+    expect(await screen.findByText('Leere Antwort des LLM')).toBeInTheDocument();
+    expect(screen.queryByText(/Zuordnung, Sprecher oder TOPs wurden geändert/i)).not.toBeInTheDocument();
+    expect(regenerateSessionSummaries).not.toHaveBeenCalled();
+  });
+
   it('falls back to the legacy flow when the pipeline fails', async () => {
     vi.mocked(startPipeline).mockRejectedValue(new Error('Pipeline nicht erreichbar'));
 
