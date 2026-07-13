@@ -808,6 +808,67 @@ def test_session_summary_regeneration_updates_all_tops_with_speaker_names(
     assert captured[0]["system_prompt"] == "Kurz"
 
 
+def test_shared_session_history_and_conflict_response(tmp_path, monkeypatch):
+    configure_test_app(tmp_path, monkeypatch)
+    saved = persistence.save_session(
+        "shared-session",
+        {
+            "current_step": 3,
+            "tops": ["Haushalt"],
+            "transcript": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Beratung",
+                    "start": 0.0,
+                    "end": 1.0,
+                }
+            ],
+            "assignments": [0],
+            "summaries": {0: "Zusammenfassung"},
+            "export_metadata": {
+                "title": "Öffentliche interne Sitzung",
+                "committee": "Hauptausschuss",
+                "date": "2026-07-13",
+            },
+        },
+    )
+
+    with TestClient(main.app) as client:
+        history_response = client.get("/api/sessions?query=Hauptausschuss")
+        assert history_response.status_code == 200
+        history = history_response.json()
+        assert history["total"] == 1
+        assert history["items"][0]["session_id"] == "shared-session"
+        assert history["items"][0]["status"] == "ready"
+
+        update_response = client.put(
+            "/api/sessions/shared-session",
+            json={
+                "revision": saved["revision"],
+                "current_step": 3,
+                "tops": ["Haushalt"],
+                "transcript": saved["transcript"],
+                "assignments": [0],
+                "summaries": {"0": "Korrigiert"},
+                "export_metadata": saved["export_metadata"],
+                "skipped_assignment": False,
+            },
+        )
+        assert update_response.status_code == 200
+
+        conflict_response = client.put(
+            "/api/sessions/shared-session",
+            json={
+                "revision": saved["revision"],
+                "current_step": 1,
+                "tops": [],
+                "skipped_assignment": False,
+            },
+        )
+        assert conflict_response.status_code == 409
+        assert conflict_response.json()["detail"]["actual_revision"] > saved["revision"]
+
+
 def test_pipeline_uses_pdf_tops_when_auto_pdf_mode_is_enabled(tmp_path, monkeypatch):
     configure_test_app(tmp_path, monkeypatch, concurrency=1)
     extracted_calls = []

@@ -1,6 +1,11 @@
 import type { LayoutProps } from '../types';
 
-export default function Layout({ children, onSettingsClick }: LayoutProps) {
+export default function Layout({
+  children,
+  onSettingsClick,
+  onHistoryClick,
+  onNewSessionClick,
+}: LayoutProps) {
   return (
     <div className="min-h-screen flex flex-col bg-gray-50">
       {/* Header */}
@@ -9,8 +14,28 @@ export default function Layout({ children, onSettingsClick }: LayoutProps) {
           <h1 className="text-xl font-semibold text-gray-800">
             Protokollierungsassistenz
           </h1>
-          {onSettingsClick && (
+          <div className="flex items-center gap-2">
+            {onNewSessionClick && (
+              <button
+                type="button"
+                onClick={onNewSessionClick}
+                className="rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100"
+              >
+                Neue Sitzung
+              </button>
+            )}
+            {onHistoryClick && (
+              <button
+                type="button"
+                onClick={onHistoryClick}
+                className="rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100"
+              >
+                Verlauf
+              </button>
+            )}
+            {onSettingsClick && (
             <button
+              type="button"
               onClick={onSettingsClick}
               className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
               title="KI-Einstellungen"
@@ -20,7 +45,8 @@ export default function Layout({ children, onSettingsClick }: LayoutProps) {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
               </svg>
             </button>
-          )}
+            )}
+          </div>
         </div>
       </header>
 

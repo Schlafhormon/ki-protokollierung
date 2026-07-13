@@ -40,6 +40,24 @@ Anwendung nicht mehr abbilden.
 6. Zusammenfassungen je TOP prüfen, neu generieren oder bearbeiten.
 7. Protokoll mit Sitzungsmetadaten als DOCX, PDF oder TXT exportieren.
 
+## Gemeinsamer Sitzungsverlauf
+
+Alle Sitzungen werden serverseitig in SQLite gespeichert und sind innerhalb der
+Anwendung nicht an einen bestimmten Browser gebunden. Der gemeinsame Verlauf ist
+über den Button **Verlauf** im Kopfbereich oder direkt unter
+`http://localhost:3000/sessions` erreichbar. Eine konkrete Sitzung kann außerdem
+über `/sessions/<session_id>` direkt geöffnet und als Link weitergegeben werden.
+
+Der Verlauf bietet Suche, Statusfilter und eine kompakte Übersicht über TOPs,
+Transkript, Zusammenfassungen und verfügbares Audio. Geöffnete Sitzungen können
+von allen Besuchern der Anwendung bearbeitet und exportiert werden. Wenn zwei
+Browser dieselbe Sitzung gleichzeitig bearbeiten, verhindert eine
+Revisionsprüfung, dass ein neuerer Stand unbemerkt überschrieben wird.
+
+Die Anwendung selbst enthält keine Benutzer- oder Rechteverwaltung. Der Zugriff
+auf Verlauf, Transkripte, Audio und Bearbeitungsfunktionen muss daher auf
+Infrastrukturebene auf den vorgesehenen internen Personenkreis beschränkt werden.
+
 Wenn keine TOPs angegeben werden, kann die Anwendung ein gesamtes Gespräch als
 einen Gesamt-TOP zusammenfassen.
 

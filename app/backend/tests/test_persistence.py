@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 import main
@@ -66,6 +68,76 @@ def test_persistence_migration_is_idempotent_and_keeps_session_state(
     assert session["assignments"] == [0]
 
 
+def test_session_history_and_revision_conflicts(tmp_path, monkeypatch):
+    db_path = tmp_path / "sessions.sqlite3"
+    monkeypatch.setenv("PERSISTENCE_DB_PATH", str(db_path))
+    persistence.init_db()
+
+    first = persistence.save_session(
+        "session-draft",
+        {
+            "current_step": 1,
+            "tops": [],
+            "export_metadata": {
+                "title": "Planungssitzung",
+                "committee": "Hauptausschuss",
+                "date": "2026-07-13",
+            },
+        },
+    )
+    persistence.save_session(
+        "session-ready",
+        {
+            "current_step": 3,
+            "tops": ["Haushalt"],
+            "transcript": [
+                {
+                    "speaker": "SPEAKER_00",
+                    "text": "Beratung",
+                    "start": 0,
+                    "end": 1,
+                }
+            ],
+            "assignments": [0],
+            "summaries": {0: "Der Haushalt wurde beraten."},
+            "export_metadata": {
+                "title": "Haushaltsausschuss",
+                "committee": "Finanzausschuss",
+                "date": "2026-07-12",
+            },
+        },
+    )
+
+    updated = persistence.save_session(
+        "session-draft",
+        {
+            "current_step": 2,
+            "tops": ["Eröffnung"],
+            "export_metadata": first["export_metadata"],
+        },
+        expected_revision=first["revision"],
+    )
+
+    assert updated["revision"] == first["revision"] + 1
+    with pytest.raises(persistence.SessionConflictError):
+        persistence.save_session(
+            "session-draft",
+            {"current_step": 3},
+            expected_revision=first["revision"],
+        )
+
+    items, total = persistence.list_sessions(query="Finanzausschuss")
+    assert total == 1
+    assert items[0]["session_id"] == "session-ready"
+    assert items[0]["status"] == "ready"
+    assert items[0]["transcript_line_count"] == 1
+    assert items[0]["summary_count"] == 1
+
+    reviews, review_total = persistence.list_sessions(status="review")
+    assert review_total == 0
+    assert reviews == []
+
+
 def test_persistence_migrates_pre_speaker_pipeline_schema(tmp_path, monkeypatch):
     db_path = tmp_path / "legacy.sqlite3"
     monkeypatch.setenv("PERSISTENCE_DB_PATH", str(db_path))
@@ -128,7 +200,7 @@ def test_persistence_migrates_pre_speaker_pipeline_schema(tmp_path, monkeypatch)
 
     assert {"remember_speakers", "cancellation_requested"}.issubset(job_columns)
     assert "telemetry_json" not in job_columns
-    assert "export_metadata_json" in session_columns
+    assert {"export_metadata_json", "revision"}.issubset(session_columns)
     assert {
         "speaker_profiles",
         "speaker_embeddings",

@@ -26,6 +26,7 @@ from fastapi import (
     Form,
     HTTPException,
     Header,
+    Query,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -55,6 +56,7 @@ from export_protocol import (
     render_protocol,
 )
 from persistence import (
+    SessionConflictError,
     anonymize_speaker_observations_for_profile,
     archive_speaker_profile,
     confirm_speaker_observation,
@@ -69,6 +71,8 @@ from persistence import (
     load_job_speaker_embedding,
     load_job_speaker_embeddings,
     load_jobs,
+    list_sessions,
+    load_latest_pipeline_job_for_session,
     load_session,
     load_speaker_embeddings,
     load_speaker_observation,
@@ -856,6 +860,7 @@ class PipelineStatusResponse(BaseModel):
 
 class SessionSaveRequest(BaseModel):
     session_id: Optional[str] = None
+    revision: Optional[int] = None
     job_id: Optional[str] = None
     current_step: Optional[int] = None
     tops: List[str] = Field(default_factory=list)
@@ -870,6 +875,9 @@ class SessionSaveRequest(BaseModel):
 
 class SessionResponse(BaseModel):
     session_id: str
+    revision: int = 1
+    created_at: Optional[float] = None
+    updated_at: Optional[float] = None
     job_id: Optional[str] = None
     current_step: Optional[int] = None
     tops: List[str] = Field(default_factory=list)
@@ -883,6 +891,36 @@ class SessionResponse(BaseModel):
     audio_url: Optional[str] = None
     audio_metadata: Optional[AudioMetadata] = None
     job: Optional[TranscriptionJob] = None
+    latest_pipeline: Optional[PipelineStatusResponse] = None
+
+
+class SessionListItem(BaseModel):
+    session_id: str
+    title: str
+    committee: str = ""
+    meeting_date: str = ""
+    status: str
+    current_step: Optional[int] = None
+    revision: int = 1
+    created_at: float
+    updated_at: float
+    top_count: int = 0
+    transcript_line_count: int = 0
+    summary_count: int = 0
+    audio_available: bool = False
+    job_id: Optional[str] = None
+    job_status: Optional[str] = None
+    pipeline_job_id: Optional[str] = None
+    pipeline_status: Optional[str] = None
+    pipeline_stage: Optional[str] = None
+    pipeline_progress: Optional[int] = None
+
+
+class SessionListResponse(BaseModel):
+    items: List[SessionListItem] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
 
 
 class SpeakerProfileCreateRequest(BaseModel):
@@ -1043,6 +1081,7 @@ class SummarizeResponse(BaseModel):
 
 
 class SessionSummaryRegenerateRequest(BaseModel):
+    revision: Optional[int] = None
     tops: List[str] = Field(default_factory=list)
     transcript: List[TranscriptLine] = Field(default_factory=list)
     assignments: List[Optional[int]] = Field(default_factory=list)
@@ -1224,9 +1263,13 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
     transcript = session.get("transcript")
     if transcript is None and job_response:
         transcript = job_response.transcript
+    latest_pipeline = load_latest_pipeline_job_for_session(session["session_id"])
 
     return SessionResponse(
         session_id=session["session_id"],
+        revision=int(session.get("revision") or 1),
+        created_at=session.get("created_at"),
+        updated_at=session.get("updated_at"),
         job_id=job_id,
         current_step=session.get("current_step"),
         tops=session.get("tops") or [],
@@ -1240,6 +1283,11 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
         audio_url=job_response.audio_url if job_response else None,
         audio_metadata=job_response.audio_metadata if job_response else None,
         job=job_response,
+        latest_pipeline=(
+            build_pipeline_status_response(latest_pipeline)
+            if latest_pipeline is not None
+            else None
+        ),
     )
 
 
@@ -1368,7 +1416,11 @@ def apply_profile_display_name_to_session(
     speaker_names = dict(updated_session.get("speaker_names") or {})
     speaker_names[local_speaker_id] = profile["display_name"]
     updated_session["speaker_names"] = speaker_names
-    return save_session(session["session_id"], updated_session)
+    return save_session(
+        session["session_id"],
+        updated_session,
+        bump_revision=False,
+    )
 
 
 def persist_job_speaker_embeddings(
@@ -1992,7 +2044,7 @@ def save_pipeline_session(
     state.setdefault("summary_reviews", {})
     state.setdefault("export_metadata", {})
     state.setdefault("skipped_assignment", False)
-    return save_session(session_id, state)
+    return save_session(session_id, state, bump_revision=False)
 
 
 def fallback_agenda(
@@ -2686,6 +2738,63 @@ async def get_pipeline_result(pipeline_id: str):
     )
 
 
+@app.get("/api/sessions", response_model=SessionListResponse)
+async def list_sessions_endpoint(
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    query: Optional[str] = Query(default=None, max_length=200),
+    status: Optional[str] = Query(default=None),
+):
+    """List the shared, server-side session history for all visitors."""
+    allowed_statuses = {
+        "draft",
+        "processing",
+        "review",
+        "ready",
+        "failed",
+        "cancelled",
+    }
+    if status and status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail="Ungültiger Sitzungsstatus")
+    items, total = list_sessions(
+        query=query,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    return SessionListResponse(
+        items=[SessionListItem(**item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def save_session_or_conflict(
+    session_id: str,
+    state: dict[str, Any],
+    expected_revision: int | None,
+) -> dict[str, Any]:
+    try:
+        return save_session(
+            session_id,
+            state,
+            expected_revision=expected_revision,
+        )
+    except SessionConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "Diese Sitzung wurde zwischenzeitlich geändert. "
+                    "Bitte laden Sie den aktuellen Stand neu."
+                ),
+                "expected_revision": exc.expected_revision,
+                "actual_revision": exc.actual_revision,
+            },
+        ) from exc
+
+
 @app.post("/api/sessions", response_model=SessionResponse)
 async def create_or_save_session(request: SessionSaveRequest):
     """
@@ -2696,7 +2805,11 @@ async def create_or_save_session(request: SessionSaveRequest):
     transcription job. Audio bytes are not copied.
     """
     session_id = request.session_id or str(uuid.uuid4())
-    session = save_session(session_id, model_to_dict(request))
+    session = save_session_or_conflict(
+        session_id,
+        model_to_dict(request),
+        request.revision,
+    )
     return build_session_response(session)
 
 
@@ -2705,7 +2818,7 @@ async def save_existing_session(session_id: str, request: SessionSaveRequest):
     """Save a persisted editing session under a known session ID."""
     state = model_to_dict(request)
     state["session_id"] = session_id
-    session = save_session(session_id, state)
+    session = save_session_or_conflict(session_id, state, request.revision)
     return build_session_response(session)
 
 
@@ -2774,7 +2887,11 @@ async def regenerate_session_summaries(
             "current_step": 3,
         }
     )
-    session = save_session(session_id, updated_state)
+    session = save_session_or_conflict(
+        session_id,
+        updated_state,
+        request.revision,
+    )
     return build_session_response(session)
 
 

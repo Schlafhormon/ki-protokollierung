@@ -5,6 +5,7 @@ import UploadStep from "./components/UploadStep";
 import ProcessingStep from "./components/ProcessingStep";
 import AssignmentStep from "./components/AssignmentStep";
 import SummaryStep from "./components/SummaryStep";
+import SessionHistory from "./components/SessionHistory";
 import LLMSettingsPanel, {
   DEFAULT_LLM_SETTINGS,
   type LLMSettings,
@@ -23,6 +24,7 @@ import {
   checkBackendHealth,
   saveSession,
   loadSession,
+  SessionConflictError,
 } from "./api";
 import type {
   AgendaDetectionResponse,
@@ -87,6 +89,28 @@ interface SessionDraft extends SessionSavePayload {
   audio_url?: string | null;
   pipeline_id?: string | null;
   summary_input_fingerprint?: string | null;
+}
+
+interface AppRoute {
+  view: "editor" | "history";
+  sessionId: string | null;
+}
+
+function readRoute(): AppRoute {
+  const sessionMatch = window.location.pathname.match(/^\/sessions\/([^/]+)\/?$/);
+  if (sessionMatch) {
+    return { view: "editor", sessionId: decodeURIComponent(sessionMatch[1]!) };
+  }
+  if (/^\/sessions\/?$/.test(window.location.pathname)) {
+    return { view: "history", sessionId: null };
+  }
+  return { view: "editor", sessionId: null };
+}
+
+function serializeSessionPayload(payload: SessionSavePayload): string {
+  const contentPayload = { ...payload };
+  delete contentPayload.revision;
+  return JSON.stringify(contentPayload);
 }
 
 function withApiBase(url?: string | null): string | null {
@@ -313,6 +337,8 @@ function applySuggestedSpeakerNames(
 }
 
 export default function App() {
+  const [route, setRoute] = useState<AppRoute>(() => readRoute());
+
   // Current step in wizard
   const [currentStep, setCurrentStep] = useState(1);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -344,6 +370,7 @@ export default function App() {
   const [skipAgendaDetection, setSkipAgendaDetection] = useState(false);
   const [autoDetectTopsFromPdf, setAutoDetectTopsFromPdf] = useState(true);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionRevision, setSessionRevision] = useState<number | null>(null);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [pipelineJob, setPipelineJob] = useState<PipelineJob | null>(null);
   const [pipelineNotice, setPipelineNotice] = useState<string | null>(null);
@@ -355,8 +382,16 @@ export default function App() {
   } | null>(null);
   const [isRestoringSession, setIsRestoringSession] = useState(false);
   const [sessionMessage, setSessionMessage] = useState<string | null>(null);
+  const [sessionConflict, setSessionConflict] = useState<string | null>(null);
+  const [isLoadingRouteSession, setIsLoadingRouteSession] = useState(
+    () => readRoute().sessionId !== null
+  );
   const lastSavedPayloadRef = useRef<string | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+  const sessionRevisionRef = useRef<number | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const saveConflictRef = useRef(false);
 
   // Helper to apply speaker name mappings to transcript lines for summarization
   const applySpeakerNames = (lines: TranscriptLine[]): TranscriptLine[] => {
@@ -416,9 +451,25 @@ export default function App() {
     return DEFAULT_LLM_SETTINGS;
   });
 
+  const navigate = useCallback((path: string, replace = false) => {
+    if (replace) {
+      window.history.replaceState(null, "", path);
+    } else {
+      window.history.pushState(null, "", path);
+    }
+    setRoute(readRoute());
+  }, []);
+
+  useEffect(() => {
+    const handlePopState = () => setRoute(readRoute());
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
   const buildSessionPayload = useCallback(
     (overrides: Partial<SessionSavePayload> = {}): SessionSavePayload => ({
       session_id: overrides.session_id ?? sessionId,
+      revision: overrides.revision ?? sessionRevision,
       job_id: overrides.job_id ?? jobId,
       current_step: overrides.current_step ?? currentStep,
       tops: overrides.tops ?? tops,
@@ -435,6 +486,7 @@ export default function App() {
       currentStep,
       exportMetadata,
       jobId,
+      sessionRevision,
       sessionId,
       skippedAssignment,
       speakerNames,
@@ -446,7 +498,14 @@ export default function App() {
   );
 
   const applySession = useCallback((session: SessionResponse | SessionDraft) => {
-    setSessionId(session.session_id ?? null);
+    const nextSessionId = session.session_id ?? null;
+    const nextRevision = session.revision ?? null;
+    setSessionId(nextSessionId);
+    activeSessionIdRef.current = nextSessionId;
+    setSessionRevision(nextRevision);
+    sessionRevisionRef.current = nextRevision;
+    setSessionConflict(null);
+    saveConflictRef.current = false;
     setJobId(session.job_id ?? null);
     setCurrentStep(session.current_step ?? 1);
     setTops(session.tops?.length ? session.tops : EMPTY_TOPS);
@@ -548,6 +607,11 @@ export default function App() {
       saveTimerRef.current = null;
     }
     setSessionId(null);
+    activeSessionIdRef.current = null;
+    setSessionRevision(null);
+    sessionRevisionRef.current = null;
+    setSessionConflict(null);
+    saveConflictRef.current = false;
     setJobId(null);
     setPipelineId(null);
     setPipelineJob(null);
@@ -594,6 +658,9 @@ export default function App() {
 
   // Detect restorable session on mount. Backend remains the source of truth.
   useEffect(() => {
+    if (route.view !== "editor" || route.sessionId) {
+      return;
+    }
     try {
       const storedSessionId = localStorage.getItem(ACTIVE_SESSION_KEY);
       const storedPipelineId = localStorage.getItem(ACTIVE_PIPELINE_KEY);
@@ -610,7 +677,7 @@ export default function App() {
     } catch (e) {
       console.error("Failed to read session draft:", e);
     }
-  }, []);
+  }, [route.sessionId, route.view]);
 
   // Save LLM settings to localStorage when they change
   useEffect(() => {
@@ -634,7 +701,12 @@ export default function App() {
       window.clearTimeout(saveTimerRef.current);
     }
 
-    if (!sessionId) {
+    if (
+      !sessionId ||
+      route.view === "history" ||
+      isProcessing ||
+      saveConflictRef.current
+    ) {
       return;
     }
 
@@ -659,21 +731,41 @@ export default function App() {
       console.error("Failed to save local session draft:", e);
     }
 
-    const serializedPayload = JSON.stringify({ ...payload, session_id: sessionId });
+    const serializedPayload = serializeSessionPayload({
+      ...payload,
+      session_id: sessionId,
+    });
     if (serializedPayload === lastSavedPayloadRef.current) {
       return;
     }
 
     saveTimerRef.current = window.setTimeout(() => {
-      saveSession({ ...payload, session_id: sessionId })
-        .then((savedSession) => {
+      const targetSessionId = sessionId;
+      saveChainRef.current = saveChainRef.current
+        .then(async () => {
+          if (saveConflictRef.current) return;
+          const savedSession = await saveSession({
+            ...payload,
+            session_id: targetSessionId,
+            revision: sessionRevisionRef.current,
+          });
+          if (activeSessionIdRef.current !== targetSessionId) return;
+          const nextRevision = savedSession.revision ?? sessionRevisionRef.current;
+          sessionRevisionRef.current = nextRevision;
+          setSessionRevision(nextRevision);
           lastSavedPayloadRef.current = serializedPayload;
           setSessionId(savedSession.session_id);
+          activeSessionIdRef.current = savedSession.session_id;
           setSessionMessage(null);
         })
         .catch((error) => {
+          if (activeSessionIdRef.current !== targetSessionId) return;
           const message =
             error instanceof Error ? error.message : "Sitzung konnte nicht gespeichert werden";
+          if (error instanceof SessionConflictError) {
+            saveConflictRef.current = true;
+            setSessionConflict(message);
+          }
           setSessionMessage(message);
           console.error("Failed to save session:", error);
         });
@@ -684,37 +776,97 @@ export default function App() {
         window.clearTimeout(saveTimerRef.current);
       }
     };
-  }, [audioUrl, buildSessionPayload, pipelineId, sessionId, summaryInputFingerprint]);
+  }, [
+    audioUrl,
+    buildSessionPayload,
+    isProcessing,
+    pipelineId,
+    route.view,
+    sessionId,
+    summaryInputFingerprint,
+  ]);
 
-  const updatePipelineProcessingState = (status: PipelineJob) => {
+  const updatePipelineProcessingState = useCallback((status: PipelineJob) => {
     setPipelineJob(status);
     setPipelineId(status.pipeline_id);
     setJobId(status.transcription_job_id ?? null);
     if (status.session_id) {
       setSessionId(status.session_id);
+      activeSessionIdRef.current = status.session_id;
     }
     setProcessingProgress(status.progress);
     setProcessingStatus("");
-  };
+  }, []);
 
-  const pollPipelineToResult = async (
-    activePipelineId: string,
-    initialStatus?: PipelineJob
-  ) => {
-    setIsProcessing(true);
-    setProcessingError(null);
-    if (initialStatus) {
-      updatePipelineProcessingState(initialStatus);
+  const pollPipelineToResult = useCallback(
+    async (activePipelineId: string, initialStatus?: PipelineJob) => {
+      setIsProcessing(true);
+      setProcessingError(null);
+      if (initialStatus) {
+        updatePipelineProcessingState(initialStatus);
+      }
+
+      const completedStatus =
+        initialStatus?.status === "completed"
+          ? initialStatus
+          : await pollPipeline(activePipelineId, updatePipelineProcessingState);
+      updatePipelineProcessingState(completedStatus);
+      const result = await getPipelineResult(activePipelineId);
+      applyPipelineResult(result);
+    },
+    [applyPipelineResult, updatePipelineProcessingState]
+  );
+
+  useEffect(() => {
+    if (route.view !== "editor" || !route.sessionId) {
+      setIsLoadingRouteSession(false);
+      return;
+    }
+    if (activeSessionIdRef.current === route.sessionId) {
+      setIsLoadingRouteSession(false);
+      return;
     }
 
-    const completedStatus =
-      initialStatus?.status === "completed"
-        ? initialStatus
-        : await pollPipeline(activePipelineId, updatePipelineProcessingState);
-    updatePipelineProcessingState(completedStatus);
-    const result = await getPipelineResult(activePipelineId);
-    applyPipelineResult(result);
-  };
+    let cancelled = false;
+    setIsLoadingRouteSession(true);
+    setSessionMessage(null);
+    loadSession(route.sessionId)
+      .then((restored) => {
+        if (cancelled) return;
+        applySession(restored);
+        lastSavedPayloadRef.current = serializeSessionPayload({
+          ...restored,
+          transcript: restored.transcript ?? [],
+        });
+        const activePipeline = restored.latest_pipeline;
+        if (
+          activePipeline &&
+          (activePipeline.status === "pending" || activePipeline.status === "processing")
+        ) {
+          void pollPipelineToResult(activePipeline.pipeline_id, activePipeline).catch((error) => {
+            if (cancelled) return;
+            const message =
+              error instanceof Error ? error.message : "Pipeline konnte nicht fortgesetzt werden";
+            setProcessingError(message);
+            setProcessingStatus(`Fehler: ${message}`);
+            setIsProcessing(true);
+          });
+        }
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        const message =
+          error instanceof Error ? error.message : "Sitzung konnte nicht geladen werden";
+        setSessionMessage(message);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingRouteSession(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applySession, pollPipelineToResult, route.sessionId, route.view]);
 
   // Legacy transcription flow used as a fallback when the pipeline endpoint fails.
   const startLegacyTranscription = async (fallbackReason?: string) => {
@@ -747,6 +899,11 @@ export default function App() {
       );
       const activeSessionId = preparedSession.session_id;
       setSessionId(activeSessionId);
+      activeSessionIdRef.current = activeSessionId;
+      const preparedRevision = preparedSession.revision ?? null;
+      setSessionRevision(preparedRevision);
+      sessionRevisionRef.current = preparedRevision;
+      navigate(`/sessions/${encodeURIComponent(activeSessionId)}`, true);
       try {
         localStorage.setItem(ACTIVE_SESSION_KEY, activeSessionId);
       } catch (e) {
@@ -876,6 +1033,7 @@ export default function App() {
         setRestoreCandidate(null);
         if (status.session_id) {
           setSessionId(status.session_id);
+          activeSessionIdRef.current = status.session_id;
           localStorage.setItem(ACTIVE_SESSION_KEY, status.session_id);
         }
         setPipelineJob(status);
@@ -940,20 +1098,12 @@ export default function App() {
               : "Automatische Verarbeitung abgeschlossen. Bitte prüfen Sie unsichere Zuordnungen vor dem Protokoll."
           );
         }
-        lastSavedPayloadRef.current = JSON.stringify(
-          buildSessionPayload({
-            session_id: restored.session_id,
-            job_id: restored.job_id,
-            current_step: restored.current_step,
-            tops: restored.tops,
-            transcript: restored.transcript ?? [],
-            assignments: restored.assignments,
-            speaker_names: restored.speaker_names,
-            summaries: normalizeSummaries(restored.summaries),
-            summary_reviews: normalizeSummaryReviews(restored.summary_reviews),
-            skipped_assignment: restored.skipped_assignment,
-          })
-        );
+        lastSavedPayloadRef.current = serializeSessionPayload({
+          ...restored,
+          transcript: restored.transcript ?? [],
+          summaries: normalizeSummaries(restored.summaries),
+          summary_reviews: normalizeSummaryReviews(restored.summary_reviews),
+        });
       } else if (restoreCandidate.draft) {
         applySession(restoreCandidate.draft);
         if ((restoreCandidate.draft.current_step ?? 1) === 2 && hasAnySummaryArtifact(restoreCandidate.draft)) {
@@ -968,6 +1118,12 @@ export default function App() {
               : "Automatische Verarbeitung abgeschlossen. Bitte prüfen Sie unsichere Zuordnungen vor dem Protokoll."
           );
         }
+      }
+      if (activeSessionIdRef.current) {
+        navigate(
+          `/sessions/${encodeURIComponent(activeSessionIdRef.current)}`,
+          true
+        );
       }
       setRestoreCandidate(null);
     } catch (error) {
@@ -1015,6 +1171,11 @@ export default function App() {
       );
       const activeSessionId = preparedSession.session_id;
       setSessionId(activeSessionId);
+      activeSessionIdRef.current = activeSessionId;
+      const preparedRevision = preparedSession.revision ?? null;
+      setSessionRevision(preparedRevision);
+      sessionRevisionRef.current = preparedRevision;
+      navigate(`/sessions/${encodeURIComponent(activeSessionId)}`, true);
       localStorage.setItem(ACTIVE_SESSION_KEY, activeSessionId);
 
       const pipeline = await apiStartPipeline(audioFile, {
@@ -1050,6 +1211,32 @@ export default function App() {
 
   const handleStartNewSession = () => {
     resetSession();
+    navigate("/");
+  };
+
+  const handleOpenSession = (targetSessionId: string) => {
+    resetSession();
+    navigate(`/sessions/${encodeURIComponent(targetSessionId)}`);
+  };
+
+  const handleReloadCurrentSession = async () => {
+    if (!sessionId) return;
+    setIsLoadingRouteSession(true);
+    try {
+      const restored = await loadSession(sessionId);
+      applySession(restored);
+      setSessionMessage(null);
+      lastSavedPayloadRef.current = serializeSessionPayload({
+        ...restored,
+        transcript: restored.transcript ?? [],
+      });
+    } catch (error) {
+      setSessionMessage(
+        error instanceof Error ? error.message : "Sitzung konnte nicht geladen werden"
+      );
+    } finally {
+      setIsLoadingRouteSession(false);
+    }
   };
 
   // Generate summary for entire conversation (when no TOPs are defined)
@@ -1131,6 +1318,7 @@ export default function App() {
       }
 
       const updatedSession = await regenerateSessionSummaries(sessionId, {
+        revision: sessionRevisionRef.current,
         tops: noTopMode ? [] : validTops,
         transcript,
         assignments: effectiveAssignments,
@@ -1140,6 +1328,9 @@ export default function App() {
         systemPrompt: prompt,
       });
       const nextSummaries = normalizeSummaries(updatedSession.summaries);
+      const nextRevision = updatedSession.revision ?? sessionRevisionRef.current;
+      sessionRevisionRef.current = nextRevision;
+      setSessionRevision(nextRevision);
       const nextReviews = normalizeSummaryReviews(updatedSession.summary_reviews);
       const nextTops = updatedSession.tops?.length ? updatedSession.tops : noTopMode ? [] : validTops;
       const nextAssignments = updatedSession.assignments ?? effectiveAssignments;
@@ -1158,6 +1349,12 @@ export default function App() {
         )
       );
     } catch (error) {
+      if (error instanceof SessionConflictError) {
+        saveConflictRef.current = true;
+        setSessionConflict(error.message);
+        setSessionMessage(error.message);
+        return;
+      }
       console.warn("Backend summary regeneration failed, using client fallback:", error);
       if (noTopMode) {
         await generateSummaryForAll(transcript, true);
@@ -1350,11 +1547,50 @@ export default function App() {
     }
   };
 
+  if (route.view === "history") {
+    return (
+      <Layout
+        onSettingsClick={() => setIsSettingsOpen(true)}
+        onHistoryClick={() => navigate("/sessions")}
+        onNewSessionClick={handleStartNewSession}
+      >
+        <LLMSettingsPanel
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          settings={llmSettings}
+          onSettingsChange={setLlmSettings}
+        />
+        <SessionHistory
+          onOpen={handleOpenSession}
+          onNewSession={handleStartNewSession}
+        />
+      </Layout>
+    );
+  }
+
+  if (isLoadingRouteSession) {
+    return (
+      <Layout
+        onSettingsClick={() => setIsSettingsOpen(true)}
+        onHistoryClick={() => navigate("/sessions")}
+        onNewSessionClick={handleStartNewSession}
+      >
+        <div className="rounded-lg border border-gray-200 bg-white p-8 text-center text-gray-600">
+          Sitzung wird geladen…
+        </div>
+      </Layout>
+    );
+  }
+
   // Filter out empty TOPs for display
   const validTops = tops.filter((t) => t.trim() !== "");
 
   return (
-    <Layout onSettingsClick={() => setIsSettingsOpen(true)}>
+    <Layout
+      onSettingsClick={() => setIsSettingsOpen(true)}
+      onHistoryClick={() => navigate("/sessions")}
+      onNewSessionClick={handleStartNewSession}
+    >
       {/* LLM Settings Panel */}
       <LLMSettingsPanel
         isOpen={isSettingsOpen}
@@ -1362,6 +1598,19 @@ export default function App() {
         settings={llmSettings}
         onSettingsChange={setLlmSettings}
       />
+
+      {sessionConflict && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-yellow-300 bg-yellow-50 p-4 text-sm text-yellow-900">
+          <span>{sessionConflict}</span>
+          <button
+            type="button"
+            onClick={() => void handleReloadCurrentSession()}
+            className="rounded-md bg-yellow-900 px-3 py-2 font-medium text-white hover:bg-yellow-800"
+          >
+            Aktuellen Stand laden
+          </button>
+        </div>
+      )}
 
       {/* Backend status indicator */}
       {backendAvailable === false && (

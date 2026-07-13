@@ -13,6 +13,7 @@ import type {
   PipelineResultResponse,
   PipelineStartOptions,
   SessionResponse,
+  SessionHistoryResponse,
   SessionSavePayload,
   SpeakerEmbeddingBackfillResult,
   SpeakerMatchDiagnostic,
@@ -24,6 +25,16 @@ import type {
   TranscriptLine,
   TranscriptionJob,
 } from "./types";
+
+export class SessionConflictError extends Error {
+  actualRevision?: number;
+
+  constructor(message: string, actualRevision?: number) {
+    super(message);
+    this.name = "SessionConflictError";
+    this.actualRevision = actualRevision;
+  }
+}
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
 const configuredClientLlmTextChars = Number(
@@ -273,11 +284,48 @@ export async function saveSession(
     }
   );
 
+  if (response.status === 409) {
+    const error = await response.json().catch(() => ({}));
+    throw new SessionConflictError(
+      error.detail?.message || "Diese Sitzung wurde zwischenzeitlich geändert.",
+      error.detail?.actual_revision
+    );
+  }
+
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.detail || "Fehler beim Speichern der Sitzung");
   }
 
+  return response.json();
+}
+
+export interface ListSessionsOptions {
+  limit?: number;
+  offset?: number;
+  query?: string;
+  status?: string;
+}
+
+/**
+ * Load the shared server-side session history.
+ */
+export async function listSessions(
+  options: ListSessionsOptions = {}
+): Promise<SessionHistoryResponse> {
+  const params = new URLSearchParams();
+  params.set("limit", String(options.limit ?? 25));
+  params.set("offset", String(options.offset ?? 0));
+  if (options.query?.trim()) {
+    params.set("query", options.query.trim());
+  }
+  if (options.status?.trim()) {
+    params.set("status", options.status.trim());
+  }
+  const response = await fetch(`${API_BASE}/api/sessions?${params.toString()}`);
+  if (!response.ok) {
+    throw await readApiError(response, "Sitzungsverlauf konnte nicht geladen werden");
+  }
   return response.json();
 }
 
@@ -296,6 +344,7 @@ export async function loadSession(sessionId: string): Promise<SessionResponse> {
 }
 
 export interface RegenerateSessionSummariesPayload {
+  revision?: number | null;
   tops: string[];
   transcript: TranscriptLine[];
   assignments: (number | null)[];
@@ -320,6 +369,7 @@ export async function regenerateSessionSummaries(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        revision: payload.revision,
         tops: payload.tops,
         transcript: payload.transcript,
         assignments: payload.assignments,
@@ -330,6 +380,14 @@ export async function regenerateSessionSummaries(
       }),
     }
   );
+
+  if (response.status === 409) {
+    const error = await response.json().catch(() => ({}));
+    throw new SessionConflictError(
+      error.detail?.message || "Diese Sitzung wurde zwischenzeitlich geändert.",
+      error.detail?.actual_revision
+    );
+  }
 
   if (!response.ok) {
     throw await readApiError(response, "Fehler beim Aktualisieren der Zusammenfassungen");
@@ -899,4 +957,3 @@ export async function checkBackendHealth(): Promise<boolean> {
     return false;
   }
 }
-

@@ -135,6 +135,7 @@ export interface PipelineResultResponse {
 
 export interface SessionSavePayload {
   session_id?: string | null;
+  revision?: number | null;
   job_id?: string | null;
   current_step?: number | null;
   tops: string[];
@@ -149,9 +150,50 @@ export interface SessionSavePayload {
 
 export interface SessionResponse extends SessionSavePayload {
   session_id: string;
+  revision?: number;
+  created_at?: number | null;
+  updated_at?: number | null;
   audio_url?: string | null;
   audio_metadata?: AudioMetadata | null;
   job?: TranscriptionJob | null;
+  latest_pipeline?: PipelineJob | null;
+}
+
+export type SessionHistoryStatus =
+  | 'draft'
+  | 'processing'
+  | 'review'
+  | 'ready'
+  | 'failed'
+  | 'cancelled';
+
+export interface SessionHistoryItem {
+  session_id: string;
+  title: string;
+  committee: string;
+  meeting_date: string;
+  status: SessionHistoryStatus;
+  current_step?: number | null;
+  revision: number;
+  created_at: number;
+  updated_at: number;
+  top_count: number;
+  transcript_line_count: number;
+  summary_count: number;
+  audio_available: boolean;
+  job_id?: string | null;
+  job_status?: string | null;
+  pipeline_job_id?: string | null;
+  pipeline_status?: string | null;
+  pipeline_stage?: string | null;
+  pipeline_progress?: number | null;
+}
+
+export interface SessionHistoryResponse {
+  items: SessionHistoryItem[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export interface SummarizeRequest {
@@ -278,6 +320,8 @@ export type ExportFormat = 'txt' | 'docx' | 'pdf';
 export interface LayoutProps {
   children: React.ReactNode;
   onSettingsClick?: () => void;
+  onHistoryClick?: () => void;
+  onNewSessionClick?: () => void;
 }
 
 export interface StepIndicatorProps {

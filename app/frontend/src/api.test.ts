@@ -16,6 +16,7 @@ import {
   listSpeakerMatchDiagnostics,
   listSpeakerObservations,
   listSpeakerProfiles,
+  listSessions,
   loadSession,
   saveSession,
   startPipeline,
@@ -318,6 +319,46 @@ describe('api session client', () => {
     });
     expect(fetchMock.mock.calls[1]![0]).toBe('/api/sessions/session-1');
     expect(fetchMock.mock.calls[1]![1]).toBeUndefined();
+  });
+
+  it('loads the shared session history with filters', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ items: [], total: 0, limit: 20, offset: 0 }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await listSessions({ limit: 20, offset: 20, query: 'Haushalt', status: 'ready' });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      '/api/sessions?limit=20&offset=20&query=Haushalt&status=ready'
+    );
+  });
+
+  it('reports a revision conflict while saving a shared session', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: () => Promise.resolve({
+        detail: {
+          message: 'Diese Sitzung wurde zwischenzeitlich geändert.',
+          actual_revision: 4,
+        },
+      }),
+    }));
+
+    await expect(saveSession({
+      session_id: 'session-1',
+      revision: 3,
+      tops: [],
+      assignments: [],
+      speaker_names: {},
+      summaries: {},
+      skipped_assignment: false,
+    })).rejects.toMatchObject({
+      name: 'SessionConflictError',
+      actualRevision: 4,
+    });
   });
 
   it('posts protocol export data and returns the generated blob', async () => {

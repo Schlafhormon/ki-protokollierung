@@ -14,6 +14,19 @@ from typing import Any
 DEFAULT_DB_PATH = Path(os.environ.get("PERSISTENCE_DB_PATH", "data/sessions.sqlite3"))
 
 
+class SessionConflictError(RuntimeError):
+    """Raised when a client tries to overwrite a newer session revision."""
+
+    def __init__(self, session_id: str, expected_revision: int, actual_revision: int):
+        self.session_id = session_id
+        self.expected_revision = expected_revision
+        self.actual_revision = actual_revision
+        super().__init__(
+            f"Session {session_id} changed from revision "
+            f"{expected_revision} to {actual_revision}"
+        )
+
+
 def get_db_path() -> Path:
     return Path(os.environ.get("PERSISTENCE_DB_PATH", str(DEFAULT_DB_PATH)))
 
@@ -38,6 +51,7 @@ def init_db(db_path: Path | None = None) -> None:
                 current_step INTEGER,
                 skipped_assignment INTEGER NOT NULL DEFAULT 0,
                 export_metadata_json TEXT,
+                revision INTEGER NOT NULL DEFAULT 1,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             );
@@ -229,6 +243,8 @@ def init_db(db_path: Path | None = None) -> None:
                 ON speaker_observations(profile_id);
             CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_session_id
                 ON pipeline_jobs(session_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
+                ON sessions(updated_at DESC);
             """
         )
         existing_columns = {
@@ -263,6 +279,13 @@ def init_db(db_path: Path | None = None) -> None:
                 """
                 ALTER TABLE sessions
                 ADD COLUMN export_metadata_json TEXT
+                """
+            )
+        if "revision" not in session_columns:
+            db.execute(
+                """
+                ALTER TABLE sessions
+                ADD COLUMN revision INTEGER NOT NULL DEFAULT 1
                 """
             )
         embedding_columns = {
@@ -1222,27 +1245,43 @@ def mark_interrupted_pipeline_jobs(db_path: Path | None = None) -> None:
 def save_session(
     session_id: str,
     state: dict[str, Any],
+    *,
+    expected_revision: int | None = None,
+    bump_revision: bool = True,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
     now = time.time()
     with connect(db_path) as db:
+        # Serialize the revision check and write so concurrent autosaves cannot
+        # both validate the same revision before either one commits.
+        db.execute("BEGIN IMMEDIATE")
         existing = db.execute(
-            "SELECT created_at FROM sessions WHERE session_id = ?", (session_id,)
+            "SELECT created_at, revision FROM sessions WHERE session_id = ?",
+            (session_id,),
         ).fetchone()
         created_at = float(existing["created_at"]) if existing else now
+        if existing is not None and expected_revision is not None:
+            actual_revision = int(existing["revision"])
+            if actual_revision != expected_revision:
+                raise SessionConflictError(
+                    session_id,
+                    expected_revision,
+                    actual_revision,
+                )
 
         db.execute(
             """
             INSERT INTO sessions (
                 session_id, job_id, current_step, skipped_assignment, export_metadata_json,
-                created_at, updated_at
+                revision, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 job_id = excluded.job_id,
                 current_step = excluded.current_step,
                 skipped_assignment = excluded.skipped_assignment,
                 export_metadata_json = excluded.export_metadata_json,
+                revision = sessions.revision + ?,
                 updated_at = excluded.updated_at
             """,
             (
@@ -1253,6 +1292,7 @@ def save_session(
                 _to_json(state.get("export_metadata") or {}),
                 created_at,
                 now,
+                1 if bump_revision else 0,
             ),
         )
 
@@ -1428,3 +1468,138 @@ def load_session(
     session["export_metadata"] = _from_json(session.get("export_metadata_json")) or {}
     session["transcript"] = [dict(line) for line in transcript] if transcript else None
     return session
+
+
+def load_latest_pipeline_job_for_session(
+    session_id: str,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    with connect(db_path) as db:
+        row = db.execute(
+            """
+            SELECT pipeline_job_id
+            FROM pipeline_jobs
+            WHERE session_id = ?
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return load_pipeline_job(row["pipeline_job_id"], db_path=db_path)
+
+
+def list_sessions(
+    *,
+    query: str | None = None,
+    status: str | None = None,
+    limit: int = 25,
+    offset: int = 0,
+    db_path: Path | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return lightweight session history entries without loading transcripts."""
+    with connect(db_path) as db:
+        rows = db.execute(
+            """
+            SELECT
+                s.session_id,
+                s.job_id,
+                s.current_step,
+                s.export_metadata_json,
+                s.revision,
+                s.created_at,
+                s.updated_at,
+                tj.status AS job_status,
+                tj.audio_path,
+                tj.file_path,
+                latest_pipeline.pipeline_job_id,
+                latest_pipeline.status AS pipeline_status,
+                latest_pipeline.stage AS pipeline_stage,
+                latest_pipeline.progress AS pipeline_progress,
+                (SELECT COUNT(*) FROM tops t WHERE t.session_id = s.session_id)
+                    AS top_count,
+                (SELECT COUNT(*) FROM session_transcript_lines st
+                    WHERE st.session_id = s.session_id) AS transcript_line_count,
+                (SELECT COUNT(*) FROM summaries sm WHERE sm.session_id = s.session_id)
+                    AS summary_count
+            FROM sessions s
+            LEFT JOIN transcription_jobs tj ON tj.job_id = s.job_id
+            LEFT JOIN pipeline_jobs latest_pipeline
+                ON latest_pipeline.pipeline_job_id = (
+                    SELECT p.pipeline_job_id
+                    FROM pipeline_jobs p
+                    WHERE p.session_id = s.session_id
+                    ORDER BY p.updated_at DESC, p.created_at DESC
+                    LIMIT 1
+                )
+            ORDER BY s.updated_at DESC, s.session_id DESC
+            """
+        ).fetchall()
+
+    normalized_query = (query or "").strip().casefold()
+    normalized_status = (status or "").strip().lower()
+    entries: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        metadata = _from_json(item.pop("export_metadata_json", None)) or {}
+        top_count = int(item.get("top_count") or 0)
+        transcript_count = int(item.get("transcript_line_count") or 0)
+        summary_count = int(item.get("summary_count") or 0)
+        pipeline_status = item.get("pipeline_status")
+        job_status = item.get("job_status")
+
+        if pipeline_status in {"pending", "processing"} or job_status in {
+            "pending",
+            "processing",
+        }:
+            derived_status = "processing"
+        elif summary_count > 0:
+            derived_status = "ready"
+        elif transcript_count > 0:
+            derived_status = "review"
+        elif pipeline_status == "failed" or job_status == "failed":
+            derived_status = "failed"
+        elif pipeline_status == "cancelled" or job_status == "cancelled":
+            derived_status = "cancelled"
+        else:
+            derived_status = "draft"
+
+        title = str(metadata.get("title") or "").strip()
+        committee = str(metadata.get("committee") or "").strip()
+        meeting_date = str(metadata.get("date") or "").strip()
+        if not title or title == "Sitzungsprotokoll":
+            title = committee or (
+                f"Sitzung vom {meeting_date}" if meeting_date else "Unbenannte Sitzung"
+            )
+
+        item.update(
+            {
+                "title": title,
+                "committee": committee,
+                "meeting_date": meeting_date,
+                "status": derived_status,
+                "top_count": top_count,
+                "transcript_line_count": transcript_count,
+                "summary_count": summary_count,
+                "audio_available": bool(
+                    (item.get("audio_path") and os.path.exists(item["audio_path"]))
+                    or (item.get("file_path") and os.path.exists(item["file_path"]))
+                ),
+            }
+        )
+        item.pop("audio_path", None)
+        item.pop("file_path", None)
+
+        if normalized_status and derived_status != normalized_status:
+            continue
+        if normalized_query:
+            haystack = " ".join(
+                [title, committee, meeting_date, item["session_id"]]
+            ).casefold()
+            if normalized_query not in haystack:
+                continue
+        entries.append(item)
+
+    total = len(entries)
+    return entries[offset : offset + limit], total

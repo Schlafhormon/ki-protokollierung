@@ -10,6 +10,7 @@ import {
   getPipelineResult,
   getPipelineStatus,
   loadSession,
+  listSessions,
   pollPipeline,
   pollTranscription,
   regenerateSessionSummaries,
@@ -22,6 +23,7 @@ import type { PipelineJob, PipelineResultResponse } from './types';
 vi.mock('./api', () => ({
   checkBackendHealth: vi.fn(),
   loadSession: vi.fn(),
+  listSessions: vi.fn(),
   saveSession: vi.fn(),
   startPipeline: vi.fn(),
   pollPipeline: vi.fn(),
@@ -110,7 +112,14 @@ describe('App pipeline flow', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    window.history.replaceState(null, '', '/');
     vi.mocked(checkBackendHealth).mockResolvedValue(true);
+    vi.mocked(listSessions).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+    });
     vi.mocked(saveSession).mockResolvedValue({
       session_id: 'session-1',
       tops: ['Haushalt'],
@@ -501,5 +510,28 @@ describe('App pipeline flow', () => {
     });
     expect(localStorage.getItem('active-pipeline-id')).toBeNull();
     expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
+  });
+
+  it('opens the shared session history from the root-page button', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole('button', { name: 'Verlauf' }));
+
+    expect(window.location.pathname).toBe('/sessions');
+    expect(await screen.findByRole('heading', { name: 'Sitzungsverlauf' })).toBeInTheDocument();
+    expect(listSessions).toHaveBeenCalled();
+  });
+
+  it('loads a shared session directly by URL without browser session data', async () => {
+    window.history.replaceState(null, '', '/sessions/session-1');
+    render(<App />);
+
+    await waitFor(() => {
+      expect(loadSession).toHaveBeenCalledWith('session-1');
+    });
+    expect(
+      await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')
+    ).toBeInTheDocument();
   });
 });
