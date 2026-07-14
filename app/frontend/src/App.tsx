@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import Layout from "./components/Layout";
 import StepIndicator from "./components/StepIndicator";
 import UploadStep from "./components/UploadStep";
@@ -11,16 +11,15 @@ import LLMSettingsPanel, {
   type LLMSettings,
 } from "./components/LLMSettingsPanel";
 import {
-  startTranscription as apiStartTranscription,
-  pollTranscription,
   startPipeline as apiStartPipeline,
   pollPipeline,
   getPipelineStatus,
   getPipelineResult,
   cancelPipeline,
-  generateSummary,
-  regenerateSessionSummaries,
-  detectAgenda,
+  startSummaryJob,
+  pollSummaryJob,
+  cancelSummaryJob,
+  acceptExistingSummary,
   checkBackendHealth,
   saveSession,
   loadSession,
@@ -35,6 +34,8 @@ import type {
   SessionSavePayload,
   SpeakerObservation,
   SummaryReview,
+  SummaryState,
+  SummaryJob,
   TranscriptLine,
 } from "./types";
 
@@ -45,8 +46,7 @@ const ACTIVE_PIPELINE_KEY = "active-pipeline-id";
 const SESSION_DRAFT_KEY = "active-session-draft";
 const SPEAKER_MEMORY_OPT_IN_KEY = "speaker-memory-opt-in";
 
-// Implicit TOP title when no TOPs are defined
-const DEFAULT_TOP_TITLE = "Gesamtes Gespräch";
+// Initial editable TOP fields before a session is processed
 const EMPTY_TOPS = ["", "", ""];
 const DEFAULT_SESSION_DATE = new Date().toISOString().slice(0, 10);
 const DEFAULT_EXPORT_METADATA: ExportMetadata = {
@@ -88,7 +88,6 @@ FORMAT:
 interface SessionDraft extends SessionSavePayload {
   audio_url?: string | null;
   pipeline_id?: string | null;
-  summary_input_fingerprint?: string | null;
 }
 
 interface AppRoute {
@@ -155,62 +154,73 @@ function normalizeSummaryReviews(
   return normalized;
 }
 
-function buildSummaryInputFingerprint(
-  tops: string[],
-  transcript: TranscriptLine[],
-  assignments: (number | null)[],
-  speakerNames: Record<string, string>
-): string {
-  const normalizedSpeakerNames: Record<string, string> = {};
-  Object.keys(speakerNames)
-    .sort()
-    .forEach((speaker) => {
-      normalizedSpeakerNames[speaker] = speakerNames[speaker]?.trim() ?? "";
-    });
-  return JSON.stringify({
-    tops: tops.map((top) => top.trim()).filter(Boolean),
-    transcript: transcript.map((line) => ({
-      speaker: line.speaker,
-      text: line.text,
-      start: line.start,
-      end: line.end,
-    })),
-    assignments,
-    speakerNames: normalizedSpeakerNames,
+function normalizeSummaryStates(
+  states: Record<number, SummaryState> | Record<string, SummaryState> | undefined
+): Record<number, SummaryState> {
+  const normalized: Record<number, SummaryState> = {};
+  Object.entries(states ?? {}).forEach(([key, value]) => {
+    const index = Number(key);
+    if (Number.isFinite(index) && value) normalized[index] = value;
   });
+  return normalized;
 }
 
-function getSessionSummaryInputFingerprint(
-  session: SessionResponse | SessionDraft
-): string | null {
-  if (!hasAnySummary(session)) {
-    return null;
-  }
-  return (
-    (session as SessionDraft).summary_input_fingerprint ??
-    buildSummaryInputFingerprint(
-      session.tops ?? [],
-      session.transcript ?? [],
-      session.assignments ?? [],
-      session.speaker_names ?? {}
-    )
-  );
+function normalizeLineText(text: string): string {
+  return text.trim().replace(/\s+/g, ' ');
+}
+
+function currentSourceSnapshot(
+  transcript: TranscriptLine[],
+  assignments: (number | null)[],
+  topIndex: number,
+  noTopMode: boolean
+) {
+  const snapshot: Array<{ line_id: string; speaker: string; text: string }> = [];
+  transcript.forEach((line, lineIndex) => {
+    if (!noTopMode && assignments[lineIndex] !== topIndex) return;
+    const previous = snapshot[snapshot.length - 1];
+    if (previous?.speaker === line.speaker) {
+      previous.text = normalizeLineText(`${previous.text} ${line.text}`);
+    } else {
+      snapshot.push({
+        line_id: line.line_id ?? `legacy:${lineIndex}`,
+        speaker: line.speaker,
+        text: normalizeLineText(line.text),
+      });
+    }
+  });
+  return snapshot;
+}
+
+function replaceExactLabels<T>(value: T, replacements: Record<string, string>): T {
+  const entries = Object.entries(replacements)
+    .filter(([oldLabel, newLabel]) => oldLabel && newLabel && oldLabel !== newLabel)
+    .sort(([left], [right]) => right.length - left.length);
+  if (entries.length === 0) return value;
+  const escaped = entries.map(([label]) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = new RegExp(`(^|[^\\p{L}\\p{N}_])(${escaped.join('|')})(?=$|[^\\p{L}\\p{N}_])`, 'gu');
+  const replacementMap = Object.fromEntries(entries);
+  const visit = (item: unknown): unknown => {
+    if (typeof item === 'string') {
+      return item.replace(pattern, (_match, prefix: string, label: string) => `${prefix}${replacementMap[label]}`);
+    }
+    if (Array.isArray(item)) return item.map(visit);
+    if (item && typeof item === 'object') {
+      return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, visit(child)]));
+    }
+    return item;
+  };
+  return visit(value) as T;
 }
 
 function hasFreshSessionSummaries(session: SessionResponse | SessionDraft): boolean {
-  const fingerprint = getSessionSummaryInputFingerprint(session);
-  if (!fingerprint) {
-    return false;
+  const states = normalizeSummaryStates(session.summary_states);
+  if (Object.keys(states).length > 0) {
+    return hasAnySummaryArtifact(session) && Object.values(states).every(
+      (state) => state.status === 'ready'
+    );
   }
-  return (
-    fingerprint ===
-    buildSummaryInputFingerprint(
-      session.tops ?? [],
-      session.transcript ?? [],
-      session.assignments ?? [],
-      session.speaker_names ?? {}
-    )
-  );
+  return hasAnySummaryArtifact(session);
 }
 
 function hasAgendaUncertainty(
@@ -278,18 +288,6 @@ function hasAnySummaryArtifact(session: SessionResponse | SessionDraft): boolean
   return Object.keys(session.summary_reviews ?? {}).length > 0;
 }
 
-function hasSummaryArtifactForIndex(
-  summaries: Record<number, string>,
-  reviews: Record<number, SummaryReview>,
-  index: number
-): boolean {
-  const summary = summaries[index];
-  return (
-    (typeof summary === "string" && summary.trim() !== "") ||
-    Object.prototype.hasOwnProperty.call(reviews, index)
-  );
-}
-
 function getTranscriptSpeakers(transcript: TranscriptLine[] = []): string[] {
   return Array.from(new Set(transcript.map((line) => line.speaker).filter(Boolean)));
 }
@@ -355,15 +353,17 @@ export default function App() {
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [tops, setTops] = useState<string[]>(EMPTY_TOPS);
+  const [topIds, setTopIds] = useState<string[]>([]);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [assignments, setAssignments] = useState<(number | null)[]>([]);
   const [agendaDetection, setAgendaDetection] = useState<AgendaDetectionResponse | null>(null);
   const [agendaDetectionError, setAgendaDetectionError] = useState<string | null>(null);
   const [summaries, setSummaries] = useState<Record<number, string>>({});
   const [summaryReviews, setSummaryReviews] = useState<Record<number, SummaryReview>>({});
-  const [summaryInputFingerprint, setSummaryInputFingerprint] = useState<string | null>(null);
+  const [summaryStates, setSummaryStates] = useState<Record<number, SummaryState>>({});
   const [exportMetadata, setExportMetadata] = useState<ExportMetadata>(DEFAULT_EXPORT_METADATA);
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+  const [summaryJob, setSummaryJob] = useState<SummaryJob | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [skippedAssignment, setSkippedAssignment] = useState(false);
@@ -393,21 +393,41 @@ export default function App() {
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const saveConflictRef = useRef(false);
 
-  // Helper to apply speaker name mappings to transcript lines for summarization
-  const applySpeakerNames = (lines: TranscriptLine[]): TranscriptLine[] => {
-    return lines.map((line) => ({
-      ...line,
-      speaker: speakerNames[line.speaker]?.trim() || line.speaker,
-    }));
-  };
-
-  const currentSummaryInputFingerprint = useMemo(
-    () => buildSummaryInputFingerprint(tops, transcript, assignments, speakerNames),
-    [assignments, speakerNames, tops, transcript]
+  const effectiveSummaryStates = useMemo(() => {
+    const noTopMode = tops.filter((top) => top.trim()).length === 0;
+    const count = noTopMode ? 1 : tops.filter((top) => top.trim()).length;
+    const next: Record<number, SummaryState> = {};
+    for (let index = 0; index < count; index++) {
+      const persisted = summaryStates[index];
+      const snapshot = currentSourceSnapshot(transcript, assignments, index, noTopMode);
+      const baseline = persisted?.source_snapshot ?? snapshot;
+      const semantic = (items: typeof snapshot) => normalizeLineText(items.map(({ text }) => text).join(' '));
+      const semanticChange = JSON.stringify(semantic(snapshot)) !== JSON.stringify(semantic(baseline));
+      const summaryExists = Boolean(summaries[index]?.trim());
+      next[index] = {
+        ...(persisted ?? {
+          top_id: noTopMode ? `whole-session:${sessionId ?? ''}` : topIds[index] ?? `top:${index}`,
+          status: summaryExists ? 'ready' : 'missing',
+          source_snapshot: baseline,
+        }),
+        status:
+          persisted?.status === 'queued' || persisted?.status === 'running'
+            ? persisted.status
+            : !summaryExists
+              ? persisted?.status === 'failed' ? 'failed' : 'missing'
+              : semanticChange
+                ? 'review_required'
+                : persisted?.status ?? 'ready',
+        change_reasons: semanticChange
+          ? persisted?.change_reasons?.length ? persisted.change_reasons : ['summary_input_changed']
+          : persisted?.change_reasons ?? [],
+      };
+    }
+    return next;
+  }, [assignments, sessionId, summaries, summaryStates, topIds, tops, transcript]);
+  const summariesAreFresh = Object.values(effectiveSummaryStates).every(
+    (state) => state.status === 'ready'
   );
-  const summariesAreFresh =
-    summaryInputFingerprint !== null &&
-    summaryInputFingerprint === currentSummaryInputFingerprint;
   const hasFreshSummariesInState = hasAnySummaryArtifact({
     tops,
     transcript,
@@ -473,11 +493,13 @@ export default function App() {
       job_id: overrides.job_id ?? jobId,
       current_step: overrides.current_step ?? currentStep,
       tops: overrides.tops ?? tops,
+      top_ids: overrides.top_ids ?? topIds,
       transcript: overrides.transcript ?? transcript,
       assignments: overrides.assignments ?? assignments,
       speaker_names: overrides.speaker_names ?? speakerNames,
       summaries: overrides.summaries ?? summaries,
       summary_reviews: overrides.summary_reviews ?? summaryReviews,
+      summary_states: overrides.summary_states ?? effectiveSummaryStates,
       export_metadata: overrides.export_metadata ?? exportMetadata,
       skipped_assignment: overrides.skipped_assignment ?? skippedAssignment,
     }),
@@ -492,6 +514,9 @@ export default function App() {
       speakerNames,
       summaryReviews,
       summaries,
+      summaryStates,
+      effectiveSummaryStates,
+      topIds,
       tops,
       transcript,
     ]
@@ -509,6 +534,13 @@ export default function App() {
     setJobId(session.job_id ?? null);
     setCurrentStep(session.current_step ?? 1);
     setTops(session.tops?.length ? session.tops : EMPTY_TOPS);
+    setTopIds(
+      session.top_ids?.length === (session.tops?.length ?? 0)
+        ? session.top_ids
+        : (session.tops ?? []).map((_, index) =>
+            normalizeSummaryStates(session.summary_states)[index]?.top_id ?? `top-${index}`
+          )
+    );
     setTranscript(session.transcript ?? []);
     setAssignments(session.assignments ?? []);
     setAgendaDetection(null);
@@ -517,7 +549,7 @@ export default function App() {
     setSkipAgendaDetection(Boolean(session.skipped_assignment));
     setSummaries(normalizeSummaries(session.summaries));
     setSummaryReviews(normalizeSummaryReviews(session.summary_reviews));
-    setSummaryInputFingerprint(getSessionSummaryInputFingerprint(session));
+    setSummaryStates(normalizeSummaryStates(session.summary_states));
     setExportMetadata({
       ...DEFAULT_EXPORT_METADATA,
       ...(session.export_metadata ?? {}),
@@ -536,6 +568,7 @@ export default function App() {
     setAutoDetectTopsFromPdf(false);
     setPipelineId((session as SessionDraft).pipeline_id ?? null);
     setPipelineJob(null);
+    setSummaryJob(session.latest_summary_job ?? null);
     setPipelineNotice(null);
     setDirectProtocolAvailable(false);
     setIsProcessing(false);
@@ -546,9 +579,21 @@ export default function App() {
 
   const applyPipelineResult = useCallback((result: PipelineResultResponse) => {
     const speakerObservations = result.speaker_observations ?? [];
+    const suggestedSpeakerNames = applySuggestedSpeakerNames(result.session, speakerObservations);
+    const speakerReplacements: Record<string, string> = {};
+    Object.keys(suggestedSpeakerNames).forEach((speakerId) => {
+      const previous = result.session.speaker_names?.[speakerId]?.trim() || speakerId;
+      const next = suggestedSpeakerNames[speakerId]?.trim() || speakerId;
+      if (previous !== next) speakerReplacements[previous] = next;
+    });
     const sessionWithSuggestedSpeakers: SessionResponse = {
       ...result.session,
-      speaker_names: applySuggestedSpeakerNames(result.session, speakerObservations),
+      speaker_names: suggestedSpeakerNames,
+      summaries: replaceExactLabels(result.session.summaries, speakerReplacements),
+      summary_reviews: replaceExactLabels(
+        result.summary_reviews ?? result.session.summary_reviews,
+        speakerReplacements
+      ),
     };
     const completedPipeline = result.pipeline;
     const warnings = result.warnings ?? completedPipeline.warnings ?? [];
@@ -571,17 +616,6 @@ export default function App() {
     setJobId(sessionWithSuggestedSpeakers.job_id ?? result.job?.job_id ?? completedPipeline.transcription_job_id ?? null);
     setAgendaDetection(agendaDetectionResult);
     setAgendaDetectionError(null);
-    setSummaryReviews(
-      normalizeSummaryReviews(result.summary_reviews ?? sessionWithSuggestedSpeakers.summary_reviews)
-    );
-    setSummaryInputFingerprint(
-      buildSummaryInputFingerprint(
-        sessionWithSuggestedSpeakers.tops ?? [],
-        sessionWithSuggestedSpeakers.transcript ?? [],
-        sessionWithSuggestedSpeakers.assignments ?? [],
-        sessionWithSuggestedSpeakers.speaker_names ?? {}
-      )
-    );
     setIsProcessing(false);
     setProcessingProgress(100);
     setProcessingStatus("Pipeline abgeschlossen");
@@ -621,13 +655,14 @@ export default function App() {
     setAudioFile(null);
     setPdfFile(null);
     setTops(EMPTY_TOPS);
+    setTopIds([]);
     setTranscript([]);
     setAssignments([]);
     setAgendaDetection(null);
     setAgendaDetectionError(null);
     setSummaries({});
     setSummaryReviews({});
-    setSummaryInputFingerprint(null);
+    setSummaryStates({});
     setExportMetadata(DEFAULT_EXPORT_METADATA);
     setAudioUrl(null);
     setSpeakerNames({});
@@ -635,6 +670,7 @@ export default function App() {
     setSkipAgendaDetection(false);
     setAutoDetectTopsFromPdf(true);
     setIsGeneratingSummary(false);
+    setSummaryJob(null);
     setIsProcessing(false);
     setProcessingError(null);
     setProcessingStatus("");
@@ -705,6 +741,7 @@ export default function App() {
       !sessionId ||
       route.view === "history" ||
       isProcessing ||
+      isGeneratingSummary ||
       saveConflictRef.current
     ) {
       return;
@@ -716,7 +753,6 @@ export default function App() {
       session_id: sessionId,
       audio_url: audioUrl,
       pipeline_id: pipelineId,
-      summary_input_fingerprint: summaryInputFingerprint,
     };
 
     try {
@@ -753,6 +789,10 @@ export default function App() {
           const nextRevision = savedSession.revision ?? sessionRevisionRef.current;
           sessionRevisionRef.current = nextRevision;
           setSessionRevision(nextRevision);
+          setTopIds(savedSession.top_ids ?? topIds);
+          setSummaries(normalizeSummaries(savedSession.summaries));
+          setSummaryReviews(normalizeSummaryReviews(savedSession.summary_reviews));
+          setSummaryStates(normalizeSummaryStates(savedSession.summary_states));
           lastSavedPayloadRef.current = serializedPayload;
           setSessionId(savedSession.session_id);
           activeSessionIdRef.current = savedSession.session_id;
@@ -780,10 +820,11 @@ export default function App() {
     audioUrl,
     buildSessionPayload,
     isProcessing,
+    isGeneratingSummary,
     pipelineId,
     route.view,
     sessionId,
-    summaryInputFingerprint,
+    topIds,
   ]);
 
   const updatePipelineProcessingState = useCallback((status: PipelineJob) => {
@@ -868,158 +909,40 @@ export default function App() {
     };
   }, [applySession, pollPipelineToResult, route.sessionId, route.view]);
 
-  // Legacy transcription flow used as a fallback when the pipeline endpoint fails.
-  const startLegacyTranscription = async (fallbackReason?: string) => {
-    if (!audioFile) return;
+  const activeSummaryJobId =
+    summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status)
+      ? summaryJob.summary_job_id
+      : null;
 
-    setIsProcessing(true);
-    setProcessingProgress(0);
-    setProcessingStatus(
-      fallbackReason
-        ? `Pipeline nicht verfügbar (${fallbackReason}). Klassischer Workflow wird gestartet...`
-        : "Audio wird hochgeladen..."
-    );
-    setProcessingError(null);
-    setPipelineId(null);
-    setPipelineJob(null);
-
-    try {
-      const submittedTops = skipAgendaDetection
-        ? []
-        : tops.map((top) => top.trim()).filter(Boolean);
-      const preparedSession = await saveSession(
-        buildSessionPayload({
-          current_step: 1,
-          transcript: [],
-          assignments: [],
-          tops: submittedTops,
-          summaries: {},
-          summary_reviews: {},
-        })
-      );
-      const activeSessionId = preparedSession.session_id;
-      setSessionId(activeSessionId);
-      activeSessionIdRef.current = activeSessionId;
-      const preparedRevision = preparedSession.revision ?? null;
-      setSessionRevision(preparedRevision);
-      sessionRevisionRef.current = preparedRevision;
-      navigate(`/sessions/${encodeURIComponent(activeSessionId)}`, true);
-      try {
-        localStorage.setItem(ACTIVE_SESSION_KEY, activeSessionId);
-      } catch (e) {
-        console.error("Failed to save active session id:", e);
+  useEffect(() => {
+    if (!activeSummaryJobId || !sessionId) return;
+    let cancelled = false;
+    setIsGeneratingSummary(true);
+    void pollSummaryJob(activeSummaryJobId, (job) => {
+      if (!cancelled && ['pending', 'processing', 'cancelling'].includes(job.status)) {
+        setSummaryJob(job);
       }
-
-      // Start transcription job
-      const job = await apiStartTranscription(
-        audioFile,
-        activeSessionId,
-        rememberSpeakers
-      );
-
-      setJobId(job.job_id);
-
-      // Poll for completion
-      const completedJob = await pollTranscription(
-        job.job_id,
-        (progress, message) => {
-          setProcessingProgress(progress);
-          setProcessingStatus(message);
+    })
+      .then(async (completed) => {
+        if (cancelled) return;
+        setSummaryJob(completed);
+        const refreshed = await loadSession(sessionId);
+        if (cancelled) return;
+        applySession(refreshed);
+        setCurrentStep(3);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setSessionMessage(error instanceof Error ? error.message : 'Zusammenfassungsjob fehlgeschlagen');
         }
-      );
-
-      // Set transcript and audio URL
-      const transcriptResult = completedJob.transcript ?? [];
-      setTranscript(transcriptResult);
-      setSummaryReviews({});
-      setSummaries({});
-      setSummaryInputFingerprint(null);
-      setAgendaDetection(null);
-      setAgendaDetectionError(null);
-
-      // Set audio URL for playback (use relative URL to go through nginx proxy)
-      if (completedJob.audio_url) {
-        setAudioUrl(withApiBase(completedJob.audio_url));
-      }
-
-      const knownTops = submittedTops;
-      if (skipAgendaDetection) {
-        setSkippedAssignment(true);
-        setTops([]);
-        setAssignments(new Array(transcriptResult.length).fill(null));
-        setIsProcessing(false);
-        setCurrentStep(2);
-        return;
-      }
-      setProcessingStatus("TOPs und Segmentgrenzen werden erkannt...");
-
-      try {
-        const detected = await detectAgenda({
-          tops: knownTops,
-          transcript: transcriptResult,
-          model: llmSettings.model,
-        });
-        const detectionTranscript =
-          detected.transcript && detected.transcript.length > 0
-            ? detected.transcript
-            : transcriptResult;
-        const detectedTops = detected.tops.map((top) => top.trim()).filter(Boolean);
-        const detectedAssignments =
-          detected.assignments.length === detectionTranscript.length
-            ? detected.assignments
-            : new Array(detectionTranscript.length).fill(null);
-
-        if (detectedTops.length > 0) {
-          setTranscript(detectionTranscript);
-          setTops(detectedTops);
-          setAssignments(detectedAssignments);
-          setAgendaDetection({
-            ...detected,
-            tops: detectedTops,
-            transcript: detectionTranscript,
-            assignments: detectedAssignments,
-          });
-          setSkippedAssignment(false);
-          setIsProcessing(false);
-          setCurrentStep(2);
-        } else {
-          setTranscript(detectionTranscript);
-          setSkippedAssignment(true);
-          setTops([]);
-          setAssignments(new Array(detectionTranscript.length).fill(null));
-          setIsProcessing(false);
-          setCurrentStep(2);
-        }
-      } catch (error) {
-        const detectionError =
-          error instanceof Error
-            ? error.message
-            : "Automatische TOP-Erkennung fehlgeschlagen";
-        console.warn("Agenda detection failed:", error);
-        setAgendaDetectionError(detectionError);
-        setAgendaDetection(null);
-        setIsProcessing(false);
-
-        if (knownTops.length > 0) {
-          setSkippedAssignment(false);
-          setTops(knownTops);
-          setAssignments(new Array(transcriptResult.length).fill(null));
-          setCurrentStep(2);
-        } else {
-          setSkippedAssignment(true);
-          setTops([]);
-          setAssignments(new Array(transcriptResult.length).fill(null));
-          setCurrentStep(2);
-        }
-      }
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Unbekannter Fehler";
-      setProcessingError(errorMessage);
-      setProcessingStatus(`Fehler: ${errorMessage}`);
-      // Keep processing screen to show error
-    }
-  };
+      })
+      .finally(() => {
+        if (!cancelled) setIsGeneratingSummary(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSummaryJobId, applySession, sessionId]);
 
   const handleRestoreSession = async () => {
     if (!restoreCandidate) return;
@@ -1194,7 +1117,7 @@ export default function App() {
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Unbekannter Fehler";
-      console.warn("Pipeline failed, falling back to legacy flow:", error);
+      console.warn("Pipeline failed:", error);
       try {
         localStorage.removeItem(ACTIVE_PIPELINE_KEY);
       } catch (storageError) {
@@ -1205,7 +1128,9 @@ export default function App() {
         setProcessingStatus(`Fehler: ${errorMessage}`);
         return;
       }
-      await startLegacyTranscription(errorMessage);
+      setProcessingError(errorMessage);
+      setProcessingStatus(`Fehler: ${errorMessage}`);
+      setIsProcessing(true);
     }
   };
 
@@ -1239,177 +1164,6 @@ export default function App() {
     }
   };
 
-  // Generate summary for entire conversation (when no TOPs are defined)
-  const generateSummaryForAll = async (
-    transcriptLines: TranscriptLine[],
-    noTopMode = false
-  ) => {
-    setIsGeneratingSummary(true);
-    setSummaries({ 0: "Zusammenfassung wird generiert..." });
-    setSummaryReviews({});
-    setSummaryInputFingerprint(null);
-
-    try {
-      const result = await generateSummary(
-        DEFAULT_TOP_TITLE,
-        applySpeakerNames(transcriptLines),
-        {
-          model: llmSettings.model,
-          systemPrompt: GENERIC_SUMMARY_PROMPT,
-        }
-      );
-      setSummaries({ 0: result.summary });
-      setSummaryReviews({
-        0: {
-          structured: result.structured ?? null,
-          source_links: result.sourceLinks,
-          review_warnings: result.reviewWarnings,
-          fallback_used: result.fallbackUsed,
-          chunks_processed: result.chunksProcessed,
-        },
-      });
-      setSummaryInputFingerprint(
-        buildSummaryInputFingerprint(
-          noTopMode ? [] : [DEFAULT_TOP_TITLE],
-          transcriptLines,
-          new Array(transcriptLines.length).fill(noTopMode ? null : 0),
-          speakerNames
-        )
-      );
-
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Unbekannter Fehler";
-      setSummaries({ 0: `Fehler: ${errorMessage}` });
-      setSummaryReviews({});
-      setSummaryInputFingerprint(null);
-    } finally {
-      setIsGeneratingSummary(false);
-    }
-  };
-
-  const generateAllSummariesForCurrentState = async () => {
-    const validTops = tops.filter((t) => t.trim() !== "");
-    const noTopMode = validTops.length === 0;
-    const effectiveAssignments = noTopMode
-      ? new Array(transcript.length).fill(null)
-      : assignments;
-    const prompt = noTopMode ? GENERIC_SUMMARY_PROMPT : llmSettings.systemPrompt;
-
-    setIsGeneratingSummary(true);
-    setSummaryInputFingerprint(null);
-    setSummaryReviews({});
-    setSummaries(
-      noTopMode
-        ? { 0: "Zusammenfassung wird generiert..." }
-        : Object.fromEntries(
-            validTops.map((_, index) => [index, "Zusammenfassung wird generiert..."])
-          )
-    );
-
-    if (noTopMode) {
-      setSkippedAssignment(true);
-      setAssignments(effectiveAssignments);
-    }
-
-    try {
-      if (!sessionId) {
-        throw new Error("Keine aktive Sitzung");
-      }
-
-      const updatedSession = await regenerateSessionSummaries(sessionId, {
-        revision: sessionRevisionRef.current,
-        tops: noTopMode ? [] : validTops,
-        transcript,
-        assignments: effectiveAssignments,
-        speakerNames,
-        skippedAssignment: noTopMode,
-        model: llmSettings.model,
-        systemPrompt: prompt,
-      });
-      const nextSummaries = normalizeSummaries(updatedSession.summaries);
-      const nextRevision = updatedSession.revision ?? sessionRevisionRef.current;
-      sessionRevisionRef.current = nextRevision;
-      setSessionRevision(nextRevision);
-      const nextReviews = normalizeSummaryReviews(updatedSession.summary_reviews);
-      const nextTops = updatedSession.tops?.length ? updatedSession.tops : noTopMode ? [] : validTops;
-      const nextAssignments = updatedSession.assignments ?? effectiveAssignments;
-
-      setTops(noTopMode ? [] : nextTops);
-      setAssignments(nextAssignments);
-      setSummaries(nextSummaries);
-      setSummaryReviews(nextReviews);
-      setSkippedAssignment(Boolean(updatedSession.skipped_assignment));
-      setSummaryInputFingerprint(
-        buildSummaryInputFingerprint(
-          nextTops,
-          updatedSession.transcript ?? transcript,
-          nextAssignments,
-          speakerNames
-        )
-      );
-    } catch (error) {
-      if (error instanceof SessionConflictError) {
-        saveConflictRef.current = true;
-        setSessionConflict(error.message);
-        setSessionMessage(error.message);
-        return;
-      }
-      console.warn("Backend summary regeneration failed, using client fallback:", error);
-      if (noTopMode) {
-        await generateSummaryForAll(transcript, true);
-      } else {
-        const generationFingerprint = buildSummaryInputFingerprint(
-          validTops,
-          transcript,
-          effectiveAssignments,
-          speakerNames
-        );
-        const newSummaries: Record<number, string> = {};
-        const newSummaryReviews: Record<number, SummaryReview> = {};
-
-        for (let index = 0; index < validTops.length; index++) {
-          const topLines = transcript.filter((_, i) => effectiveAssignments[i] === index);
-          if (topLines.length === 0) {
-            continue;
-          }
-          newSummaries[index] = "Zusammenfassung wird generiert...";
-          setSummaries({ ...newSummaries });
-          setSummaryReviews({ ...newSummaryReviews });
-
-          try {
-            const result = await generateSummary(
-              validTops[index]!,
-              applySpeakerNames(topLines),
-              {
-                model: llmSettings.model,
-                systemPrompt: llmSettings.systemPrompt,
-              }
-            );
-            newSummaries[index] = result.summary;
-            newSummaryReviews[index] = {
-              structured: result.structured ?? null,
-              source_links: result.sourceLinks,
-              review_warnings: result.reviewWarnings,
-              fallback_used: result.fallbackUsed,
-              chunks_processed: result.chunksProcessed,
-            };
-          } catch (summaryError) {
-            const errorMessage =
-              summaryError instanceof Error ? summaryError.message : "Unbekannter Fehler";
-            newSummaries[index] = `Fehler: ${errorMessage}`;
-            delete newSummaryReviews[index];
-          }
-          setSummaries({ ...newSummaries });
-          setSummaryReviews({ ...newSummaryReviews });
-        }
-        setSummaryInputFingerprint(generationFingerprint);
-      }
-    } finally {
-      setIsGeneratingSummary(false);
-    }
-  };
-
   // Handle step navigation
   const handleStep1Next = () => {
     if (backendAvailable === false) {
@@ -1420,20 +1174,8 @@ export default function App() {
     startPipeline();
   };
 
-  const handleStep2Next = async () => {
+  const handleStep2Next = () => {
     setCurrentStep(3);
-    const validTops = tops.filter((t) => t.trim() !== "");
-    const hasCurrentSummaries =
-      summariesAreFresh &&
-      (validTops.length === 0
-        ? hasSummaryArtifactForIndex(summaries, summaryReviews, 0)
-        : validTops.some((_, index) =>
-            hasSummaryArtifactForIndex(summaries, summaryReviews, index)
-          ));
-
-    if (!hasCurrentSummaries) {
-      await generateAllSummariesForCurrentState();
-    }
     setDirectProtocolAvailable(false);
     setPipelineNotice(null);
   };
@@ -1456,52 +1198,78 @@ export default function App() {
   };
 
   const handleRegenerateSummary = async (topIndex: number) => {
+    if (!sessionId) return;
     setIsGeneratingSummary(true);
-
-    const validTops = tops.filter((t) => t.trim() !== "");
-    const noTopMode = validTops.length === 0;
-    const topLines = noTopMode
-      ? transcript
-      : transcript.filter((_, i) => assignments[i] === topIndex);
-    const prompt = skippedAssignment
-      ? GENERIC_SUMMARY_PROMPT
-      : llmSettings.systemPrompt;
-
     try {
-      const result = await generateSummary(
-        noTopMode ? DEFAULT_TOP_TITLE : validTops[topIndex]!,
-        applySpeakerNames(topLines),
-        {
-          model: llmSettings.model,
-          systemPrompt: prompt,
-        }
-      );
-      setSummaries((prev) => ({ ...prev, [topIndex]: result.summary }));
-      setSummaryReviews((prev) => ({
-        ...prev,
-        [topIndex]: {
-          structured: result.structured ?? null,
-          source_links: result.sourceLinks,
-          review_warnings: result.reviewWarnings,
-          fallback_used: result.fallbackUsed,
-          chunks_processed: result.chunksProcessed,
-        },
-      }));
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      await saveChainRef.current;
+      const persisted = await saveSession({
+        ...buildSessionPayload({ current_step: 3 }),
+        session_id: sessionId,
+        revision: sessionRevisionRef.current,
+      });
+      const revision = persisted.revision ?? sessionRevisionRef.current;
+      sessionRevisionRef.current = revision;
+      setSessionRevision(revision);
+      setSummaryStates(normalizeSummaryStates(persisted.summary_states));
+      const topId = normalizeSummaryStates(persisted.summary_states)[topIndex]?.top_id
+        ?? (persisted.top_ids ?? topIds)[topIndex]
+        ?? `whole-session:${sessionId}`;
+      const started = await startSummaryJob(sessionId, {
+        revision,
+        topIds: [topId],
+        model: llmSettings.model,
+        systemPrompt: tops.filter((top) => top.trim()).length === 0
+          ? GENERIC_SUMMARY_PROMPT
+          : llmSettings.systemPrompt,
+      });
+      setSummaryJob(started);
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Unbekannter Fehler";
-      setSummaries((prev) => ({
-        ...prev,
-        [topIndex]: `Fehler: ${errorMessage}`,
-      }));
-      setSummaryReviews((prev) => {
-        const next = { ...prev };
-        delete next[topIndex];
-        return next;
-      });
+      setSessionMessage(errorMessage);
+      if (error instanceof SessionConflictError) setSessionConflict(errorMessage);
+    } finally {
+      setIsGeneratingSummary(false);
     }
+  };
 
-    setIsGeneratingSummary(false);
+  const handleAcceptSummary = async (topIndex: number) => {
+    if (!sessionId) return;
+    setIsGeneratingSummary(true);
+    try {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      await saveChainRef.current;
+      const persisted = await saveSession({
+        ...buildSessionPayload({ current_step: 3 }),
+        session_id: sessionId,
+        revision: sessionRevisionRef.current,
+      });
+      const revision = persisted.revision ?? sessionRevisionRef.current;
+      const topId = normalizeSummaryStates(persisted.summary_states)[topIndex]?.top_id
+        ?? (persisted.top_ids ?? topIds)[topIndex]
+        ?? `whole-session:${sessionId}`;
+      const accepted = await acceptExistingSummary(sessionId, topId, revision);
+      applySession(accepted);
+      setCurrentStep(3);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Zusammenfassung konnte nicht übernommen werden';
+      setSessionMessage(message);
+      if (error instanceof SessionConflictError) setSessionConflict(message);
+    } finally {
+      setIsGeneratingSummary(false);
+    }
+  };
+
+  const handleCancelSummaryJob = async () => {
+    if (!summaryJob) return;
+    setSummaryJob(await cancelSummaryJob(summaryJob.summary_job_id));
   };
 
   const handleRetry = () => {
@@ -1512,7 +1280,7 @@ export default function App() {
   const handleDirectProtocol = () => {
     if (!hasFreshSummariesInState) {
       setDirectProtocolAvailable(false);
-      setPipelineNotice("Zusammenfassungen müssen nach den Korrekturen neu erstellt werden.");
+      setPipelineNotice("Bitte prüfen Sie die markierten TOP-Zusammenfassungen vor dem Export.");
       return;
     }
     setCurrentStep(3);
@@ -1525,6 +1293,42 @@ export default function App() {
     setAgendaDetectionError(null);
     setDirectProtocolAvailable(false);
     setPipelineNotice(null);
+  };
+
+  const handleSpeakerNamesChange: Dispatch<SetStateAction<Record<string, string>>> = (action) => {
+    setSpeakerNames((current) => {
+      const next = typeof action === 'function' ? action(current) : action;
+      const replacements: Record<string, string> = {};
+      for (const speakerId of new Set([...Object.keys(current), ...Object.keys(next)])) {
+        const oldLabel = current[speakerId]?.trim() || speakerId;
+        const newLabel = next[speakerId]?.trim() || speakerId;
+        if (oldLabel !== newLabel) replacements[oldLabel] = newLabel;
+      }
+      if (Object.keys(replacements).length > 0) {
+        setSummaries((values) => replaceExactLabels(values, replacements));
+        setSummaryReviews((values) => replaceExactLabels(values, replacements));
+      }
+      return next;
+    });
+  };
+
+  const handleTopsChange = (nextTops: string[], nextTopIds: string[]) => {
+    const previousIds = topIds;
+    const remap = <T,>(values: Record<number, T>): Record<number, T> => {
+      const next: Record<number, T> = {};
+      nextTopIds.forEach((topId, nextIndex) => {
+        const previousIndex = previousIds.indexOf(topId);
+        if (previousIndex >= 0 && values[previousIndex] !== undefined) {
+          next[nextIndex] = values[previousIndex]!;
+        }
+      });
+      return next;
+    };
+    setSummaries((values) => remap(values));
+    setSummaryReviews((values) => remap(values));
+    setSummaryStates((values) => remap(values));
+    setTopIds(nextTopIds);
+    setTops(nextTops);
   };
 
   const handleCancelPipeline = async () => {
@@ -1716,6 +1520,8 @@ export default function App() {
           onBack={handleStep2Back}
           tops={validTops}
           setTops={setTops}
+          topIds={topIds}
+          onTopsChange={handleTopsChange}
           transcript={transcript}
           setTranscript={setTranscript}
           assignments={assignments}
@@ -1725,7 +1531,7 @@ export default function App() {
           onTranscriptStructureChange={handleTranscriptStructureChange}
           audioUrl={audioUrl ?? undefined}
           speakerNames={speakerNames}
-          setSpeakerNames={setSpeakerNames}
+          setSpeakerNames={handleSpeakerNamesChange}
           sessionId={sessionId}
           hasSummaries={hasSummaryArtifactsInState}
           rememberSpeakers={rememberSpeakers}
@@ -1736,11 +1542,14 @@ export default function App() {
           tops={validTops}
           transcript={transcript}
           assignments={assignments}
-          summaries={summariesAreFresh ? summaries : {}}
+          summaries={summaries}
           setSummaries={setSummaries}
-          summaryReviews={summariesAreFresh ? summaryReviews : {}}
+          summaryReviews={summaryReviews}
+          summaryStates={effectiveSummaryStates}
           onRegenerateSummary={handleRegenerateSummary}
-          onRegenerateAllSummaries={generateAllSummariesForCurrentState}
+          onAcceptSummary={handleAcceptSummary}
+          summaryJob={summaryJob}
+          onCancelSummaryJob={handleCancelSummaryJob}
           isGenerating={isGeneratingSummary}
           summariesAreFresh={summariesAreFresh}
           audioUrl={audioUrl ?? undefined}

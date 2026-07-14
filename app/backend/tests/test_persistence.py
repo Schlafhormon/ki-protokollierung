@@ -36,6 +36,8 @@ def test_persistence_initializes_expected_tables(tmp_path, monkeypatch):
         "pipeline_jobs",
         "summaries",
         "summary_reviews",
+        "summary_states",
+        "summary_jobs",
         "session_transcript_lines",
     }.issubset(tables)
 
@@ -431,6 +433,7 @@ def test_transcription_job_is_restored_from_sqlite_after_memory_cache_is_cleared
     }
     assert body["transcript"] == [
         {
+            "line_id": None,
             "speaker": "SPEAKER_00",
             "text": "Hallo zusammen",
             "start": 0.0,
@@ -580,3 +583,52 @@ def test_session_state_is_saved_and_loaded_with_linked_job(tmp_path, monkeypatch
     assert body["job"]["status"] == "completed"
 
     main.jobs.clear()
+
+
+def test_interrupted_summary_job_restores_previous_top_status(tmp_path, monkeypatch):
+    db_path = tmp_path / "summary-sessions.sqlite3"
+    monkeypatch.setenv("PERSISTENCE_DB_PATH", str(db_path))
+    persistence.init_db()
+    session = persistence.save_session(
+        "summary-session",
+        {
+            "tops": ["Haushalt"],
+            "top_ids": ["top-budget"],
+            "transcript": [
+                {
+                    "line_id": "line-1",
+                    "speaker": "SPEAKER_00",
+                    "text": "Der Haushalt wird beraten.",
+                    "start": 0,
+                    "end": 1,
+                }
+            ],
+            "assignments": [0],
+            "summaries": {0: "Vorhandene Zusammenfassung."},
+            "summary_states": {
+                0: {
+                    "top_id": "top-budget",
+                    "status": "running",
+                    "input_hash": "before",
+                }
+            },
+        },
+    )
+    persistence.save_summary_job(
+        "summary-job",
+        {
+            "session_id": session["session_id"],
+            "status": "processing",
+            "refs": {
+                "top_ids": ["top-budget"],
+                "previous_statuses": {"top-budget": "review_required"},
+            },
+        },
+    )
+
+    persistence.mark_interrupted_summary_jobs()
+
+    restored = persistence.load_session("summary-session")
+    job = persistence.load_summary_job("summary-job")
+    assert restored["summary_states"][0]["status"] == "review_required"
+    assert job["status"] == "failed"

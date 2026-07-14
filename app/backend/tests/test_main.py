@@ -728,7 +728,7 @@ def test_pipeline_runs_to_reviewable_result_and_persists_status_after_cache_clea
         assert "Manuell korrigierte Zusammenfassung." in export_response.text
 
 
-def test_session_summary_regeneration_updates_all_tops_with_speaker_names(
+def test_selective_summary_job_updates_requested_top_with_speaker_names(
     tmp_path, monkeypatch
 ):
     configure_test_app(tmp_path, monkeypatch, concurrency=1)
@@ -738,18 +738,24 @@ def test_session_summary_regeneration_updates_all_tops_with_speaker_names(
         {
             "job_id": None,
             "current_step": 2,
-            "tops": ["Haushalt"],
+            "tops": ["Haushalt", "Schulbau"],
             "transcript": [
                 {
                     "speaker": "SPEAKER_00",
                     "text": "Der Haushalt wird beraten.",
                     "start": 0.0,
                     "end": 2.0,
-                }
+                },
+                {
+                    "speaker": "SPEAKER_01",
+                    "text": "Der Schulbau bleibt unverändert.",
+                    "start": 2.0,
+                    "end": 4.0,
+                },
             ],
-            "assignments": [0],
+            "assignments": [0, 1],
             "speaker_names": {"SPEAKER_00": "Frau Beispiel"},
-            "summaries": {0: "Alt."},
+            "summaries": {0: "Alt.", 1: "Schulbau bleibt bestehen."},
             "summary_reviews": {},
             "skipped_assignment": False,
             "export_metadata": {"title": "Sitzung"},
@@ -776,36 +782,142 @@ def test_session_summary_regeneration_updates_all_tops_with_speaker_names(
     monkeypatch.setattr(main, "summarize_segment", fake_summarize_segment)
 
     with TestClient(main.app) as client:
+        session = client.get("/api/sessions/summary-session").json()
         response = client.post(
-            "/api/sessions/summary-session/summaries/regenerate",
+            "/api/sessions/summary-session/summary-jobs",
             json={
-                "tops": ["Haushalt"],
-                "transcript": [
-                    {
-                        "speaker": "SPEAKER_00",
-                        "text": "Der Haushalt wird beraten.",
-                        "start": 0.0,
-                        "end": 2.0,
-                    }
-                ],
-                "assignments": [0],
-                "speaker_names": {"SPEAKER_00": "Frau Beispiel"},
-                "skipped_assignment": False,
+                "revision": session["revision"],
+                "top_ids": [session["top_ids"][0]],
                 "model": "fake-llm",
                 "system_prompt": "Kurz",
             },
         )
+        assert response.status_code == 200
+        summary_job_id = response.json()["summary_job_id"]
+        assert wait_until(
+            lambda: client.get(f"/api/summary-jobs/{summary_job_id}").json()["status"]
+            == "completed"
+        )
+        body = client.get("/api/sessions/summary-session").json()
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["current_step"] == 3
     assert body["summaries"]["0"] == "Neu: Haushalt"
+    assert body["summaries"]["1"] == "Schulbau bleibt bestehen."
+    assert body["summary_states"]["0"]["status"] == "ready"
+    assert body["summary_states"]["1"]["origin"] == "legacy"
+    assert len(captured) == 1
     assert body["export_metadata"]["title"] == "Sitzung"
     assert captured[0]["transcript_text"] == (
         "Frau Beispiel: Der Haushalt wird beraten."
     )
     assert captured[0]["model"] == "fake-llm"
     assert captured[0]["system_prompt"] == "Kurz"
+
+
+def test_speaker_rename_updates_summary_without_llm(tmp_path, monkeypatch):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+    transcript = [{
+        "line_id": "line-1",
+        "speaker": "SPEAKER_04",
+        "text": "Der Bericht wird vorgestellt.",
+        "start": 0.0,
+        "end": 2.0,
+    }]
+    states = main.build_generated_summary_states(
+        session_id="rename-session",
+        transcript=transcript,
+        tops=["Bericht"],
+        top_ids=["top-report"],
+        assignments=[0],
+        summaries={0: "SPEAKER_04 stellt den Bericht vor."},
+        summary_reviews={},
+        origin="pipeline",
+    )
+    saved = persistence.save_session("rename-session", {
+        "tops": ["Bericht"],
+        "top_ids": ["top-report"],
+        "transcript": transcript,
+        "assignments": [0],
+        "speaker_names": {"SPEAKER_04": "SPEAKER_04"},
+        "summaries": {0: "SPEAKER_04 stellt den Bericht vor."},
+        "summary_reviews": {},
+        "summary_states": states,
+    })
+    monkeypatch.setattr(
+        main,
+        "summarize_segment",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("LLM called")),
+    )
+
+    with TestClient(main.app) as client:
+        response = client.put("/api/sessions/rename-session", json={
+            "revision": saved["revision"],
+            "tops": ["Bericht"],
+            "top_ids": ["top-report"],
+            "transcript": transcript,
+            "assignments": [0],
+            "speaker_names": {"SPEAKER_04": "Herr Reiche"},
+            # The UI applies this deterministic replacement immediately.
+            "summaries": {0: "Herr Reiche stellt den Bericht vor."},
+            "summary_reviews": {},
+            "summary_states": states,
+        })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summaries"]["0"] == "Herr Reiche stellt den Bericht vor."
+    assert body["summary_states"]["0"]["status"] == "ready"
+    assert body["summary_states"]["0"]["origin"] == "pipeline"
+
+
+def test_assignment_change_marks_only_source_and_target_top(tmp_path, monkeypatch):
+    configure_test_app(tmp_path, monkeypatch, concurrency=1)
+    transcript = [
+        {"line_id": "line-a", "speaker": "S1", "text": "A", "start": 0, "end": 1},
+        {"line_id": "line-b", "speaker": "S2", "text": "B", "start": 1, "end": 2},
+        {"line_id": "line-c", "speaker": "S3", "text": "C", "start": 2, "end": 3},
+    ]
+    tops = ["A", "B", "C"]
+    top_ids = ["top-a", "top-b", "top-c"]
+    summaries = {0: "A.", 1: "B.", 2: "C."}
+    states = main.build_generated_summary_states(
+        session_id="move-session",
+        transcript=transcript,
+        tops=tops,
+        top_ids=top_ids,
+        assignments=[0, 1, 2],
+        summaries=summaries,
+        summary_reviews={},
+        origin="pipeline",
+    )
+    saved = persistence.save_session("move-session", {
+        "tops": tops,
+        "top_ids": top_ids,
+        "transcript": transcript,
+        "assignments": [0, 1, 2],
+        "speaker_names": {},
+        "summaries": summaries,
+        "summary_reviews": {},
+        "summary_states": states,
+    })
+
+    with TestClient(main.app) as client:
+        response = client.put("/api/sessions/move-session", json={
+            "revision": saved["revision"],
+            "tops": tops,
+            "top_ids": top_ids,
+            "transcript": transcript,
+            "assignments": [1, 1, 2],
+            "speaker_names": {},
+            "summaries": summaries,
+            "summary_reviews": {},
+            "summary_states": states,
+        })
+
+    assert response.status_code == 200
+    statuses = response.json()["summary_states"]
+    assert statuses["0"]["status"] == "review_required"
+    assert statuses["1"]["status"] == "review_required"
+    assert statuses["2"]["status"] == "ready"
 
 
 def test_shared_session_history_and_conflict_response(tmp_path, monkeypatch):

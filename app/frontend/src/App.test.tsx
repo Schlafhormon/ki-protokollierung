@@ -4,19 +4,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import {
   checkBackendHealth,
-  detectAgenda,
   extractAgendaDataFromPDF,
-  generateSummary,
   getPipelineResult,
   getPipelineStatus,
   loadSession,
   listSessions,
   pollPipeline,
-  pollTranscription,
-  regenerateSessionSummaries,
+  startSummaryJob,
+  pollSummaryJob,
+  acceptExistingSummary,
   saveSession,
   startPipeline,
-  startTranscription,
 } from './api';
 import type { PipelineJob, PipelineResultResponse } from './types';
 
@@ -30,11 +28,10 @@ vi.mock('./api', () => ({
   getPipelineStatus: vi.fn(),
   getPipelineResult: vi.fn(),
   cancelPipeline: vi.fn(),
-  startTranscription: vi.fn(),
-  pollTranscription: vi.fn(),
-  regenerateSessionSummaries: vi.fn(),
-  detectAgenda: vi.fn(),
-  generateSummary: vi.fn(),
+  startSummaryJob: vi.fn(),
+  pollSummaryJob: vi.fn(),
+  cancelSummaryJob: vi.fn(),
+  acceptExistingSummary: vi.fn(),
   extractAgendaDataFromPDF: vi.fn(),
   exportProtocol: vi.fn(),
   listSpeakerProfiles: vi.fn(() => Promise.resolve([])),
@@ -72,6 +69,7 @@ function pipelineResult(
       job_id: 'job-1',
       current_step: 3,
       tops: ['Haushalt'],
+      top_ids: ['top-1'],
       transcript: [
         { speaker: 'SPEAKER_00', text: 'Der Haushalt wird beraten.', start: 0, end: 2 },
       ],
@@ -79,6 +77,15 @@ function pipelineResult(
       speaker_names: { SPEAKER_00: 'Alice' },
       summaries: { 0: 'Der Haushalt wurde serverseitig zusammengefasst.' },
       summary_reviews: {},
+      summary_states: {
+        0: {
+          top_id: 'top-1',
+          status: 'ready',
+          source_snapshot: [
+            { line_id: 'legacy:0', speaker: 'SPEAKER_00', text: 'Der Haushalt wird beraten.' },
+          ],
+        },
+      },
       skipped_assignment: false,
       audio_url: '/api/audio/job-1',
       ...overrides,
@@ -147,32 +154,25 @@ describe('App pipeline flow', () => {
     });
     vi.mocked(getPipelineResult).mockResolvedValue(pipelineResult());
     vi.mocked(loadSession).mockResolvedValue(pipelineResult().session);
-    vi.mocked(startTranscription).mockResolvedValue({
-      job_id: 'legacy-job',
+    vi.mocked(startSummaryJob).mockResolvedValue({
+      summary_job_id: 'summary-job-1',
+      session_id: 'session-1',
       status: 'pending',
       progress: 0,
-      message: 'Gestartet',
+      current_top: 0,
+      total_tops: 1,
+      top_ids: ['top-1'],
     });
-    vi.mocked(pollTranscription).mockResolvedValue({
-      job_id: 'legacy-job',
+    vi.mocked(pollSummaryJob).mockResolvedValue({
+      summary_job_id: 'summary-job-1',
+      session_id: 'session-1',
       status: 'completed',
       progress: 100,
-      message: 'Fertig',
-      transcript: [
-        { speaker: 'SPEAKER_00', text: 'Klassischer Fallback.', start: 0, end: 1 },
-      ],
+      current_top: 1,
+      total_tops: 1,
+      top_ids: ['top-1'],
     });
-    vi.mocked(detectAgenda).mockRejectedValue(new Error('Agenda nicht verfügbar'));
-    vi.mocked(generateSummary).mockResolvedValue({
-      summary: 'Fallback-Zusammenfassung.',
-      durationSeconds: 1,
-      structured: null,
-      sourceLinks: [],
-      reviewWarnings: [],
-      fallbackUsed: false,
-      chunksProcessed: 1,
-    });
-    vi.mocked(regenerateSessionSummaries).mockResolvedValue(pipelineResult().session);
+    vi.mocked(acceptExistingSummary).mockResolvedValue(pipelineResult().session);
   });
 
   it('starts the end-to-end pipeline from the upload UI', async () => {
@@ -262,8 +262,7 @@ describe('App pipeline flow', () => {
     await uploadAndStart();
 
     expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
-    expect(generateSummary).not.toHaveBeenCalled();
-    expect(regenerateSessionSummaries).not.toHaveBeenCalled();
+    expect(startSummaryJob).not.toHaveBeenCalled();
   });
 
   it('sets agenda detection from the pipeline result', async () => {
@@ -354,26 +353,10 @@ describe('App pipeline flow', () => {
     expect(screen.queryByRole('button', { name: /direkt zum protokoll/i })).not.toBeInTheDocument();
   });
 
-  it('treats pipeline summaries as stale after assignment inputs change and regenerates', async () => {
+  it('keeps a pipeline summary when only the TOP title changes', async () => {
     const user = userEvent.setup();
-    vi.mocked(generateSummary).mockResolvedValue({
-      summary: 'Neu generierte Zusammenfassung.',
-      durationSeconds: 2,
-      structured: null,
-      sourceLinks: [],
-      reviewWarnings: [],
-      fallbackUsed: false,
-      chunksProcessed: 1,
-    });
     vi.mocked(getPipelineResult).mockResolvedValue(
       pipelineResult({ speaker_names: { SPEAKER_00: 'SPEAKER_00' } })
-    );
-    vi.mocked(regenerateSessionSummaries).mockResolvedValue(
-      pipelineResult({
-        speaker_names: { SPEAKER_00: 'SPEAKER_00' },
-        tops: ['Neuer Haushalt'],
-        summaries: { 0: 'Neu generierte Zusammenfassung.' },
-      }).session
     );
 
     await uploadAndStart(user);
@@ -387,16 +370,8 @@ describe('App pipeline flow', () => {
 
     await user.click(screen.getByRole('button', { name: /^zum protokoll/i }));
 
-    await waitFor(() => {
-      expect(regenerateSessionSummaries).toHaveBeenCalledWith(
-        'session-1',
-        expect.objectContaining({
-          tops: ['Neuer Haushalt'],
-          speakerNames: { SPEAKER_00: 'SPEAKER_00' },
-        })
-      );
-    });
-    expect(await screen.findByText('Neu generierte Zusammenfassung.')).toBeInTheDocument();
+    expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
+    expect(startSummaryJob).not.toHaveBeenCalled();
   });
 
   it('does not auto-regenerate when the pipeline already returned a summary error review', async () => {
@@ -429,18 +404,15 @@ describe('App pipeline flow', () => {
 
     expect(await screen.findByText('Leere Antwort des LLM')).toBeInTheDocument();
     expect(screen.queryByText(/Zuordnung, Sprecher oder TOPs wurden geändert/i)).not.toBeInTheDocument();
-    expect(regenerateSessionSummaries).not.toHaveBeenCalled();
   });
 
-  it('falls back to the legacy flow when the pipeline fails', async () => {
+  it('shows a pipeline error without starting a hidden legacy workflow', async () => {
     vi.mocked(startPipeline).mockRejectedValue(new Error('Pipeline nicht erreichbar'));
 
     await uploadAndStart();
 
-    expect(await screen.findByText(/Sprecher umbenennen und Profile prüfen/i)).toBeInTheDocument();
-    expect(screen.getByText(/Keine TOPs angelegt/i)).toBeInTheDocument();
-    expect(generateSummary).not.toHaveBeenCalled();
-    expect(startTranscription).toHaveBeenCalledWith(expect.any(File), 'session-1', false);
+    expect(await screen.findByText('Pipeline nicht erreichbar')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /erneut versuchen/i })).toBeInTheDocument();
   });
 
   it('keeps the review step when automatic generation has uncertain assignments', async () => {

@@ -26,6 +26,7 @@ def test_split_transcript_for_agenda_detection_splits_long_sentence_chunks():
     assert result[0]["end"] == result[1]["start"]
     assert result[1]["end"] == result[2]["start"]
     assert result[2]["end"] == 20.0
+    assert len({line["line_id"] for line in result}) == 3
 
 
 def test_split_transcript_for_agenda_detection_does_not_use_top_phrases():

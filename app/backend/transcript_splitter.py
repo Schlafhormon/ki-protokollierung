@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Any
 
 
@@ -40,6 +41,8 @@ def split_transcript_for_agenda_detection(
 
         for index, (start_offset, end_offset, chunk) in enumerate(chunks):
             part_line = dict(line)
+            if index > 0 or not part_line.get("line_id"):
+                part_line["line_id"] = str(uuid.uuid4())
             part_line["text"] = chunk
             part_line["start"] = (
                 start_time

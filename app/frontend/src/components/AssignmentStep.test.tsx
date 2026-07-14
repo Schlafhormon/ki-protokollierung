@@ -82,7 +82,7 @@ describe('AssignmentStep', () => {
     const { rerender } = renderAssignmentStep({ onNext });
 
     const nextButton = screen.getByRole('button', {
-      name: /zusammenfassungen erstellen/i,
+      name: /zum protokollentwurf/i,
     });
     expect(nextButton).toBeDisabled();
 
@@ -94,7 +94,7 @@ describe('AssignmentStep', () => {
       />,
     );
 
-    await user.click(screen.getByRole('button', { name: /zusammenfassungen erstellen/i }));
+    await user.click(screen.getByRole('button', { name: /zum protokollentwurf/i }));
     expect(onNext).toHaveBeenCalledTimes(1);
   });
 

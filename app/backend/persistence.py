@@ -93,6 +93,7 @@ def init_db(db_path: Path | None = None) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 top_index INTEGER NOT NULL,
+                top_uid TEXT,
                 title TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
                     ON DELETE CASCADE,
@@ -212,10 +213,38 @@ def init_db(db_path: Path | None = None) -> None:
                 UNIQUE (session_id, top_index)
             );
 
+            CREATE TABLE IF NOT EXISTS summary_states (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                top_index INTEGER NOT NULL,
+                top_uid TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE CASCADE,
+                UNIQUE (session_id, top_index),
+                UNIQUE (session_id, top_uid)
+            );
+
+            CREATE TABLE IF NOT EXISTS summary_jobs (
+                summary_job_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress INTEGER NOT NULL DEFAULT 0,
+                current_top INTEGER NOT NULL DEFAULT 0,
+                total_tops INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                refs_json TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS session_transcript_lines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 line_index INTEGER NOT NULL,
+                line_uid TEXT,
                 speaker TEXT NOT NULL,
                 text TEXT NOT NULL,
                 start REAL NOT NULL,
@@ -245,6 +274,8 @@ def init_db(db_path: Path | None = None) -> None:
                 ON pipeline_jobs(session_id);
             CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
                 ON sessions(updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_summary_jobs_session_id
+                ON summary_jobs(session_id, created_at DESC);
             """
         )
         existing_columns = {
@@ -287,6 +318,40 @@ def init_db(db_path: Path | None = None) -> None:
                 ALTER TABLE sessions
                 ADD COLUMN revision INTEGER NOT NULL DEFAULT 1
                 """
+            )
+        top_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(tops)").fetchall()
+        }
+        if "top_uid" not in top_columns:
+            db.execute("ALTER TABLE tops ADD COLUMN top_uid TEXT")
+        legacy_tops = db.execute(
+            "SELECT id FROM tops WHERE top_uid IS NULL OR top_uid = ''"
+        ).fetchall()
+        for row in legacy_tops:
+            db.execute(
+                "UPDATE tops SET top_uid = ? WHERE id = ?",
+                (str(uuid.uuid4()), row["id"]),
+            )
+        session_line_columns = {
+            row["name"]
+            for row in db.execute(
+                "PRAGMA table_info(session_transcript_lines)"
+            ).fetchall()
+        }
+        if "line_uid" not in session_line_columns:
+            db.execute(
+                "ALTER TABLE session_transcript_lines ADD COLUMN line_uid TEXT"
+            )
+        legacy_lines = db.execute(
+            """
+            SELECT id FROM session_transcript_lines
+            WHERE line_uid IS NULL OR line_uid = ''
+            """
+        ).fetchall()
+        for row in legacy_lines:
+            db.execute(
+                "UPDATE session_transcript_lines SET line_uid = ? WHERE id = ?",
+                (str(uuid.uuid4()), row["id"]),
             )
         embedding_columns = {
             row["name"]
@@ -1061,6 +1126,86 @@ def load_pipeline_jobs(
     ]
 
 
+def save_summary_job(
+    summary_job_id: str,
+    job_data: dict[str, Any],
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    now = time.time()
+    created_at = float(job_data.get("created_at") or now)
+    updated_at = float(job_data.get("updated_at") or now)
+    with connect(db_path) as db:
+        db.execute(
+            """
+            INSERT INTO summary_jobs (
+                summary_job_id, session_id, status, progress, current_top,
+                total_tops, error, refs_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(summary_job_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                status = excluded.status,
+                progress = excluded.progress,
+                current_top = excluded.current_top,
+                total_tops = excluded.total_tops,
+                error = excluded.error,
+                refs_json = excluded.refs_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                summary_job_id,
+                job_data["session_id"],
+                job_data.get("status", "pending"),
+                int(job_data.get("progress", 0)),
+                int(job_data.get("current_top", 0)),
+                int(job_data.get("total_tops", 0)),
+                job_data.get("error"),
+                _to_json(job_data.get("refs") or {}),
+                created_at,
+                updated_at,
+            ),
+        )
+    job = load_summary_job(summary_job_id, db_path=db_path)
+    if job is None:
+        raise RuntimeError("Summary job could not be loaded after save")
+    return job
+
+
+def load_summary_job(
+    summary_job_id: str,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    with connect(db_path) as db:
+        row = db.execute(
+            "SELECT * FROM summary_jobs WHERE summary_job_id = ?",
+            (summary_job_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    job = dict(row)
+    job["refs"] = _from_json(job.pop("refs_json", None)) or {}
+    return job
+
+
+def load_latest_summary_job_for_session(
+    session_id: str,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    with connect(db_path) as db:
+        row = db.execute(
+            """
+            SELECT summary_job_id FROM summary_jobs
+            WHERE session_id = ?
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return load_summary_job(row["summary_job_id"], db_path=db_path)
+
+
 def save_job(job_id: str, job_data: dict[str, Any], db_path: Path | None = None) -> None:
     """Upsert a transcription job and its transcript lines."""
     now = time.time()
@@ -1242,6 +1387,49 @@ def mark_interrupted_pipeline_jobs(db_path: Path | None = None) -> None:
         )
 
 
+def mark_interrupted_summary_jobs(db_path: Path | None = None) -> None:
+    now = time.time()
+    with connect(db_path) as db:
+        interrupted = db.execute(
+            """
+            SELECT session_id, refs_json FROM summary_jobs
+            WHERE status IN ('pending', 'processing', 'cancelling')
+            """
+        ).fetchall()
+        db.execute(
+            """
+            UPDATE summary_jobs
+            SET status = 'failed',
+                error = 'Zusammenfassungsjob wurde durch Backend-Neustart unterbrochen',
+                updated_at = ?
+            WHERE status IN ('pending', 'processing', 'cancelling')
+            """,
+            (now,),
+        )
+        for job in interrupted:
+            refs = _from_json(job["refs_json"]) or {}
+            previous_statuses = refs.get("previous_statuses") or {}
+            for top_uid in refs.get("top_ids") or []:
+                row = db.execute(
+                    """
+                    SELECT id, state_json FROM summary_states
+                    WHERE session_id = ? AND top_uid = ?
+                    """,
+                    (job["session_id"], top_uid),
+                ).fetchone()
+                if row is None:
+                    continue
+                state = _from_json(row["state_json"]) or {}
+                if state.get("status") not in {"queued", "running"}:
+                    continue
+                state["status"] = previous_statuses.get(top_uid) or "review_required"
+                state["updated_at"] = now
+                db.execute(
+                    "UPDATE summary_states SET state_json = ? WHERE id = ?",
+                    (_to_json(state) or "{}", row["id"]),
+                )
+
+
 def save_session(
     session_id: str,
     state: dict[str, Any],
@@ -1307,11 +1495,18 @@ def save_session(
             )
 
         db.execute("DELETE FROM tops WHERE session_id = ?", (session_id,))
+        top_ids = list(state.get("top_ids") or [])
+        titles = list(state.get("tops") or [])
+        if len(top_ids) != len(titles):
+            top_ids = [str(uuid.uuid4()) for _ in titles]
         db.executemany(
-            "INSERT INTO tops (session_id, top_index, title) VALUES (?, ?, ?)",
+            """
+            INSERT INTO tops (session_id, top_index, top_uid, title)
+            VALUES (?, ?, ?, ?)
+            """,
             [
-                (session_id, index, str(title))
-                for index, title in enumerate(state.get("tops") or [])
+                (session_id, index, str(top_ids[index]), str(title))
+                for index, title in enumerate(titles)
             ],
         )
 
@@ -1362,6 +1557,31 @@ def save_session(
             ],
         )
 
+        db.execute("DELETE FROM summary_states WHERE session_id = ?", (session_id,))
+        db.executemany(
+            """
+            INSERT INTO summary_states (
+                session_id, top_index, top_uid, state_json
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (
+                    session_id,
+                    int(top_index),
+                    str(summary_state.get("top_id") or (
+                        top_ids[int(top_index)]
+                        if 0 <= int(top_index) < len(top_ids)
+                        else f"whole-session:{session_id}"
+                    )),
+                    _to_json(summary_state) or "{}",
+                )
+                for top_index, summary_state in (
+                    state.get("summary_states") or {}
+                ).items()
+            ],
+        )
+
         if state.get("transcript") is not None:
             db.execute(
                 "DELETE FROM session_transcript_lines WHERE session_id = ?",
@@ -1370,14 +1590,15 @@ def save_session(
             db.executemany(
                 """
                 INSERT INTO session_transcript_lines (
-                    session_id, line_index, speaker, text, start, end
+                    session_id, line_index, line_uid, speaker, text, start, end
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         session_id,
                         index,
+                        str(line.get("line_id") or uuid.uuid4()),
                         str(line.get("speaker", "")),
                         str(line.get("text", "")),
                         float(line.get("start", 0)),
@@ -1403,7 +1624,7 @@ def load_session(
 
         tops = db.execute(
             """
-            SELECT title FROM tops
+            SELECT top_uid, title FROM tops
             WHERE session_id = ?
             ORDER BY top_index
             """,
@@ -1441,9 +1662,17 @@ def load_session(
             """,
             (session_id,),
         ).fetchall()
+        summary_states = db.execute(
+            """
+            SELECT top_index, top_uid, state_json FROM summary_states
+            WHERE session_id = ?
+            ORDER BY top_index
+            """,
+            (session_id,),
+        ).fetchall()
         transcript = db.execute(
             """
-            SELECT speaker, text, start, end
+            SELECT line_uid AS line_id, speaker, text, start, end
             FROM session_transcript_lines
             WHERE session_id = ?
             ORDER BY line_index
@@ -1454,6 +1683,7 @@ def load_session(
     session = dict(row)
     session["skipped_assignment"] = bool(session["skipped_assignment"])
     session["tops"] = [item["title"] for item in tops]
+    session["top_ids"] = [item["top_uid"] for item in tops]
     session["assignments"] = [item["top_index"] for item in assignments]
     session["speaker_names"] = {
         item["speaker_id"]: item["display_name"] for item in speaker_names
@@ -1464,6 +1694,13 @@ def load_session(
     session["summary_reviews"] = {
         int(item["top_index"]): _from_json(item["review_json"]) or {}
         for item in summary_reviews
+    }
+    session["summary_states"] = {
+        int(item["top_index"]): {
+            **(_from_json(item["state_json"]) or {}),
+            "top_id": item["top_uid"],
+        }
+        for item in summary_states
     }
     session["export_metadata"] = _from_json(session.get("export_metadata_json")) or {}
     session["transcript"] = [dict(line) for line in transcript] if transcript else None
@@ -1522,7 +1759,15 @@ def list_sessions(
                 (SELECT COUNT(*) FROM session_transcript_lines st
                     WHERE st.session_id = s.session_id) AS transcript_line_count,
                 (SELECT COUNT(*) FROM summaries sm WHERE sm.session_id = s.session_id)
-                    AS summary_count
+                    AS summary_count,
+                (SELECT COUNT(*) FROM summary_states ss
+                    WHERE ss.session_id = s.session_id
+                      AND ss.state_json NOT LIKE '%"status": "ready"%')
+                    AS unresolved_summary_count,
+                (SELECT sj.status FROM summary_jobs sj
+                    WHERE sj.session_id = s.session_id
+                    ORDER BY sj.updated_at DESC LIMIT 1)
+                    AS summary_job_status
             FROM sessions s
             LEFT JOIN transcription_jobs tj ON tj.job_id = s.job_id
             LEFT JOIN pipeline_jobs latest_pipeline
@@ -1546,14 +1791,18 @@ def list_sessions(
         top_count = int(item.get("top_count") or 0)
         transcript_count = int(item.get("transcript_line_count") or 0)
         summary_count = int(item.get("summary_count") or 0)
+        unresolved_summary_count = int(item.get("unresolved_summary_count") or 0)
+        summary_job_status = item.get("summary_job_status")
         pipeline_status = item.get("pipeline_status")
         job_status = item.get("job_status")
 
         if pipeline_status in {"pending", "processing"} or job_status in {
             "pending",
             "processing",
-        }:
+        } or summary_job_status in {"pending", "processing", "cancelling"}:
             derived_status = "processing"
+        elif unresolved_summary_count > 0:
+            derived_status = "review"
         elif summary_count > 0:
             derived_status = "ready"
         elif transcript_count > 0:

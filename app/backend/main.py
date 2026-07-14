@@ -12,6 +12,7 @@ import mimetypes
 import asyncio
 import threading
 import unicodedata
+import hashlib
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -73,7 +74,9 @@ from persistence import (
     load_jobs,
     list_sessions,
     load_latest_pipeline_job_for_session,
+    load_latest_summary_job_for_session,
     load_session,
+    load_summary_job,
     load_speaker_embeddings,
     load_speaker_observation,
     load_speaker_observations,
@@ -81,10 +84,13 @@ from persistence import (
     load_speaker_profiles,
     mark_interrupted_jobs,
     mark_interrupted_pipeline_jobs,
+    mark_interrupted_summary_jobs,
     prune_speaker_embeddings,
     reject_speaker_observation,
     load_pipeline_job,
+    load_pipeline_jobs,
     save_pipeline_job,
+    save_summary_job,
     save_job,
     save_job_speaker_embedding,
     save_session,
@@ -127,6 +133,7 @@ async def lifespan(app: FastAPI):
         init_db()
         mark_interrupted_jobs()
         mark_interrupted_pipeline_jobs()
+        mark_interrupted_summary_jobs()
         jobs.clear()
         jobs.update(load_jobs())
         logger.info(f"Loaded {len(jobs)} persisted jobs")
@@ -155,6 +162,10 @@ async def lifespan(app: FastAPI):
         concurrency_limit=PIPELINE_CONCURRENCY,
     )
     await app.state.pipeline_manager.start()
+    app.state.summary_job_manager = SummaryJobManager(
+        concurrency_limit=SUMMARY_CONCURRENCY
+    )
+    await app.state.summary_job_manager.start()
 
     yield  # Server is running
 
@@ -162,6 +173,8 @@ async def lifespan(app: FastAPI):
     logger.info("Server shutting down - cleaning up...")
     if hasattr(app.state, "pipeline_manager"):
         await app.state.pipeline_manager.stop()
+    if hasattr(app.state, "summary_job_manager"):
+        await app.state.summary_job_manager.stop()
     if hasattr(app.state, "job_manager"):
         await app.state.job_manager.stop()
     mark_active_jobs_failed("Transkription wurde durch Backend-Shutdown unterbrochen")
@@ -204,6 +217,7 @@ MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)
 UPLOAD_CHUNK_SIZE = int(os.environ.get("UPLOAD_CHUNK_SIZE", str(1024 * 1024)))
 TRANSCRIPTION_CONCURRENCY = int(os.environ.get("TRANSCRIPTION_CONCURRENCY", "1"))
 PIPELINE_CONCURRENCY = int(os.environ.get("PIPELINE_CONCURRENCY", "1"))
+SUMMARY_CONCURRENCY = int(os.environ.get("SUMMARY_CONCURRENCY", "1"))
 DELETE_UPLOADS_ON_CANCEL_OR_FAILURE = (
     os.environ.get("DELETE_UPLOADS_ON_CANCEL_OR_FAILURE", "true").lower() == "true"
 )
@@ -234,6 +248,10 @@ PIPELINE_STAGE_SPEAKER_MATCH = "speaker_match"
 PIPELINE_STAGE_AGENDA_DETECT = "agenda_detect"
 PIPELINE_STAGE_SUMMARIZE = "summarize"
 PIPELINE_STAGE_READY_FOR_REVIEW = "ready_for_review"
+
+# Every local summary call shares one resource gate. The pipeline and manual
+# regeneration workers therefore cannot saturate Ollama concurrently.
+LLM_WORK_LOCK = threading.Lock()
 
 # In-memory cache for jobs. SQLite remains the durable source for polling after
 # restarts; the lock keeps the cache coherent across API and worker threads.
@@ -700,6 +718,95 @@ async def get_or_create_pipeline_manager() -> PipelineJobManager:
     return manager
 
 
+class SummaryJobManager:
+    """Runs explicitly confirmed, selective summary regeneration jobs."""
+
+    def __init__(self, *, concurrency_limit: int = 1) -> None:
+        self.concurrency_limit = max(1, concurrency_limit)
+        self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self.executor = ThreadPoolExecutor(
+            max_workers=self.concurrency_limit,
+            thread_name_prefix="summary-worker",
+        )
+        self.workers: list[asyncio.Task] = []
+        self.started = False
+
+    async def start(self) -> None:
+        if self.started:
+            return
+        self.started = True
+        self.workers = [
+            asyncio.create_task(self._worker(index))
+            for index in range(self.concurrency_limit)
+        ]
+
+    async def stop(self) -> None:
+        if not self.started:
+            return
+        self.started = False
+        for worker in self.workers:
+            worker.cancel()
+        await asyncio.gather(*self.workers, return_exceptions=True)
+        self.workers = []
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
+    async def enqueue(self, summary_job_id: str) -> None:
+        if not self.started:
+            await self.start()
+        await self.queue.put(summary_job_id)
+
+    async def _worker(self, worker_index: int) -> None:
+        while True:
+            summary_job_id = await self.queue.get()
+            try:
+                job = load_summary_job(summary_job_id)
+                if not job or job.get("status") in {"completed", "failed", "cancelled"}:
+                    continue
+                if summary_job_cancelled(summary_job_id):
+                    finalize_summary_job_cancellation(summary_job_id, job)
+                    continue
+                if (
+                    load_pipeline_jobs(status=PIPELINE_STATUS_PROCESSING)
+                    or load_pipeline_jobs(status=PIPELINE_STATUS_PENDING)
+                ):
+                    await asyncio.sleep(1)
+                    await self.queue.put(summary_job_id)
+                    continue
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    self.executor,
+                    run_summary_job,
+                    summary_job_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "[Summary worker %s] job %s failed: %s",
+                    worker_index,
+                    summary_job_id,
+                    safe_exception_label(exc),
+                    exc_info=True,
+                )
+                update_summary_job(
+                    summary_job_id,
+                    status="failed",
+                    error=safe_exception_label(exc),
+                )
+            finally:
+                self.queue.task_done()
+
+
+async def get_or_create_summary_job_manager() -> SummaryJobManager:
+    manager = getattr(app.state, "summary_job_manager", None)
+    if manager is None:
+        manager = SummaryJobManager(concurrency_limit=SUMMARY_CONCURRENCY)
+        app.state.summary_job_manager = manager
+    if not manager.started:
+        await manager.start()
+    return manager
+
+
 def request_job_cancellation(job_id: str) -> dict[str, Any] | None:
     job = get_job_from_cache_or_db(job_id)
     if job is None:
@@ -802,6 +909,7 @@ def cleanup_old_jobs() -> int:
 
 
 class TranscriptLine(BaseModel):
+    line_id: Optional[str] = None
     speaker: str
     text: str
     start: float  # Start time in seconds
@@ -858,17 +966,32 @@ class PipelineStatusResponse(BaseModel):
     updated_at: Optional[float] = None
 
 
+class SummaryJobResponse(BaseModel):
+    summary_job_id: str
+    session_id: str
+    status: str
+    progress: int
+    current_top: int = 0
+    total_tops: int = 0
+    top_ids: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
+    created_at: Optional[float] = None
+    updated_at: Optional[float] = None
+
+
 class SessionSaveRequest(BaseModel):
     session_id: Optional[str] = None
     revision: Optional[int] = None
     job_id: Optional[str] = None
     current_step: Optional[int] = None
     tops: List[str] = Field(default_factory=list)
+    top_ids: List[str] = Field(default_factory=list)
     transcript: Optional[List[TranscriptLine]] = None
     assignments: List[Optional[int]] = Field(default_factory=list)
     speaker_names: Dict[str, str] = Field(default_factory=dict)
     summaries: Dict[int, str] = Field(default_factory=dict)
     summary_reviews: Dict[int, Any] = Field(default_factory=dict)
+    summary_states: Dict[int, Any] = Field(default_factory=dict)
     export_metadata: Dict[str, Any] = Field(default_factory=dict)
     skipped_assignment: bool = False
 
@@ -881,10 +1004,12 @@ class SessionResponse(BaseModel):
     job_id: Optional[str] = None
     current_step: Optional[int] = None
     tops: List[str] = Field(default_factory=list)
+    top_ids: List[str] = Field(default_factory=list)
     assignments: List[Optional[int]] = Field(default_factory=list)
     speaker_names: Dict[str, str] = Field(default_factory=dict)
     summaries: Dict[int, str] = Field(default_factory=dict)
     summary_reviews: Dict[int, Any] = Field(default_factory=dict)
+    summary_states: Dict[int, Any] = Field(default_factory=dict)
     export_metadata: Dict[str, Any] = Field(default_factory=dict)
     skipped_assignment: bool = False
     transcript: Optional[List[TranscriptLine]] = None
@@ -892,6 +1017,7 @@ class SessionResponse(BaseModel):
     audio_metadata: Optional[AudioMetadata] = None
     job: Optional[TranscriptionJob] = None
     latest_pipeline: Optional[PipelineStatusResponse] = None
+    latest_summary_job: Optional[SummaryJobResponse] = None
 
 
 class SessionListItem(BaseModel):
@@ -1080,15 +1206,15 @@ class SummarizeResponse(BaseModel):
     chunks_processed: int = 1
 
 
-class SessionSummaryRegenerateRequest(BaseModel):
+class SummaryJobCreateRequest(BaseModel):
     revision: Optional[int] = None
-    tops: List[str] = Field(default_factory=list)
-    transcript: List[TranscriptLine] = Field(default_factory=list)
-    assignments: List[Optional[int]] = Field(default_factory=list)
-    speaker_names: Dict[str, str] = Field(default_factory=dict)
-    skipped_assignment: bool = False
+    top_ids: List[str] = Field(default_factory=list, min_length=1)
     model: Optional[str] = None
     system_prompt: Optional[str] = None
+
+
+class SummaryAcceptRequest(BaseModel):
+    revision: Optional[int] = None
 
 
 class LLMDiagnosticsResponse(BaseModel):
@@ -1264,6 +1390,21 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
     if transcript is None and job_response:
         transcript = job_response.transcript
     latest_pipeline = load_latest_pipeline_job_for_session(session["session_id"])
+    latest_summary_job = load_latest_summary_job_for_session(session["session_id"])
+    summary_states = dict(session.get("summary_states") or {})
+    if session.get("summaries") or {}:
+        fallback_states = build_generated_summary_states(
+            session_id=session["session_id"],
+            transcript=[line_to_dict(line) for line in (transcript or [])],
+            tops=list(session.get("tops") or []),
+            top_ids=list(session.get("top_ids") or []),
+            assignments=list(session.get("assignments") or []),
+            summaries=dict(session.get("summaries") or {}),
+            summary_reviews=dict(session.get("summary_reviews") or {}),
+            origin="legacy",
+        )
+        for top_index, fallback_state in fallback_states.items():
+            summary_states.setdefault(top_index, fallback_state)
 
     return SessionResponse(
         session_id=session["session_id"],
@@ -1273,10 +1414,12 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
         job_id=job_id,
         current_step=session.get("current_step"),
         tops=session.get("tops") or [],
+        top_ids=session.get("top_ids") or [],
         assignments=session.get("assignments") or [],
         speaker_names=session.get("speaker_names") or {},
         summaries=session.get("summaries") or {},
         summary_reviews=session.get("summary_reviews") or {},
+        summary_states=summary_states,
         export_metadata=session.get("export_metadata") or {},
         skipped_assignment=bool(session.get("skipped_assignment")),
         transcript=transcript,
@@ -1288,6 +1431,27 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
             if latest_pipeline is not None
             else None
         ),
+        latest_summary_job=(
+            build_summary_job_response(latest_summary_job)
+            if latest_summary_job is not None
+            else None
+        ),
+    )
+
+
+def build_summary_job_response(job: dict[str, Any]) -> SummaryJobResponse:
+    refs = dict(job.get("refs") or {})
+    return SummaryJobResponse(
+        summary_job_id=job["summary_job_id"],
+        session_id=job["session_id"],
+        status=job["status"],
+        progress=int(job.get("progress") or 0),
+        current_top=int(job.get("current_top") or 0),
+        total_tops=int(job.get("total_tops") or 0),
+        top_ids=list(refs.get("top_ids") or []),
+        error=job.get("error"),
+        created_at=job.get("created_at"),
+        updated_at=job.get("updated_at"),
     )
 
 
@@ -1416,6 +1580,7 @@ def apply_profile_display_name_to_session(
     speaker_names = dict(updated_session.get("speaker_names") or {})
     speaker_names[local_speaker_id] = profile["display_name"]
     updated_session["speaker_names"] = speaker_names
+    updated_session = reconcile_session_summaries(session, updated_session)
     return save_session(
         session["session_id"],
         updated_session,
@@ -1974,12 +2139,14 @@ def build_pipeline_agenda_detection_response(
 def line_to_dict(line: Any) -> dict[str, Any]:
     if isinstance(line, dict):
         return {
+            "line_id": str(line.get("line_id") or uuid.uuid4()),
             "speaker": str(line.get("speaker", "")),
             "text": str(line.get("text", "")),
             "start": float(line.get("start", 0)),
             "end": float(line.get("end", 0)),
         }
     return {
+        "line_id": str(getattr(line, "line_id", None) or uuid.uuid4()),
         "speaker": str(getattr(line, "speaker", "")),
         "text": str(getattr(line, "text", "")),
         "start": float(getattr(line, "start", 0)),
@@ -1994,15 +2161,624 @@ def transcript_utterances(transcript: list[dict[str, Any]]) -> list[TranscriptUt
     ]
 
 
+def _normalized_summary_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def summary_source_snapshot(
+    transcript: list[dict[str, Any]],
+    assignments: list[int | None],
+    top_index: int,
+    *,
+    no_top_mode: bool = False,
+) -> list[dict[str, str]]:
+    snapshot: list[dict[str, str]] = []
+    for line_index, line in enumerate(transcript):
+        if not no_top_mode and (
+            line_index >= len(assignments) or assignments[line_index] != top_index
+        ):
+            continue
+        speaker = str(line.get("speaker") or "")
+        text = _normalized_summary_text(line.get("text"))
+        if snapshot and snapshot[-1]["speaker"] == speaker:
+            snapshot[-1]["text"] = _normalized_summary_text(
+                f"{snapshot[-1]['text']} {text}"
+            )
+        else:
+            snapshot.append(
+                {
+                    "line_id": str(line.get("line_id") or f"legacy:{line_index}"),
+                    "speaker": speaker,
+                    "text": text,
+                }
+            )
+    return snapshot
+
+
+def summary_snapshot_hash(snapshot: list[dict[str, str]]) -> str:
+    semantic_snapshot = _normalized_summary_text(
+        " ".join(item.get("text", "") for item in snapshot)
+    )
+    payload = json.dumps(
+        semantic_snapshot,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def current_summary_input(
+    session: dict[str, Any], top_index: int
+) -> tuple[list[dict[str, str]], str]:
+    transcript = [line_to_dict(line) for line in (session.get("transcript") or [])]
+    tops = list(session.get("tops") or [])
+    no_top_mode = bool(session.get("skipped_assignment")) or not tops
+    snapshot = summary_source_snapshot(
+        transcript,
+        list(session.get("assignments") or []),
+        top_index,
+        no_top_mode=no_top_mode,
+    )
+    return snapshot, summary_snapshot_hash(snapshot)
+
+
+def _replace_exact_labels(value: Any, replacements: dict[str, str]) -> Any:
+    effective = {
+        old: new
+        for old, new in replacements.items()
+        if old and new and old != new
+    }
+    if not effective:
+        return value
+    pattern = re.compile(
+        r"(?<!\w)(" + "|".join(
+            re.escape(item) for item in sorted(effective, key=len, reverse=True)
+        ) + r")(?!\w)"
+    )
+
+    def replace_string(text: str) -> str:
+        return pattern.sub(lambda match: effective[match.group(1)], text)
+
+    if isinstance(value, str):
+        return replace_string(value)
+    if isinstance(value, list):
+        return [_replace_exact_labels(item, effective) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _replace_exact_labels(item, effective)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _summary_change_reasons(
+    old_snapshot: list[dict[str, str]],
+    new_snapshot: list[dict[str, str]],
+) -> list[str]:
+    old_by_id = {item["line_id"]: item for item in old_snapshot}
+    new_by_id = {item["line_id"]: item for item in new_snapshot}
+    reasons: list[str] = []
+    if old_by_id.keys() - new_by_id.keys():
+        reasons.append("lines_removed")
+    if new_by_id.keys() - old_by_id.keys():
+        reasons.append("lines_added")
+    if any(
+        old_by_id[line_id] != new_by_id[line_id]
+        for line_id in old_by_id.keys() & new_by_id.keys()
+    ):
+        reasons.append("transcript_changed")
+    if not reasons and old_snapshot != new_snapshot:
+        reasons.append("line_order_changed")
+    return reasons or ["summary_input_changed"]
+
+
+def ensure_session_top_ids(
+    incoming: dict[str, Any], existing: dict[str, Any] | None = None
+) -> list[str]:
+    tops = list(incoming.get("tops") or [])
+    supplied = [str(item) for item in (incoming.get("top_ids") or [])]
+    if len(supplied) == len(tops) and len(set(supplied)) == len(supplied):
+        return supplied
+    previous = list((existing or {}).get("top_ids") or [])
+    if len(previous) == len(tops):
+        return previous
+    return [str(uuid.uuid4()) for _ in tops]
+
+
+def reconcile_session_summaries(
+    existing: dict[str, Any] | None,
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    """Preserve summaries by stable TOP id and classify only semantic changes."""
+    state = dict(incoming)
+    previous_lines = list((existing or {}).get("transcript") or [])
+    if state.get("transcript") is None:
+        state["transcript"] = previous_lines
+    normalized_lines: list[dict[str, Any]] = []
+    for index, raw_line in enumerate(state.get("transcript") or []):
+        normalized = line_to_dict(raw_line)
+        supplied_id = (
+            raw_line.get("line_id")
+            if isinstance(raw_line, dict)
+            else getattr(raw_line, "line_id", None)
+        )
+        if not supplied_id and index < len(previous_lines):
+            previous = previous_lines[index]
+            if (
+                str(previous.get("speaker", "")) == normalized["speaker"]
+                and str(previous.get("text", "")) == normalized["text"]
+            ):
+                normalized["line_id"] = str(
+                    previous.get("line_id") or normalized["line_id"]
+                )
+        normalized_lines.append(normalized)
+    state["transcript"] = normalized_lines
+    state["top_ids"] = ensure_session_top_ids(state, existing)
+    tops = list(state.get("tops") or [])
+    no_top_mode = bool(state.get("skipped_assignment")) or not tops
+    effective_ids = (
+        [f"whole-session:{state.get('session_id', '')}"]
+        if no_top_mode
+        else state["top_ids"]
+    )
+
+    old_top_ids = list((existing or {}).get("top_ids") or [])
+    if existing and (existing.get("skipped_assignment") or not existing.get("tops")):
+        old_top_ids = [f"whole-session:{existing.get('session_id', '')}"]
+    old_index_by_id = {top_id: index for index, top_id in enumerate(old_top_ids)}
+    old_summaries = dict((existing or {}).get("summaries") or {})
+    old_reviews = dict((existing or {}).get("summary_reviews") or {})
+    old_states = dict((existing or {}).get("summary_states") or {})
+    requested_summaries = dict(state.get("summaries") or {})
+    requested_reviews = dict(state.get("summary_reviews") or {})
+    requested_states = dict(state.get("summary_states") or {})
+
+    old_names = dict((existing or {}).get("speaker_names") or {})
+    new_names = dict(state.get("speaker_names") or {})
+    speaker_replacements: dict[str, str] = {}
+    for speaker_id in set(old_names) | set(new_names):
+        old_label = _normalized_summary_text(old_names.get(speaker_id) or speaker_id)
+        new_label = _normalized_summary_text(new_names.get(speaker_id) or speaker_id)
+        if old_label != new_label:
+            speaker_replacements[old_label] = new_label
+
+    next_summaries: dict[int, str] = {}
+    next_reviews: dict[int, Any] = {}
+    next_states: dict[int, Any] = {}
+    for index, top_id in enumerate(effective_ids):
+        old_index = old_index_by_id.get(top_id)
+        old_summary = old_summaries.get(old_index, "") if old_index is not None else ""
+        old_review = old_reviews.get(old_index, {}) if old_index is not None else {}
+        previous_state = (
+            dict(old_states.get(old_index) or {}) if old_index is not None else {}
+        )
+
+        local_replacements = dict(speaker_replacements)
+        if old_index is not None and old_index < len((existing or {}).get("tops") or []):
+            old_title = str((existing or {}).get("tops", [])[old_index])
+            new_title = str(tops[index]) if index < len(tops) else old_title
+            if old_title != new_title:
+                local_replacements[old_title] = new_title
+
+        # The frontend mirrors deterministic label replacements immediately so
+        # the UI does not flicker while autosaving. Treat that exact result as
+        # reconciliation, not as a manual content edit that resets the baseline.
+        expected_summary = str(
+            _replace_exact_labels(str(old_summary or ""), local_replacements)
+        )
+        expected_review = dict(
+            _replace_exact_labels(dict(old_review or {}), local_replacements)
+        )
+        has_requested_summary = index in requested_summaries
+        has_requested_review = index in requested_reviews
+        requested_summary = str(requested_summaries.get(index) or "")
+        requested_review = dict(requested_reviews.get(index) or {})
+        summary_was_edited = has_requested_summary and requested_summary not in {
+            str(old_summary or ""),
+            expected_summary,
+        }
+        review_was_edited = (
+            has_requested_review
+            and requested_review != dict(old_review or {})
+            and requested_review != expected_review
+        )
+        manually_edited = summary_was_edited or review_was_edited
+        summary = (
+            str(_replace_exact_labels(requested_summary, local_replacements))
+            if summary_was_edited
+            else expected_summary or requested_summary
+        )
+        review = (
+            dict(_replace_exact_labels(requested_review, local_replacements))
+            if review_was_edited
+            else expected_review or requested_review
+        )
+
+        snapshot, input_hash = current_summary_input(state, index)
+        baseline_snapshot = list(previous_state.get("source_snapshot") or [])
+        baseline_hash = str(previous_state.get("input_hash") or "")
+        status = str(previous_state.get("status") or "")
+        change_reasons: list[str] = []
+
+        if not summary:
+            has_error = any(
+                str(item.get("severity", "")).lower() == "error"
+                for item in review.get("review_warnings", [])
+                if isinstance(item, dict)
+            )
+            status = "failed" if has_error else "missing"
+        elif manually_edited:
+            status = "ready"
+            baseline_snapshot = snapshot
+            baseline_hash = input_hash
+        elif not baseline_hash:
+            # Existing installations did not persist a generation snapshot.
+            # Preserve their summaries and establish a baseline without an LLM call.
+            status = "ready"
+            baseline_snapshot = snapshot
+            baseline_hash = input_hash
+        elif baseline_hash != input_hash:
+            status = "review_required"
+            change_reasons = _summary_change_reasons(baseline_snapshot, snapshot)
+        elif status not in {"queued", "running", "failed"}:
+            status = "ready"
+
+        next_summaries[index] = summary
+        if review:
+            next_reviews[index] = review
+        next_states[index] = {
+            **previous_state,
+            **dict(requested_states.get(index) or {}),
+            "top_id": top_id,
+            "status": status or "missing",
+            "input_hash": baseline_hash,
+            "source_snapshot": baseline_snapshot,
+            "current_input_hash": input_hash,
+            "change_reasons": change_reasons,
+            "origin": "manual" if manually_edited else previous_state.get("origin", "pipeline"),
+            "updated_at": time.time(),
+        }
+
+    state["summaries"] = next_summaries
+    state["summary_reviews"] = next_reviews
+    state["summary_states"] = next_states
+    return state
+
+
+def build_generated_summary_states(
+    *,
+    session_id: str,
+    transcript: list[dict[str, Any]],
+    tops: list[str],
+    top_ids: list[str],
+    assignments: list[int | None],
+    summaries: dict[int, str],
+    summary_reviews: dict[int, Any],
+    origin: str,
+) -> dict[int, Any]:
+    effective_ids = top_ids if tops else [f"whole-session:{session_id}"]
+    states: dict[int, Any] = {}
+    for index, top_id in enumerate(effective_ids):
+        snapshot = summary_source_snapshot(
+            transcript,
+            assignments,
+            index,
+            no_top_mode=not bool(tops),
+        )
+        has_error = any(
+            str(item.get("severity", "")).lower() == "error"
+            for item in (summary_reviews.get(index) or {}).get("review_warnings", [])
+            if isinstance(item, dict)
+        )
+        states[index] = {
+            "top_id": top_id,
+            "status": (
+                "ready"
+                if str(summaries.get(index) or "").strip()
+                else "failed"
+                if has_error
+                else "missing"
+            ),
+            "input_hash": summary_snapshot_hash(snapshot),
+            "current_input_hash": summary_snapshot_hash(snapshot),
+            "source_snapshot": snapshot,
+            "change_reasons": [],
+            "origin": origin,
+            "generated_at": time.time(),
+            "updated_at": time.time(),
+        }
+    return states
+
+
+def update_summary_job(summary_job_id: str, **changes: Any) -> dict[str, Any] | None:
+    job = load_summary_job(summary_job_id)
+    if job is None:
+        return None
+    refs = dict(job.get("refs") or {})
+    if "refs" in changes:
+        refs.update(changes.pop("refs") or {})
+    job.update(changes)
+    job["refs"] = refs
+    job["updated_at"] = time.time()
+    return save_summary_job(summary_job_id, job)
+
+
+def summary_job_cancelled(summary_job_id: str) -> bool:
+    job = load_summary_job(summary_job_id)
+    if job is None:
+        return True
+    return bool((job.get("refs") or {}).get("cancel_requested")) or job.get(
+        "status"
+    ) == "cancelled"
+
+
+def finalize_summary_job_cancellation(
+    summary_job_id: str,
+    job: dict[str, Any],
+) -> None:
+    refs = dict(job.get("refs") or {})
+    top_ids = list(refs.get("top_ids") or [])
+    previous_statuses = dict(refs.get("previous_statuses") or {})
+    session = load_session(job["session_id"])
+    if session is not None:
+        effective_ids = list(session.get("top_ids") or [])
+        if not session.get("tops") or session.get("skipped_assignment"):
+            effective_ids = [f"whole-session:{session['session_id']}"]
+        states = dict(session.get("summary_states") or {})
+        summaries = dict(session.get("summaries") or {})
+        changed = False
+        for top_id in top_ids:
+            if top_id not in effective_ids:
+                continue
+            top_index = effective_ids.index(top_id)
+            current = dict(states.get(top_index) or {})
+            if current.get("status") not in {"queued", "running"}:
+                continue
+            fallback = "review_required" if summaries.get(top_index) else "missing"
+            previous_status = previous_statuses.get(top_id)
+            states[top_index] = {
+                **current,
+                "status": (
+                    previous_status
+                    if previous_status in {"ready", "review_required", "failed", "missing"}
+                    else fallback
+                ),
+                "updated_at": time.time(),
+            }
+            changed = True
+        if changed:
+            session["summary_states"] = states
+            save_session(session["session_id"], session, bump_revision=False)
+    update_summary_job(summary_job_id, status="cancelled")
+
+
+def run_summary_job(summary_job_id: str) -> None:
+    job = load_summary_job(summary_job_id)
+    if job is None:
+        return
+    refs = dict(job.get("refs") or {})
+    top_ids = list(refs.get("top_ids") or [])
+    expected_hashes = dict(refs.get("input_hashes") or {})
+    model = refs.get("model")
+    system_prompt = refs.get("system_prompt")
+    total = len(top_ids)
+    update_summary_job(
+        summary_job_id,
+        status="processing",
+        progress=0,
+        current_top=0,
+        total_tops=total,
+        error=None,
+    )
+
+    try:
+        for position, top_id in enumerate(top_ids):
+            if summary_job_cancelled(summary_job_id):
+                finalize_summary_job_cancellation(summary_job_id, job)
+                return
+            session = load_session(job["session_id"])
+            if session is None:
+                raise RuntimeError("Session nicht gefunden")
+            session_top_ids = list(session.get("top_ids") or [])
+            no_top_mode = not session.get("tops") or bool(session.get("skipped_assignment"))
+            effective_ids = (
+                session_top_ids
+                if not no_top_mode
+                else [f"whole-session:{session['session_id']}"]
+            )
+            if top_id not in effective_ids:
+                continue
+            top_index = effective_ids.index(top_id)
+            current_snapshot, current_hash = current_summary_input(session, top_index)
+            if expected_hashes.get(top_id) != current_hash:
+                states = dict(session.get("summary_states") or {})
+                current_state = dict(states.get(top_index) or {})
+                states[top_index] = {
+                    **current_state,
+                    "status": "review_required",
+                    "current_input_hash": current_hash,
+                    "change_reasons": ["changed_while_queued"],
+                    "updated_at": time.time(),
+                }
+                session["summary_states"] = states
+                save_session(session["session_id"], session, bump_revision=False)
+                continue
+
+            update_summary_job(
+                summary_job_id,
+                current_top=position + 1,
+                progress=int((position / max(total, 1)) * 100),
+            )
+            states = dict(session.get("summary_states") or {})
+            states[top_index] = {
+                **dict(states.get(top_index) or {}),
+                "status": "running",
+                "updated_at": time.time(),
+            }
+            session["summary_states"] = states
+            save_session(session["session_id"], session, bump_revision=False)
+
+            transcript = [line_to_dict(line) for line in (session.get("transcript") or [])]
+            assignments = list(session.get("assignments") or [])
+            lines = [
+                line
+                for line_index, line in enumerate(transcript)
+                if no_top_mode
+                or (line_index < len(assignments) and assignments[line_index] == top_index)
+            ]
+            if not lines:
+                raise RuntimeError("Für den ausgewählten TOP sind keine Zeilen vorhanden")
+            title = (
+                "Gesamtes Gespräch"
+                if no_top_mode
+                else str(session.get("tops", [])[top_index])
+            )
+            speaker_names = dict(session.get("speaker_names") or {})
+            text = "\n".join(format_line_for_summary(line, speaker_names) for line in lines)
+            with LLM_WORK_LOCK:
+                result = summarize_segment(
+                    title,
+                    text,
+                    model=model,
+                    system_prompt=system_prompt,
+                )
+            if summary_job_cancelled(summary_job_id):
+                # A running local LLM call cannot be interrupted safely. Do not
+                # publish its result when cancellation was requested meanwhile.
+                finalize_summary_job_cancellation(summary_job_id, job)
+                return
+            named_lines = [
+                {
+                    **line,
+                    "speaker": speaker_names.get(line.get("speaker", ""), line.get("speaker", "")),
+                }
+                for line in lines
+            ]
+            review_result = build_summary_review(
+                structured=result.structured,
+                summary=result.summary,
+                lines=named_lines,
+            )
+
+            latest = load_session(session["session_id"])
+            if latest is None:
+                raise RuntimeError("Session nicht gefunden")
+            _, latest_hash = current_summary_input(latest, top_index)
+            if latest_hash != current_hash:
+                latest_states = dict(latest.get("summary_states") or {})
+                latest_states[top_index] = {
+                    **dict(latest_states.get(top_index) or {}),
+                    "status": "review_required",
+                    "change_reasons": ["changed_during_generation"],
+                    "current_input_hash": latest_hash,
+                    "updated_at": time.time(),
+                }
+                latest["summary_states"] = latest_states
+                save_session(latest["session_id"], latest, bump_revision=False)
+                continue
+
+            summaries = dict(latest.get("summaries") or {})
+            reviews = dict(latest.get("summary_reviews") or {})
+            latest_states = dict(latest.get("summary_states") or {})
+            summaries[top_index] = result.summary
+            reviews[top_index] = {
+                "structured": result.structured.to_dict() if result.structured else None,
+                "source_links": [link.to_dict() for link in review_result.source_links],
+                "review_warnings": [warning.to_dict() for warning in review_result.warnings],
+                "fallback_used": result.fallback_used,
+                "chunks_processed": result.chunks_processed,
+                "duration_seconds": result.duration_seconds,
+            }
+            latest_states[top_index] = {
+                **dict(latest_states.get(top_index) or {}),
+                "top_id": top_id,
+                "status": "ready",
+                "input_hash": current_hash,
+                "current_input_hash": current_hash,
+                "source_snapshot": current_snapshot,
+                "change_reasons": [],
+                "origin": "manual_regeneration",
+                "generated_at": time.time(),
+                "updated_at": time.time(),
+            }
+            latest["summaries"] = summaries
+            latest["summary_reviews"] = reviews
+            latest["summary_states"] = latest_states
+            save_session(latest["session_id"], latest, bump_revision=False)
+            update_summary_job(
+                summary_job_id,
+                current_top=position + 1,
+                progress=int(((position + 1) / max(total, 1)) * 100),
+            )
+
+        update_summary_job(
+            summary_job_id,
+            status="completed",
+            progress=100,
+            current_top=total,
+        )
+    except Exception as exc:
+        logger.error(
+            "Summary job %s failed (%s)",
+            summary_job_id,
+            safe_exception_label(exc),
+            exc_info=True,
+        )
+        update_summary_job(
+            summary_job_id,
+            status="failed",
+            error=safe_exception_label(exc),
+        )
+        failed_session = load_session(job["session_id"])
+        if failed_session is not None:
+            failed_states = dict(failed_session.get("summary_states") or {})
+            failed_reviews = dict(failed_session.get("summary_reviews") or {})
+            effective_ids = list(failed_session.get("top_ids") or [])
+            if not failed_session.get("tops") or failed_session.get("skipped_assignment"):
+                effective_ids = [f"whole-session:{failed_session['session_id']}"]
+            for failed_top_id in top_ids:
+                if failed_top_id not in effective_ids:
+                    continue
+                failed_index = effective_ids.index(failed_top_id)
+                if (failed_states.get(failed_index) or {}).get("status") not in {
+                    "queued",
+                    "running",
+                }:
+                    continue
+                failed_states[failed_index] = {
+                    **dict(failed_states.get(failed_index) or {}),
+                    "status": "failed",
+                    "updated_at": time.time(),
+                }
+                failed_reviews[failed_index] = {
+                    **dict(failed_reviews.get(failed_index) or {}),
+                    "review_warnings": [
+                        {
+                            "kind": "summary_failed",
+                            "message": "Die selektive Neugenerierung ist fehlgeschlagen.",
+                            "severity": "error",
+                            "line_indices": [],
+                            "excerpt": "",
+                        }
+                    ],
+                }
+            failed_session["summary_states"] = failed_states
+            failed_session["summary_reviews"] = failed_reviews
+            save_session(failed_session["session_id"], failed_session, bump_revision=False)
+
+
 def save_pipeline_session(
     session_id: str,
     *,
     job_id: str | None = None,
     transcript: list[dict[str, Any]] | None = None,
     tops: list[str] | None = None,
+    top_ids: list[str] | None = None,
     assignments: list[int | None] | None = None,
     summaries: dict[int, str] | None = None,
     summary_reviews: dict[int, Any] | None = None,
+    summary_states: dict[int, Any] | None = None,
     export_metadata: dict[str, Any] | None = None,
     current_step: int | None = None,
     skipped_assignment: bool | None = None,
@@ -2021,12 +2797,22 @@ def save_pipeline_session(
         state["speaker_names"] = speaker_names
     if tops is not None:
         state["tops"] = tops
+        existing_ids = list(state.get("top_ids") or [])
+        state["top_ids"] = (
+            list(top_ids)
+            if top_ids is not None and len(top_ids) == len(tops)
+            else existing_ids
+            if len(existing_ids) == len(tops)
+            else [str(uuid.uuid4()) for _ in tops]
+        )
     if assignments is not None:
         state["assignments"] = assignments
     if summaries is not None:
         state["summaries"] = summaries
     if summary_reviews is not None:
         state["summary_reviews"] = summary_reviews
+    if summary_states is not None:
+        state["summary_states"] = summary_states
     if export_metadata is not None:
         current_metadata = dict(state.get("export_metadata") or {})
         for key, value in export_metadata.items():
@@ -2039,9 +2825,11 @@ def save_pipeline_session(
         state["skipped_assignment"] = skipped_assignment
     state.setdefault("speaker_names", {})
     state.setdefault("tops", [])
+    state.setdefault("top_ids", [])
     state.setdefault("assignments", [])
     state.setdefault("summaries", {})
     state.setdefault("summary_reviews", {})
+    state.setdefault("summary_states", {})
     state.setdefault("export_metadata", {})
     state.setdefault("skipped_assignment", False)
     return save_session(session_id, state, bump_revision=False)
@@ -2178,12 +2966,13 @@ def summarize_pipeline_segments(
             transcript_text = "\n".join(
                 format_line_for_summary(line, speaker_names) for line in transcript
             )
-            result = summarize_segment(
-                "Gesamtes Gespräch",
-                transcript_text,
-                model=model,
-                system_prompt=system_prompt,
-            )
+            with LLM_WORK_LOCK:
+                result = summarize_segment(
+                    "Gesamtes Gespräch",
+                    transcript_text,
+                    model=model,
+                    system_prompt=system_prompt,
+                )
             review = build_summary_review(
                 structured=result.structured,
                 summary=result.summary,
@@ -2256,12 +3045,13 @@ def summarize_pipeline_segments(
             format_line_for_summary(line, speaker_names) for line in lines
         )
         try:
-            result = summarize_segment(
-                top_title,
-                transcript_text,
-                model=model,
-                system_prompt=system_prompt,
-            )
+            with LLM_WORK_LOCK:
+                result = summarize_segment(
+                    top_title,
+                    transcript_text,
+                    model=model,
+                    system_prompt=system_prompt,
+                )
             review = build_summary_review(
                 structured=result.structured,
                 summary=result.summary,
@@ -2396,11 +3186,13 @@ def run_pipeline_job(
             pdf_path=pdf_path,
             options=options,
         )
+        top_ids = [str(uuid.uuid4()) for _ in tops]
         save_pipeline_session(
             session_id,
             job_id=transcription_job_id,
             transcript=transcript,
             tops=tops,
+            top_ids=top_ids,
             assignments=assignments,
             export_metadata=pdf_metadata,
             skipped_assignment=not bool(tops),
@@ -2424,14 +3216,26 @@ def run_pipeline_job(
             assignments=assignments,
             options=options,
         )
+        summary_states = build_generated_summary_states(
+            session_id=session_id,
+            transcript=transcript,
+            tops=tops,
+            top_ids=top_ids,
+            assignments=assignments,
+            summaries=summaries,
+            summary_reviews=summary_reviews,
+            origin="pipeline",
+        )
         save_pipeline_session(
             session_id,
             job_id=transcription_job_id,
             transcript=transcript,
             tops=tops,
+            top_ids=top_ids,
             assignments=assignments,
             summaries=summaries,
             summary_reviews=summary_reviews,
+            summary_states=summary_states,
             skipped_assignment=not bool(tops),
             current_step=2 if not tops else 3,
         )
@@ -2805,9 +3609,12 @@ async def create_or_save_session(request: SessionSaveRequest):
     transcription job. Audio bytes are not copied.
     """
     session_id = request.session_id or str(uuid.uuid4())
+    state = model_to_dict(request)
+    state["session_id"] = session_id
+    state = reconcile_session_summaries(load_session(session_id), state)
     session = save_session_or_conflict(
         session_id,
-        model_to_dict(request),
+        state,
         request.revision,
     )
     return build_session_response(session)
@@ -2818,6 +3625,7 @@ async def save_existing_session(session_id: str, request: SessionSaveRequest):
     """Save a persisted editing session under a known session ID."""
     state = model_to_dict(request)
     state["session_id"] = session_id
+    state = reconcile_session_summaries(load_session(session_id), state)
     session = save_session_or_conflict(session_id, state, request.revision)
     return build_session_response(session)
 
@@ -2837,62 +3645,205 @@ async def get_session(session_id: str):
 )
 async def regenerate_session_summaries(
     session_id: str,
-    request: SessionSummaryRegenerateRequest,
 ):
-    """Regenerate all TOP summaries for the current persisted review state."""
-    existing = load_session(session_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Session nicht gefunden")
-    if not request.transcript:
-        raise HTTPException(status_code=400, detail="Kein Transkript vorhanden")
+    """Deprecated synchronous all-TOP endpoint kept as an explicit guard."""
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Die synchrone Gesamtregenerierung wurde entfernt. "
+            "Bitte ausgewählte TOPs über /summary-jobs neu generieren."
+        ),
+    )
 
-    transcript = [line_to_dict(line) for line in request.transcript]
-    tops = [top.strip() for top in request.tops if top.strip()]
-    assignments = list(request.assignments)
-    if tops and len(assignments) != len(transcript):
+
+@app.post(
+    "/api/sessions/{session_id}/summary-jobs",
+    response_model=SummaryJobResponse,
+)
+async def create_summary_job(session_id: str, request: SummaryJobCreateRequest):
+    session = load_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session nicht gefunden")
+    if request.revision is not None and int(session.get("revision") or 1) != request.revision:
+        raise HTTPException(status_code=409, detail="Sitzung wurde zwischenzeitlich geändert")
+    active_pipeline = load_latest_pipeline_job_for_session(session_id)
+    if active_pipeline and active_pipeline.get("status") in {
+        PIPELINE_STATUS_PENDING,
+        PIPELINE_STATUS_PROCESSING,
+    }:
         raise HTTPException(
-            status_code=400,
-            detail="Zuordnungen passen nicht zur Transkriptlänge",
+            status_code=409,
+            detail=(
+                "Die automatische Pipeline dieser Sitzung erzeugt die "
+                "Zusammenfassungen bereits."
+            ),
         )
 
-    no_top_mode = request.skipped_assignment or not tops
-    summary_tops = [] if no_top_mode else tops
-    summary_assignments = (
-        [None for _ in transcript] if no_top_mode else assignments
-    )
+    effective_ids = list(session.get("top_ids") or [])
+    if not session.get("tops") or session.get("skipped_assignment"):
+        effective_ids = [f"whole-session:{session_id}"]
+    selected = list(dict.fromkeys(request.top_ids))
+    if not selected:
+        raise HTTPException(status_code=400, detail="Mindestens ein TOP muss ausgewählt sein")
+    invalid = [top_id for top_id in selected if top_id not in effective_ids]
+    if invalid:
+        raise HTTPException(status_code=400, detail="Unbekannter TOP ausgewählt")
+    latest_job = load_latest_summary_job_for_session(session_id)
+    if latest_job and latest_job.get("status") in {"pending", "processing", "cancelling"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Für diese Sitzung läuft bereits eine selektive Neugenerierung",
+        )
 
-    summaries, summary_reviews = summarize_pipeline_segments(
-        session_id,
-        transcript=transcript,
-        tops=summary_tops,
-        assignments=summary_assignments,
-        options={
-            "model": request.model,
-            "system_prompt": request.system_prompt,
-        },
-        speaker_names=request.speaker_names,
+    input_hashes: dict[str, str] = {}
+    previous_statuses: dict[str, str] = {}
+    states = dict(session.get("summary_states") or {})
+    fallback_states = build_generated_summary_states(
+        session_id=session_id,
+        transcript=[line_to_dict(line) for line in (session.get("transcript") or [])],
+        tops=list(session.get("tops") or []),
+        top_ids=list(session.get("top_ids") or []),
+        assignments=list(session.get("assignments") or []),
+        summaries=dict(session.get("summaries") or {}),
+        summary_reviews=dict(session.get("summary_reviews") or {}),
+        origin="legacy",
     )
+    for top_index, fallback_state in fallback_states.items():
+        states.setdefault(top_index, fallback_state)
+    for top_id in selected:
+        top_index = effective_ids.index(top_id)
+        _, input_hash = current_summary_input(session, top_index)
+        input_hashes[top_id] = input_hash
+        previous_statuses[top_id] = str(
+            (states.get(top_index) or {}).get("status") or "missing"
+        )
+        states[top_index] = {
+            **dict(states.get(top_index) or {}),
+            "top_id": top_id,
+            "status": "queued",
+            "current_input_hash": input_hash,
+            "updated_at": time.time(),
+        }
+    session["summary_states"] = states
+    saved = save_session_or_conflict(session_id, session, request.revision)
 
-    updated_state = dict(existing)
-    updated_state.update(
+    now = time.time()
+    summary_job_id = str(uuid.uuid4())
+    job = save_summary_job(
+        summary_job_id,
         {
             "session_id": session_id,
-            "transcript": transcript,
-            "tops": tops,
-            "assignments": summary_assignments if no_top_mode else assignments,
-            "speaker_names": request.speaker_names,
-            "summaries": summaries,
-            "summary_reviews": summary_reviews,
-            "skipped_assignment": no_top_mode,
-            "current_step": 3,
-        }
+            "status": "pending",
+            "progress": 0,
+            "current_top": 0,
+            "total_tops": len(selected),
+            "created_at": now,
+            "updated_at": now,
+            "refs": {
+                "top_ids": selected,
+                "input_hashes": input_hashes,
+                "previous_statuses": previous_statuses,
+                "model": request.model,
+                "system_prompt": request.system_prompt,
+                "session_revision": saved.get("revision"),
+            },
+        },
     )
-    session = save_session_or_conflict(
-        session_id,
-        updated_state,
-        request.revision,
+    manager = await get_or_create_summary_job_manager()
+    await manager.enqueue(summary_job_id)
+    return build_summary_job_response(job)
+
+
+@app.get("/api/summary-jobs/{summary_job_id}", response_model=SummaryJobResponse)
+async def get_summary_job(summary_job_id: str):
+    job = load_summary_job(summary_job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Zusammenfassungsjob nicht gefunden")
+    return build_summary_job_response(job)
+
+
+@app.post("/api/summary-jobs/{summary_job_id}/cancel", response_model=SummaryJobResponse)
+async def cancel_summary_job(summary_job_id: str):
+    job = load_summary_job(summary_job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Zusammenfassungsjob nicht gefunden")
+    if job.get("status") in {"completed", "failed", "cancelled"}:
+        return build_summary_job_response(job)
+    updated = update_summary_job(
+        summary_job_id,
+        status="cancelling",
+        refs={"cancel_requested": True},
     )
-    return build_session_response(session)
+    return build_summary_job_response(updated or job)
+
+
+@app.post(
+    "/api/sessions/{session_id}/summaries/{top_id}/accept",
+    response_model=SessionResponse,
+)
+async def accept_existing_summary(
+    session_id: str,
+    top_id: str,
+    request: SummaryAcceptRequest,
+):
+    session = load_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session nicht gefunden")
+    effective_ids = list(session.get("top_ids") or [])
+    no_top_mode = not session.get("tops") or bool(session.get("skipped_assignment"))
+    if no_top_mode:
+        effective_ids = [f"whole-session:{session_id}"]
+    if top_id not in effective_ids:
+        raise HTTPException(status_code=404, detail="TOP nicht gefunden")
+    top_index = effective_ids.index(top_id)
+    summary = str((session.get("summaries") or {}).get(top_index) or "").strip()
+    if not summary:
+        raise HTTPException(status_code=400, detail="Keine Zusammenfassung zum Übernehmen")
+
+    snapshot, input_hash = current_summary_input(session, top_index)
+    transcript = [line_to_dict(line) for line in (session.get("transcript") or [])]
+    assignments = list(session.get("assignments") or [])
+    lines = [
+        line
+        for line_index, line in enumerate(transcript)
+        if no_top_mode
+        or (line_index < len(assignments) and assignments[line_index] == top_index)
+    ]
+    review = dict((session.get("summary_reviews") or {}).get(top_index) or {})
+    structured_data = review.get("structured")
+    structured = None
+    if isinstance(structured_data, dict):
+        from summarize import StructuredSummary
+
+        structured = StructuredSummary(**structured_data)
+    speaker_names = dict(session.get("speaker_names") or {})
+    named_lines = [
+        {**line, "speaker": speaker_names.get(line.get("speaker", ""), line.get("speaker", ""))}
+        for line in lines
+    ]
+    rebuilt = build_summary_review(structured=structured, summary=summary, lines=named_lines)
+    reviews = dict(session.get("summary_reviews") or {})
+    reviews[top_index] = {
+        **review,
+        "source_links": [link.to_dict() for link in rebuilt.source_links],
+        "review_warnings": [warning.to_dict() for warning in rebuilt.warnings],
+    }
+    states = dict(session.get("summary_states") or {})
+    states[top_index] = {
+        **dict(states.get(top_index) or {}),
+        "top_id": top_id,
+        "status": "ready",
+        "input_hash": input_hash,
+        "current_input_hash": input_hash,
+        "source_snapshot": snapshot,
+        "change_reasons": [],
+        "accepted_at": time.time(),
+        "updated_at": time.time(),
+    }
+    session["summary_reviews"] = reviews
+    session["summary_states"] = states
+    saved = save_session_or_conflict(session_id, session, request.revision)
+    return build_session_response(saved)
 
 
 @app.get("/api/speaker-profiles", response_model=List[SpeakerProfileResponse])
@@ -3464,12 +4415,18 @@ async def generate_summary(request: SummarizeRequest):
     text = "\n".join([f"{line.speaker}: {line.text}" for line in request.lines])
 
     try:
-        result = summarize_segment(
-            request.top_title,
-            text,
-            model=request.model,
-            system_prompt=request.system_prompt,
-        )
+        loop = asyncio.get_running_loop()
+
+        def run_guarded_summary():
+            with LLM_WORK_LOCK:
+                return summarize_segment(
+                    request.top_title,
+                    text,
+                    model=request.model,
+                    system_prompt=request.system_prompt,
+                )
+
+        result = await loop.run_in_executor(None, run_guarded_summary)
         review = build_summary_review(
             structured=result.structured,
             summary=result.summary,

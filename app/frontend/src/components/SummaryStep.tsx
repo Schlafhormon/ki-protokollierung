@@ -23,6 +23,16 @@ const SUMMARY_SECTIONS: Array<{
   { key: 'uncertainties', label: 'Unsicherheiten' },
 ];
 
+const CHANGE_REASON_LABELS: Record<string, string> = {
+  lines_added: 'Zeilen wurden hinzugefügt',
+  lines_removed: 'Zeilen wurden entfernt',
+  transcript_changed: 'Transkriptinhalt wurde geändert',
+  line_order_changed: 'Reihenfolge wurde geändert',
+  changed_while_queued: 'Inhalt wurde während der Wartezeit geändert',
+  changed_during_generation: 'Inhalt wurde während der Generierung geändert',
+  summary_input_changed: 'Inhalt oder TOP-Zuordnung wurde geändert',
+};
+
 export default function SummaryStep({
   onBack,
   tops,
@@ -31,8 +41,11 @@ export default function SummaryStep({
   summaries,
   setSummaries,
   summaryReviews = {},
+  summaryStates = {},
   onRegenerateSummary,
-  onRegenerateAllSummaries,
+  onAcceptSummary,
+  summaryJob,
+  onCancelSummaryJob,
   isGenerating,
   summariesAreFresh,
   audioUrl,
@@ -48,6 +61,7 @@ export default function SummaryStep({
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(null);
   const [acceptedSummaryWarnings, setAcceptedSummaryWarnings] = useState(false);
+  const [regenerationCandidate, setRegenerationCandidate] = useState<number | null>(null);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
   const transcriptLineRefs = useRef<Array<HTMLDivElement | null>>([]);
 
@@ -223,6 +237,7 @@ export default function SummaryStep({
   const selectedSummaryIndex = hasTops ? selectedTop : 0;
   const topLines = hasTops ? getTranscriptForTop(selectedTop) : transcript;
   const selectedReview = summaryReviews[selectedSummaryIndex];
+  const selectedSummaryState = summaryStates[selectedSummaryIndex];
   const selectedWarnings = selectedReview?.review_warnings ?? [];
   const structured = selectedReview?.structured ?? null;
 
@@ -259,18 +274,28 @@ export default function SummaryStep({
     <div className="space-y-6">
       {!summariesAreFresh && (
         <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <span>
-              Die Zuordnung, Sprecher oder TOPs wurden geändert. Aktualisieren Sie alle Zusammenfassungen gemeinsam vor dem Export.
-            </span>
-            <button
-              type="button"
-              onClick={onRegenerateAllSummaries}
-              disabled={isGenerating}
-              className="rounded-lg bg-yellow-600 px-4 py-2 font-medium text-white hover:bg-yellow-700 disabled:opacity-50"
-            >
-              {isGenerating ? 'Wird aktualisiert...' : 'Alle Zusammenfassungen aktualisieren'}
-            </button>
+          Änderungen betreffen einzelne TOPs. Die vorhandenen Zusammenfassungen bleiben sichtbar.
+          Prüfen Sie die gelb markierten TOPs und übernehmen, bearbeiten oder regenerieren Sie nur diese.
+        </div>
+      )}
+
+      {summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status) && (
+        <div className="rounded-lg border border-blue-300 bg-blue-50 p-4 text-sm text-blue-900">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1">
+              <div className="font-medium">Ausgewählte TOP-Zusammenfassungen werden erzeugt</div>
+              <div className="mt-1">
+                TOP {summaryJob.current_top} von {summaryJob.total_tops}. Der Vorgang kann im CPU-Modus mehrere Stunden dauern.
+              </div>
+              <div className="mt-3 h-2 overflow-hidden rounded bg-blue-100">
+                <div className="h-full bg-blue-600 transition-all" style={{ width: `${summaryJob.progress}%` }} />
+              </div>
+            </div>
+            {onCancelSummaryJob && summaryJob.status !== 'cancelling' && (
+              <button type="button" onClick={() => void onCancelSummaryJob()} className="rounded border border-blue-300 px-3 py-2">
+                Abbrechen
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -296,14 +321,6 @@ export default function SummaryStep({
                 </label>
               )}
             </div>
-            <button
-              type="button"
-              onClick={onRegenerateAllSummaries}
-              disabled={isGenerating}
-              className="rounded-lg bg-red-600 px-4 py-2 font-medium text-white hover:bg-red-700 disabled:opacity-50"
-            >
-              {isGenerating ? 'Wird aktualisiert...' : 'Alle Zusammenfassungen erneut versuchen'}
-            </button>
           </div>
         </div>
       )}
@@ -362,6 +379,7 @@ export default function SummaryStep({
             ) : tops.map((top, index) => {
               const isSelected = selectedTop === index;
               const hasSummary = summaries[index] && summaries[index].trim();
+              const state = summaryStates[index]?.status;
               return (
                 <button
                   key={index}
@@ -375,7 +393,13 @@ export default function SummaryStep({
                   <div className="flex items-start gap-2">
                     <div
                       className={`w-3 h-3 rounded-full mt-1 ${
-                        hasSummary ? 'bg-green-500' : 'bg-gray-300'
+                        state === 'review_required'
+                          ? 'bg-yellow-500'
+                          : state === 'failed' || state === 'missing'
+                            ? 'bg-red-500'
+                            : state === 'queued' || state === 'running'
+                              ? 'bg-blue-500'
+                              : hasSummary ? 'bg-green-500' : 'bg-gray-300'
                       }`}
                     />
                     <div className="flex-1 min-w-0">
@@ -444,20 +468,40 @@ export default function SummaryStep({
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                       </svg>
                     </button>
+                    {['review_required', 'failed'].includes(selectedSummaryState?.status ?? '') && summaries[selectedSummaryIndex]?.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => void onAcceptSummary(selectedSummaryIndex)}
+                        disabled={isGenerating}
+                        className="rounded bg-green-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
+                      >
+                        Bestehende übernehmen
+                      </button>
+                    )}
                     <button
-                      onClick={() => onRegenerateSummary(selectedSummaryIndex)}
+                      onClick={() => setRegenerationCandidate(selectedSummaryIndex)}
                       disabled={isGenerating}
-                      className="p-2 text-blue-600 hover:bg-blue-100 rounded disabled:opacity-50"
-                      title="Neu generieren"
+                      className="rounded border border-blue-300 px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-50"
                     >
-                      <svg className={`w-4 h-4 ${isGenerating ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
+                      Neu generieren
                     </button>
                   </>
                 )}
               </div>
             </div>
+            {selectedSummaryState?.status === 'review_required' && (
+              <div className="border-b border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-900">
+                Die Eingabe dieses TOPs wurde geändert. Prüfen Sie den vorhandenen Text und übernehmen Sie ihn,
+                bearbeiten Sie ihn manuell oder starten Sie nur für diesen TOP eine Neugenerierung.
+                {selectedSummaryState.change_reasons?.length ? (
+                  <ul className="mt-2 list-disc pl-5">
+                    {selectedSummaryState.change_reasons.map((reason) => (
+                      <li key={reason}>{CHANGE_REASON_LABELS[reason] ?? reason}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            )}
             <div className="flex-1 p-4 overflow-y-auto">
               {editingTop === selectedSummaryIndex ? (
                 <textarea
@@ -465,11 +509,6 @@ export default function SummaryStep({
                   onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setEditText(e.target.value)}
                   className="w-full h-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
                 />
-              ) : isGenerating ? (
-                <div className="flex items-center justify-center h-full text-gray-500">
-                  <div className="animate-spin mr-2">⏳</div>
-                  Zusammenfassung wird generiert...
-                </div>
               ) : hasReviewContent ? (
                 <div className="space-y-3">
                   {selectedWarnings.length > 0 && (
@@ -628,6 +667,40 @@ export default function SummaryStep({
           </div>
         </div>
       </div>
+
+      {regenerationCandidate !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby="regeneration-title">
+          <div className="max-w-lg rounded-xl bg-white p-6 shadow-xl">
+            <h3 id="regeneration-title" className="text-lg font-semibold text-gray-950">
+              TOP-Zusammenfassung wirklich neu generieren?
+            </h3>
+            <p className="mt-3 text-sm text-gray-700">
+              Es wird ausschließlich {hasTops ? `TOP ${regenerationCandidate + 1}` : 'das Gesamtgespräch'} verarbeitet.
+              Im CPU-Modus kann dies mehrere Stunden dauern und erhebliche Serverleistung beanspruchen.
+              Prüfen Sie vorher, ob die vorhandene Zusammenfassung nicht bereits ausreicht.
+            </p>
+            <p className="mt-2 text-sm text-gray-600">
+              Der Job läuft serverseitig weiter. Sie können die Seite verlassen und später zurückkehren.
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button type="button" onClick={() => setRegenerationCandidate(null)} className="rounded border border-gray-300 px-4 py-2 text-sm">
+                Abbrechen
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const index = regenerationCandidate;
+                  setRegenerationCandidate(null);
+                  await onRegenerateSummary(index);
+                }}
+                className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+              >
+                Regenerierung verbindlich starten
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Export Section */}
       <div className="bg-white rounded-lg border border-gray-200 p-4">

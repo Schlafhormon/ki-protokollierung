@@ -32,6 +32,8 @@ export default function AssignmentStep({
   onBack,
   tops,
   setTops,
+  topIds = [],
+  onTopsChange,
   transcript,
   setTranscript,
   assignments,
@@ -52,6 +54,16 @@ export default function AssignmentStep({
   const [editingLine, setEditingLine] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
   const [topTitleDraft, setTopTitleDraft] = useState(tops[0] ?? '');
+
+  const stableTopIds = tops.map((_, index) => topIds[index] ?? `top-${index}`);
+  const updateTops = (nextTops: string[], nextTopIds = stableTopIds) => {
+    if (onTopsChange) onTopsChange(nextTops, nextTopIds);
+    else setTops(nextTops);
+  };
+  const createStableId = () =>
+    typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
 
   // Audio sync hook
@@ -178,18 +190,20 @@ export default function AssignmentStep({
     }
     const newTops = [...tops];
     newTops[selectedTop] = title;
-    setTops(newTops);
+    updateTops(newTops);
   };
 
   const addTop = () => {
     const insertionIndex = Math.min(selectedTop + 1, tops.length);
     const newTops = [...tops];
     newTops.splice(insertionIndex, 0, `TOP ${insertionIndex + 1}`);
+    const newTopIds = [...stableTopIds];
+    newTopIds.splice(insertionIndex, 0, createStableId());
     const newAssignments = assignments.map((assignment) => {
       if (assignment === null) return null;
       return assignment >= insertionIndex ? assignment + 1 : assignment;
     });
-    setTops(newTops);
+    updateTops(newTops, newTopIds);
     setAssignments(newAssignments);
     setSelectedTop(insertionIndex);
     setTopTitleDraft(newTops[insertionIndex] ?? '');
@@ -200,12 +214,13 @@ export default function AssignmentStep({
       return;
     }
     const newTops = tops.filter((_, index) => index !== selectedTop);
+    const newTopIds = stableTopIds.filter((_, index) => index !== selectedTop);
     const newAssignments = assignments.map((assignment) => {
       if (assignment === null) return null;
       if (assignment === selectedTop) return null;
       return assignment > selectedTop ? assignment - 1 : assignment;
     });
-    setTops(newTops);
+    updateTops(newTops, newTopIds);
     setAssignments(newAssignments);
     setSelectedTop(Math.max(0, Math.min(selectedTop, newTops.length - 1)));
   };
@@ -216,14 +231,16 @@ export default function AssignmentStep({
     }
 
     const newTops = [...tops];
+    const newTopIds = [...stableTopIds];
     newTops[selectedTop - 1] = `${newTops[selectedTop - 1]} / ${newTops[selectedTop]}`;
     newTops.splice(selectedTop, 1);
+    newTopIds.splice(selectedTop, 1);
     const newAssignments = assignments.map((assignment) => {
       if (assignment === null) return null;
       if (assignment === selectedTop) return selectedTop - 1;
       return assignment > selectedTop ? assignment - 1 : assignment;
     });
-    setTops(newTops);
+    updateTops(newTops, newTopIds);
     setAssignments(newAssignments);
     setSelectedTop(selectedTop - 1);
   };
@@ -323,6 +340,7 @@ export default function AssignmentStep({
     const splitDuration = texts.length > 0 ? duration / texts.length : 0;
     const replacementLines = texts.map((text, index) => ({
       ...currentLine,
+      line_id: index === 0 ? currentLine.line_id ?? createStableId() : createStableId(),
       text,
       start: currentLine.start + splitDuration * index,
       end:
@@ -509,7 +527,7 @@ export default function AssignmentStep({
             </h2>
             <p className="mt-2 max-w-3xl text-sm text-blue-900">
               {hasTops
-                ? 'Die Transkription und der Protokollentwurf sind vorbereitet. Korrekturen wirken direkt auf die spätere Zusammenfassung und den Export.'
+                ? 'Die Transkription und der Protokollentwurf sind vorbereitet. Änderungen markieren nur betroffene TOPs zur späteren Prüfung.'
                 : 'Keine TOPs angelegt. Das gesamte Transkript wird ohne automatische TOP-Erkennung zusammengefasst.'}
             </p>
           </div>
@@ -952,7 +970,7 @@ export default function AssignmentStep({
               : 'bg-gray-200 text-gray-400 cursor-not-allowed'
           }`}
         >
-          {hasSummaries ? 'Zum Protokoll' : 'Zusammenfassungen erstellen'}
+          Zum Protokollentwurf
           <span>→</span>
         </button>
       </div>

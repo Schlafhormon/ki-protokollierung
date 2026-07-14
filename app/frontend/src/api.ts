@@ -15,6 +15,7 @@ import type {
   SessionResponse,
   SessionHistoryResponse,
   SessionSavePayload,
+  SummaryJob,
   SpeakerEmbeddingBackfillResult,
   SpeakerMatchDiagnostic,
   SpeakerObservation,
@@ -343,56 +344,90 @@ export async function loadSession(sessionId: string): Promise<SessionResponse> {
   return response.json();
 }
 
-export interface RegenerateSessionSummariesPayload {
-  revision?: number | null;
-  tops: string[];
-  transcript: TranscriptLine[];
-  assignments: (number | null)[];
-  speakerNames: Record<string, string>;
-  skippedAssignment: boolean;
-  model?: string;
-  systemPrompt?: string;
+export async function startSummaryJob(
+  sessionId: string,
+  payload: {
+    revision?: number | null;
+    topIds: string[];
+    model?: string;
+    systemPrompt?: string;
+  }
+): Promise<SummaryJob> {
+  const response = await fetch(`${API_BASE}/api/sessions/${sessionId}/summary-jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      revision: payload.revision,
+      top_ids: payload.topIds,
+      model: payload.model,
+      system_prompt: payload.systemPrompt,
+    }),
+  });
+  if (response.status === 409) {
+    const error = await readApiError(response, 'Zusammenfassungsjob konnte nicht gestartet werden');
+    if (/zwischenzeitlich geändert/i.test(error.message)) {
+      throw new SessionConflictError(error.message);
+    }
+    throw error;
+  }
+  if (!response.ok) {
+    throw await readApiError(response, 'Zusammenfassungsjob konnte nicht gestartet werden');
+  }
+  return response.json();
 }
 
-/**
- * Regenerate all summaries for the current persisted session state.
- */
-export async function regenerateSessionSummaries(
+export async function getSummaryJob(summaryJobId: string): Promise<SummaryJob> {
+  const response = await fetch(`${API_BASE}/api/summary-jobs/${summaryJobId}`);
+  if (!response.ok) {
+    throw await readApiError(response, 'Zusammenfassungsjob konnte nicht geladen werden');
+  }
+  return response.json();
+}
+
+export async function pollSummaryJob(
+  summaryJobId: string,
+  onStatus?: (job: SummaryJob) => void,
+  intervalMs = 1500
+): Promise<SummaryJob> {
+  while (true) {
+    const job = await getSummaryJob(summaryJobId);
+    onStatus?.(job);
+    if (['completed', 'failed', 'cancelled'].includes(job.status)) {
+      return job;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+  }
+}
+
+export async function cancelSummaryJob(summaryJobId: string): Promise<SummaryJob> {
+  const response = await fetch(`${API_BASE}/api/summary-jobs/${summaryJobId}/cancel`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    throw await readApiError(response, 'Zusammenfassungsjob konnte nicht abgebrochen werden');
+  }
+  return response.json();
+}
+
+export async function acceptExistingSummary(
   sessionId: string,
-  payload: RegenerateSessionSummariesPayload
+  topId: string,
+  revision?: number | null
 ): Promise<SessionResponse> {
   const response = await fetch(
-    `${API_BASE}/api/sessions/${sessionId}/summaries/regenerate`,
+    `${API_BASE}/api/sessions/${sessionId}/summaries/${encodeURIComponent(topId)}/accept`,
     {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        revision: payload.revision,
-        tops: payload.tops,
-        transcript: payload.transcript,
-        assignments: payload.assignments,
-        speaker_names: payload.speakerNames,
-        skipped_assignment: payload.skippedAssignment,
-        model: payload.model,
-        system_prompt: payload.systemPrompt,
-      }),
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision }),
     }
   );
-
   if (response.status === 409) {
-    const error = await response.json().catch(() => ({}));
-    throw new SessionConflictError(
-      error.detail?.message || "Diese Sitzung wurde zwischenzeitlich geändert.",
-      error.detail?.actual_revision
-    );
+    throw new SessionConflictError('Diese Sitzung wurde zwischenzeitlich geändert.');
   }
-
   if (!response.ok) {
-    throw await readApiError(response, "Fehler beim Aktualisieren der Zusammenfassungen");
+    throw await readApiError(response, 'Zusammenfassung konnte nicht übernommen werden');
   }
-
   return response.json();
 }
 

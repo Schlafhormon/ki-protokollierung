@@ -413,7 +413,9 @@ export default function SpeakerNameEditor({
     if (!nextNames[targetSpeaker] && nextNames[sourceSpeaker]) {
       nextNames[targetSpeaker] = nextNames[sourceSpeaker];
     }
-    delete nextNames[sourceSpeaker];
+    // Keep an alias for the removed local id so persisted summaries can replace
+    // the former label deterministically with the target speaker label.
+    nextNames[sourceSpeaker] = nextNames[targetSpeaker] || targetSpeaker;
     setSpeakerNames(nextNames);
 
     const nextTargets = { ...mergeTargets };

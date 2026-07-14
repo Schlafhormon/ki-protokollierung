@@ -6,6 +6,7 @@ import type { Dispatch, SetStateAction } from 'react';
 
 // API Types
 export interface TranscriptLine {
+  line_id?: string;
   speaker: string;
   text: string;
   start: number;  // Start time in seconds
@@ -139,11 +140,13 @@ export interface SessionSavePayload {
   job_id?: string | null;
   current_step?: number | null;
   tops: string[];
+  top_ids?: string[];
   transcript?: TranscriptLine[];
   assignments: (number | null)[];
   speaker_names: Record<string, string>;
   summaries: Record<number, string>;
   summary_reviews?: Record<number, SummaryReview>;
+  summary_states?: Record<number, SummaryState>;
   export_metadata?: ExportMetadata;
   skipped_assignment: boolean;
 }
@@ -157,6 +160,7 @@ export interface SessionResponse extends SessionSavePayload {
   audio_metadata?: AudioMetadata | null;
   job?: TranscriptionJob | null;
   latest_pipeline?: PipelineJob | null;
+  latest_summary_job?: SummaryJob | null;
 }
 
 export type SessionHistoryStatus =
@@ -241,6 +245,46 @@ export interface SummaryReview {
   review_warnings: SummaryReviewWarning[];
   fallback_used?: boolean;
   chunks_processed?: number;
+}
+
+export type SummaryStatus =
+  | 'ready'
+  | 'review_required'
+  | 'missing'
+  | 'queued'
+  | 'running'
+  | 'failed';
+
+export interface SummarySourceSnapshotLine {
+  line_id: string;
+  speaker: string;
+  text: string;
+}
+
+export interface SummaryState {
+  top_id: string;
+  status: SummaryStatus | string;
+  input_hash?: string;
+  current_input_hash?: string;
+  source_snapshot?: SummarySourceSnapshotLine[];
+  change_reasons?: string[];
+  origin?: string;
+  generated_at?: number;
+  accepted_at?: number;
+  updated_at?: number;
+}
+
+export interface SummaryJob {
+  summary_job_id: string;
+  session_id: string;
+  status: 'pending' | 'processing' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | string;
+  progress: number;
+  current_top: number;
+  total_tops: number;
+  top_ids: string[];
+  error?: string | null;
+  created_at?: number | null;
+  updated_at?: number | null;
 }
 
 export interface SummarizeResponse {
@@ -365,6 +409,8 @@ export interface AssignmentStepProps {
   onBack: () => void;
   tops: string[];
   setTops: (tops: string[]) => void;
+  topIds?: string[];
+  onTopsChange?: (tops: string[], topIds: string[]) => void;
   transcript: TranscriptLine[];
   setTranscript: (transcript: TranscriptLine[]) => void;
   assignments: (number | null)[];
@@ -388,8 +434,11 @@ export interface SummaryStepProps {
   summaries: Record<number, string>;
   setSummaries: (summaries: Record<number, string>) => void;
   summaryReviews?: Record<number, SummaryReview>;
+  summaryStates?: Record<number, SummaryState>;
   onRegenerateSummary: (topIndex: number) => Promise<void>;
-  onRegenerateAllSummaries: () => Promise<void>;
+  onAcceptSummary: (topIndex: number) => Promise<void>;
+  summaryJob?: SummaryJob | null;
+  onCancelSummaryJob?: () => Promise<void>;
   isGenerating: boolean;
   summariesAreFresh: boolean;
   audioUrl?: string;  // URL to stream audio for playback

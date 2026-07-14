@@ -37,7 +37,9 @@ Anwendung nicht mehr abbilden.
 3. Optional "Sprecher dauerhaft merken" aktivieren, wenn Sprecherprofile für künftige Sitzungen genutzt werden sollen.
 4. "Automatisch verarbeiten" starten.
 5. Erkannte TOP-Segmente, Sprecher und unsichere Stellen prüfen und bei Bedarf korrigieren.
-6. Zusammenfassungen je TOP prüfen, neu generieren oder bearbeiten.
+6. Zusammenfassungen je TOP prüfen. Änderungen an Sprechernamen und TOP-Titeln
+   werden ohne LLM übernommen. Inhaltlich betroffene TOPs können bestätigt,
+   manuell bearbeitet oder selektiv neu generiert werden.
 7. Protokoll mit Sitzungsmetadaten als DOCX, PDF oder TXT exportieren.
 
 ## Gemeinsamer Sitzungsverlauf
@@ -282,6 +284,7 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `MAX_UPLOAD_BYTES` | maximale Uploadgröße | `524288000` |
 | `TRANSCRIPTION_CONCURRENCY` | parallele Transkriptionsjobs | `1` |
 | `PIPELINE_CONCURRENCY` | parallele End-to-End-Pipelinejobs | `1` |
+| `SUMMARY_CONCURRENCY` | parallele, manuell bestätigte TOP-Regenerierungsjobs | `1` |
 
 Weitere Optionen stehen in `.env.example`. In Docker Compose sollte
 `LLM_BASE_URL` normalerweise nicht gesetzt werden; der Backend-Container nutzt
@@ -511,6 +514,10 @@ und `HF_TOKEN` als BuildKit-Secret bereitstellen.
 | `/api/pipeline/{pipeline_id}/result` | GET | fertiges Review-Ergebnis laden |
 | `/api/sessions` | POST | Sitzung speichern/anlegen |
 | `/api/sessions/{session_id}` | GET/PUT | Sitzung laden/speichern |
+| `/api/sessions/{session_id}/summary-jobs` | POST | selektive TOP-Regenerierung einreihen |
+| `/api/summary-jobs/{summary_job_id}` | GET | Fortschritt einer Regenerierung abrufen |
+| `/api/summary-jobs/{summary_job_id}/cancel` | POST | Regenerierung abbrechen |
+| `/api/sessions/{session_id}/summaries/{top_id}/accept` | POST | bestehende Zusammenfassung ohne LLM übernehmen |
 | `/api/transcribe` | POST | Legacy-Transkriptionsjob starten |
 | `/api/audio/{job_id}` | GET | Audiodatei streamen |
 | `/api/extract-tops` | POST | TOPs aus PDF extrahieren |

@@ -58,6 +58,7 @@ services:
       - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-524288000}
       - TRANSCRIPTION_CONCURRENCY=${TRANSCRIPTION_CONCURRENCY:-1}
       - PIPELINE_CONCURRENCY=${PIPELINE_CONCURRENCY:-1}
+      - SUMMARY_CONCURRENCY=${SUMMARY_CONCURRENCY:-1}
     volumes:
       - ./uploads:/app/uploads
       - ./data:/app/data

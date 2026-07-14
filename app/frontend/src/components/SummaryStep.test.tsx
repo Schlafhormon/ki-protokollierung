@@ -25,7 +25,7 @@ const defaultProps: SummaryStepProps = {
   },
   setSummaries: vi.fn(),
   onRegenerateSummary: vi.fn().mockResolvedValue(undefined),
-  onRegenerateAllSummaries: vi.fn().mockResolvedValue(undefined),
+  onAcceptSummary: vi.fn().mockResolvedValue(undefined),
   isGenerating: false,
   summariesAreFresh: true,
   speakerNames: {},
@@ -290,5 +290,29 @@ describe('SummaryStep', () => {
 
     expect(exportProtocol).toHaveBeenCalledTimes(1);
     expect(click).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires an explicit warning confirmation before selective regeneration', async () => {
+    const user = userEvent.setup();
+    const onRegenerateSummary = vi.fn().mockResolvedValue(undefined);
+    renderSummaryStep({
+      onRegenerateSummary,
+      summaryStates: {
+        0: {
+          top_id: 'top-0',
+          status: 'review_required',
+          change_reasons: ['lines_added'],
+        },
+      },
+      summariesAreFresh: false,
+    });
+
+    expect(screen.getByText('Zeilen wurden hinzugefügt')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /neu generieren/i }));
+    expect(onRegenerateSummary).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toHaveTextContent(/mehrere Stunden/i);
+
+    await user.click(screen.getByRole('button', { name: /verbindlich starten/i }));
+    expect(onRegenerateSummary).toHaveBeenCalledWith(0);
   });
 });
