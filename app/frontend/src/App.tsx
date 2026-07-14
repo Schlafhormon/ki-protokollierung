@@ -568,7 +568,9 @@ export default function App() {
     setAutoDetectTopsFromPdf(false);
     setPipelineId((session as SessionDraft).pipeline_id ?? null);
     setPipelineJob(null);
-    setSummaryJob(session.latest_summary_job ?? null);
+    setSummaryJob(
+      "latest_summary_job" in session ? session.latest_summary_job ?? null : null
+    );
     setPipelineNotice(null);
     setDirectProtocolAvailable(false);
     setIsProcessing(false);
