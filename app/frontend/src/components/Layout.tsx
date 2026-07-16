@@ -11,8 +11,14 @@ export default function Layout({
       {/* Header */}
       <header className="bg-white border-b border-gray-200 px-6 py-4">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <h1 className="text-xl font-semibold text-gray-800">
-            Protokollierungsassistenz
+          <h1 className="flex items-center gap-3 text-xl font-semibold text-gray-800">
+            <img
+              src="/gremienpilot-icon.svg"
+              alt=""
+              aria-hidden="true"
+              className="h-9 w-9"
+            />
+            GremienPilot
           </h1>
           <div className="flex items-center gap-2">
             {onNewSessionClick && (

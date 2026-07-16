@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Protokollierungsassistenz - Setup Script for macOS/Linux
+# GremienPilot - Setup Script for macOS/Linux
 # Intelligentes Setup-Skript fuer nicht-technische Benutzer
 #
 # Verwendung:
@@ -123,7 +123,7 @@ fi
 show_help() {
     echo ""
     echo -e "${CYAN}=============================================="
-    echo "  Protokollierungsassistenz - Hilfe"
+    echo "  GremienPilot - Hilfe"
     echo -e "==============================================${NC}"
     echo ""
     echo "Verwendung: ./setup.sh [BEFEHL]"
@@ -874,7 +874,7 @@ open_browser() {
 do_build() {
     echo ""
     echo -e "${CYAN}=============================================="
-    echo "  Protokollierungsassistenz - Build"
+    echo "  GremienPilot - Build"
     echo -e "==============================================${NC}"
     echo ""
 
@@ -928,7 +928,7 @@ do_build() {
 do_start() {
     echo ""
     echo -e "${CYAN}=============================================="
-    echo "  Protokollierungsassistenz - Start"
+    echo "  GremienPilot - Start"
     echo -e "==============================================${NC}"
     echo ""
 
@@ -989,7 +989,7 @@ do_remove() {
 do_status() {
     echo ""
     echo -e "${CYAN}=============================================="
-    echo "  Protokollierungsassistenz - Status"
+    echo "  GremienPilot - Status"
     echo -e "==============================================${NC}"
     echo ""
 

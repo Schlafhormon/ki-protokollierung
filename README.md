@@ -1,7 +1,12 @@
-# Protokollierungsassistenz
+# GremienPilot
 
-Webanwendung zur automatischen Transkription, Sprechererkennung, TOP-Zuordnung,
-Zusammenfassung und Protokollerstellung aus Audioaufnahmen kommunaler Sitzungen.
+<p align="center">
+  <img src="app/frontend/public/gremienpilot-icon.svg" alt="GremienPilot Icon" width="144">
+</p>
+
+GremienPilot ist eine Webanwendung zur automatischen Transkription,
+Sprechererkennung, TOP-Zuordnung, Zusammenfassung und Protokollerstellung aus
+Audioaufnahmen kommunaler Sitzungen.
 
 Dieses Repository ist ein weiterentwickelter Fork der ursprünglichen
 Protokollierungsassistenz. Die Weiterentwicklung erfolgt durch
@@ -13,7 +18,7 @@ Protokollierungsassistenz. Die Weiterentwicklung erfolgt durch
   <img src="app/frontend/public/logos/Logo-jpeg_4c.jpg" alt="Stadt Doberlug-Kirchhain Logo" height="72">
 </p>
 
-## Was ist neu in diesem Fork?
+## Was bietet GremienPilot?
 
 - End-to-End-Pipeline vom Audio-Upload bis zur prüfbaren Protokollvorlage
 - automatische Sprecherdiarisierung mit lokalen Sprecherprofilen

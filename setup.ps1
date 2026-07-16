@@ -1,5 +1,5 @@
 #
-# Protokollierungsassistenz - Setup Script for Windows
+# GremienPilot - Setup Script for Windows
 # Intelligentes Setup-Skript fuer nicht-technische Benutzer
 #
 # Verwendung:
@@ -107,7 +107,7 @@ if ($script:BUILD_LOCAL_IMAGES) {
 function Show-Help {
     Write-Host ""
     Write-Host "==============================================" -ForegroundColor Cyan
-    Write-Host "  Protokollierungsassistenz - Hilfe" -ForegroundColor Cyan
+    Write-Host "  GremienPilot - Hilfe" -ForegroundColor Cyan
     Write-Host "==============================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Verwendung: .\setup.ps1 [BEFEHL]"
@@ -841,7 +841,7 @@ function Show-SuccessMessage {
 function Invoke-Build {
     Write-Host ""
     Write-Host "==============================================" -ForegroundColor Cyan
-    Write-Host "  Protokollierungsassistenz - Build" -ForegroundColor Cyan
+    Write-Host "  GremienPilot - Build" -ForegroundColor Cyan
     Write-Host "==============================================" -ForegroundColor Cyan
     Write-Host ""
 
@@ -926,7 +926,7 @@ function Invoke-Build {
 function Invoke-Start {
     Write-Host ""
     Write-Host "==============================================" -ForegroundColor Cyan
-    Write-Host "  Protokollierungsassistenz - Start" -ForegroundColor Cyan
+    Write-Host "  GremienPilot - Start" -ForegroundColor Cyan
     Write-Host "==============================================" -ForegroundColor Cyan
     Write-Host ""
 
@@ -991,7 +991,7 @@ function Invoke-Remove {
 function Show-Status {
     Write-Host ""
     Write-Host "==============================================" -ForegroundColor Cyan
-    Write-Host "  Protokollierungsassistenz - Status" -ForegroundColor Cyan
+    Write-Host "  GremienPilot - Status" -ForegroundColor Cyan
     Write-Host "==============================================" -ForegroundColor Cyan
     Write-Host ""
 

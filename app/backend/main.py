@@ -187,7 +187,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Protokollierungsassistenz API",
+    title="GremienPilot API",
     description="API für die automatische Erstellung von Sitzungsprotokollen",
     version="0.1.0",
     lifespan=lifespan,
@@ -3313,7 +3313,7 @@ def request_pipeline_cancellation(pipeline_id: str) -> dict[str, Any] | None:
 
 @app.get("/")
 async def root():
-    return {"message": "Protokollierungsassistenz API", "version": "0.1.0"}
+    return {"message": "GremienPilot API", "version": "0.1.0"}
 
 
 @app.get("/health")

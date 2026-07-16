@@ -1,7 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 
 /**
- * Shared type definitions for the Protokollierungsassistenz
+ * Shared type definitions for GremienPilot
  */
 
 // API Types

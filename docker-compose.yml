@@ -1,4 +1,4 @@
-# Docker Compose for Protokollierungsassistenz
+# Docker Compose for GremienPilot
 # Uses pre-built images from GitHub Container Registry (ghcr.io)
 # No HuggingFace token required - models are pre-bundled in the images!
 #

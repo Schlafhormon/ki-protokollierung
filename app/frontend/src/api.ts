@@ -1,5 +1,5 @@
 /**
- * API client for the Protokollierungsassistenz backend
+ * API client for the GremienPilot backend
  */
 
 import type {

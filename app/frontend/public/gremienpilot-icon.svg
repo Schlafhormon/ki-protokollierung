@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">GremienPilot</title>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="#1c4567"/>
+  <path
+    d="M360 148a160 160 0 1 0 0 216"
+    fill="none"
+    stroke="#fff"
+    stroke-linecap="round"
+    stroke-width="64"
+  />
+  <path d="M256 256h112" fill="none" stroke="#fff" stroke-linecap="round" stroke-width="64"/>
+  <path
+    d="m282 233 108-47-48 97z"
+    fill="#4bc3c1"
+    stroke="#1c4567"
+    stroke-linejoin="round"
+    stroke-width="12"
+  />
+</svg>

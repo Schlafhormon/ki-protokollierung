@@ -1,6 +1,6 @@
-# TUIV Kubernetes Deployment
+# GremienPilot Kubernetes Deployment
 
-Kubernetes manifests for deploying TUIV (Protokollierungsassistenz) on the HPI cluster with GPU-accelerated transcription.
+Kubernetes manifests for deploying GremienPilot on the HPI cluster with GPU-accelerated transcription.
 
 ## Prerequisites
 

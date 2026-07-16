@@ -3891,7 +3891,7 @@ wheels = [
 ]
 
 [[package]]
-name = "tuiv-backend"
+name = "gremienpilot-backend"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
