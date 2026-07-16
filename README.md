@@ -27,8 +27,38 @@ Protokollierungsassistenz. Die Weiterentwicklung erfolgt durch
 - Export als DOCX, PDF oder TXT mit Metadaten, Sprecherliste, Transkript-Auszug und Generierungshinweis
 - lokales Docker-Setup mit CPU- oder optionalem NVIDIA-GPU-Betrieb
 
-Die bisherigen Screenshots wurden entfernt, weil sie den aktuellen Stand der
-Anwendung nicht mehr abbilden.
+## Einblicke in die Anwendung
+
+Vom Upload der Sitzungsunterlagen bis zum geprüften und exportierbaren
+Protokoll führt die Anwendung durch einen übersichtlichen, weitgehend
+automatisierten Ablauf.
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/gremienpilot%20start.png">
+        <img src="docs/screenshots/gremienpilot%20start.png" alt="Start einer neuen Sitzung mit Audio- und PDF-Upload" width="100%">
+      </a>
+      <br>
+      <strong>1. Sitzung starten</strong><br>
+      Audio und optional eine Einladung hochladen, Automatisierung auswählen
+      und die Verarbeitung starten.
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/gremienpilot%20ende.png">
+        <img src="docs/screenshots/gremienpilot%20ende.png" alt="Geprüftes Protokoll mit Tagesordnung, Transkript und Exportoptionen" width="100%">
+      </a>
+      <br>
+      <strong>2. Ergebnis prüfen und exportieren</strong><br>
+      Erkannte TOPs, Sprecher und Zusammenfassungen kontrollieren und das
+      fertige Protokoll exportieren.
+    </td>
+  </tr>
+</table>
+
+> Die Screenshots zeigen nur einen kleinen Ausschnitt der Möglichkeiten. Unter
+> anderem bietet die Anwendung weitere Funktionen zur Sprecherverwaltung,
+> Sitzungswiederherstellung, gezielten Nachbearbeitung und zum Export.
 
 ## Typischer Ablauf
 
